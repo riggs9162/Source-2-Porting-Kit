@@ -6,7 +6,7 @@ The **Source 2 Porting Kit** is a developer toolkit designed to simplify the pro
 
 - **GUI Interface**: Provides a user-friendly interface for managing assets and configurations.
 - **Texture Conversion**: Automatically converts PNGs into VTFs and VMTs, including support for provided normal maps.
-- **Model Conversion**: Generates QC files with the given SMDs for models. Note that this is not intended for final releases, you will need to manually adjust surface properties, animations, and other details.
+- **Model Conversion**: Generates QC files with the given SMDs for models. Note that this is not intended for final releases, you will need to manually adjust surface properties, animations, and other details. The VMT shader type can be selected from *VertexLitGeneric*, *LightmappedGeneric*, or *UnlitGeneric*.
 - **Config Saving**: Saves paths and settings in a configuration file for easy access and reuse.
 - **Batch Processing**: Supports batch processing of multiple assets to streamline the porting workflow.
 

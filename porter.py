@@ -19,7 +19,7 @@ try:
 except ImportError:
     DND_AVAILABLE = False
 
-CONFIG_FILE = "smd_fixer_config.json"
+CONFIG_FILE = "config.json"
 DIGIT_SUFFIX_PATTERN = re.compile(r"^(?P<base>.+)\.(?P<digits>\d{3})\.smd$", re.IGNORECASE)
 CONTENT_SUFFIX_PATTERN = re.compile(r"(?P<name>\b[\w\d\-_]+)\.\d{3}\b")
 
@@ -130,7 +130,7 @@ def convert_png_to_vtf(vtf_lib, png_src, vtf_dst, clamp):
     vtf_lib.image_save(vtf_dst)
     return True
 
-def texture_conversion_folder(input_dir, output_dir, material_path, clamp):
+def texture_conversion_folder(input_dir, output_dir, material_path, clamp, vmt_type):
     if not os.path.isdir(input_dir):
         messagebox.showerror("Textures", f"Input not found:\n{input_dir}")
         return
@@ -166,7 +166,7 @@ def texture_conversion_folder(input_dir, output_dir, material_path, clamp):
         if nm:
             convert_png_to_vtf(vtf_lib, os.path.join(input_dir,nm), vtf_n, clamp)
         with open(vmt,"w",encoding="utf-8") as f:
-            f.write('"VertexLitGeneric"\n{\n')
+            f.write(f'"{vmt_type}"\n{{\n')
             f.write(f'    "$basetexture" "{material_path}/{bname}"\n')
             if nm:
                 f.write(f'    "$bumpmap" "{material_path}/{bname}_normal"\n')
@@ -273,8 +273,20 @@ class TextureTab(ttk.Frame):
         self.entry_clamp.insert(0, str(config.get("texture_clamp", 0)))
         self.entry_clamp.grid(row=3, column=1, sticky="w", padx=5, pady=5)
 
+        # Shader type dropdown
+        ttk.Label(self, text="VMT Type:").grid(row=4, column=0, pady=5, padx=5, sticky="e")
+        self.shader_var = tk.StringVar(value=config.get("texture_shader", "VertexLitGeneric"))
+        self.combo_shader = ttk.Combobox(
+            self,
+            textvariable=self.shader_var,
+            values=["VertexLitGeneric", "LightmappedGeneric", "UnlitGeneric"],
+            state="readonly",
+            width=20,
+        )
+        self.combo_shader.grid(row=4, column=1, sticky="w", padx=5, pady=5)
+
         # Run button
-        ttk.Button(self, text="Convert Textures", command=self.on_run).grid(row=4, column=0, columnspan=3, pady=10)
+        ttk.Button(self, text="Convert Textures", command=self.on_run).grid(row=5, column=0, columnspan=3, pady=10)
         self.columnconfigure(1, weight=1)
 
     def on_run(self):
@@ -285,14 +297,16 @@ class TextureTab(ttk.Frame):
             clamp = int(self.entry_clamp.get().strip())
         except ValueError:
             return messagebox.showerror("Textures", "Clamp size must be an integer.")
+        shader = self.shader_var.get().strip()
         if not (input_dir and output_dir and material_path):
             return messagebox.showerror("Textures", "Fill in all fields.")
         self.config["texture_input"] = input_dir
         self.config["texture_output"] = output_dir
         self.config["texture_material"] = material_path
         self.config["texture_clamp"] = clamp
+        self.config["texture_shader"] = shader
         save_config(self.config)
-        texture_conversion_folder(input_dir, output_dir, material_path, clamp)
+        texture_conversion_folder(input_dir, output_dir, material_path, clamp, shader)
 
 class QcGenTab(ttk.Frame):
     def __init__(self, parent, config):
