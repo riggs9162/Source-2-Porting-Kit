@@ -18,15 +18,8 @@ The **Source 2 Porting Kit** is a developer toolkit designed to simplify the pro
 
 ## Installation
 
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/your-repo/source2-to-source1-porting-kit.git
-   ```
-2. Install Python dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-3. Install the Source 2 Viewer to port models and textures:
+1. Clone the repository to your local machine.
+2. Install the Source 2 Viewer to port models and textures:
    - Download the Source 2 Viewer from "https://valveresourceformat.github.io/"
    - Export the models and textures you want to port from Source 2.
 
