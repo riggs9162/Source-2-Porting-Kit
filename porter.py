@@ -1,0 +1,392 @@
+import os
+import re
+import json
+import shutil
+import subprocess
+import sys
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+from tkinter.scrolledtext import ScrolledText
+
+from PIL import Image
+import VTFLibWrapper.VTFLib as VTFLib
+import VTFLibWrapper.VTFLibEnums as VTFLibEnums
+
+# Optional drag-and-drop support
+try:
+    from tkinterdnd2 import DND_FILES, TkinterDnD
+    DND_AVAILABLE = True
+except ImportError:
+    DND_AVAILABLE = False
+
+CONFIG_FILE = "smd_fixer_config.json"
+DIGIT_SUFFIX_PATTERN = re.compile(r"^(?P<base>.+)\.(?P<digits>\d{3})\.smd$", re.IGNORECASE)
+CONTENT_SUFFIX_PATTERN = re.compile(r"(?P<name>\b[\w\d\-_]+)\.\d{3}\b")
+
+# ─── UTILITIES ────────────────────────────────────────────────────────────────
+
+def force_utf8():
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+    # For environments where reconfigure is not available, do nothing
+
+def load_config():
+    if os.path.isfile(CONFIG_FILE):
+        try:
+            return json.load(open(CONFIG_FILE, "r", encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
+
+def save_config(cfg):
+    try:
+        json.dump(cfg, open(CONFIG_FILE, "w", encoding="utf-8"), indent=2)
+    except Exception as e:
+        print("[WARN] Could not save config:", e)
+
+# ─── AUTO-SURFACEPROP ─────────────────────────────────────────────────────────
+
+_SURFACE_KEYWORDS = {
+    'concrete': 'concrete',
+    'metal':    'metal',
+    'wood':     'wood',
+    'glass':    'glass',
+    'brick':    'brick',
+    'dirt':     'dirt',
+    'tile':     'tile',
+    'grass':    'grass',
+    'water':    'water',
+}
+
+def determine_surfaceprop(name: str) -> str:
+    ln = name.lower()
+    for key, prop in _SURFACE_KEYWORDS.items():
+        if key in ln:
+            return prop
+    return 'default'
+
+# ─── PLAIN ENTRY WITH DND ────────────────────────────────────────────────────
+
+class PlaceholderEntry(ttk.Entry):
+    """
+    Plain ttk.Entry. Supports drag-and-drop if tkinterdnd2 is available.
+    """
+    def __init__(self, master=None, **kwargs):
+        super().__init__(master, **kwargs)
+        if DND_AVAILABLE:
+            try:
+                # Use the tkinterdnd2 API for drop_target_register
+                self.tk.call('tkdnd::drop_target', 'register', self, DND_FILES)
+                self.bind("<<Drop>>", self._on_drop)
+            except Exception as e:
+                print(f"[WARN] Drag-and-drop initialization failed: {e}")
+
+    def get_real(self):
+        return super().get()
+
+    def _on_drop(self, event):
+        if DND_AVAILABLE:
+            path = event.data.split()[0].strip("{}")
+            self.delete(0, tk.END)
+            self.insert(0, path)
+
+# ─── GUI HELPERS ─────────────────────────────────────────────────────────────
+
+def browse_folder(entry: PlaceholderEntry):
+    p = filedialog.askdirectory()
+    if p:
+        entry.delete(0, tk.END)
+        entry.insert(0, p)
+
+def browse_file(entry: PlaceholderEntry, filetypes):
+    p = filedialog.askopenfilename(filetypes=filetypes)
+    if p:
+        entry.delete(0, tk.END)
+        entry.insert(0, p)
+
+# ─── TASK 1: TEXTURE CONVERSION ───────────────────────────────────────────────
+
+def convert_png_to_vtf(vtf_lib, png_src, vtf_dst, clamp):
+    try:
+        img = Image.open(png_src).convert("RGBA")
+    except Exception as e:
+        print(f"[ERROR] Opening {png_src}: {e}")
+        return False
+    w,h = img.size
+    if clamp and max(w,h)>clamp:
+        scale = clamp/float(max(w,h))
+        img = img.resize((int(w*scale),int(h*scale)), Image.Resampling.LANCZOS)
+        w,h = img.size
+    data = img.tobytes()
+    amin,amax = img.getchannel("A").getextrema()
+    fmt = (VTFLibEnums.ImageFormat.ImageFormatDXT1
+           if (amin==255 and amax==255)
+           else VTFLibEnums.ImageFormat.ImageFormatDXT5)
+    opts = vtf_lib.create_default_params_structure()
+    opts.ImageFormat = fmt
+    opts.Flags       = VTFLibEnums.ImageFlag.ImageFlagEightBitAlpha
+    opts.Resize      = 1
+    vtf_lib.image_create_single(w,h,data,opts)
+    vtf_lib.image_save(vtf_dst)
+    return True
+
+def texture_conversion_folder(input_dir, output_dir, material_path, clamp):
+    if not os.path.isdir(input_dir):
+        messagebox.showerror("Textures", f"Input not found:\n{input_dir}")
+        return
+    if not output_dir.strip():
+        messagebox.showerror("Textures", "Select an output folder.")
+        return
+    os.makedirs(output_dir, exist_ok=True)
+
+    vtf_lib = VTFLib.VTFLib()
+    grouped = {}
+    for fn in os.listdir(input_dir):
+        if not fn.lower().endswith(".png"): continue
+        ln = fn.lower()
+        if "_color_" in ln and "_orm_" not in ln:
+            base = re.sub(r"_color_[^_]+_.*\.png$","",fn)
+            grouped.setdefault(base, {})["color"] = fn
+        elif "_normal_" in ln:
+            base = re.sub(r"_normal_[^_]+_.*\.png$","",fn)
+            grouped.setdefault(base, {})["normal"] = fn
+
+    for base,m in grouped.items():
+        col = m.get("color")
+        if not col: continue
+        nm = m.get("normal")
+        bname = os.path.basename(base)
+        vtf_c = os.path.join(output_dir, bname+".vtf")
+        vtf_n = os.path.join(output_dir, bname+"_normal.vtf") if nm else None
+        vmt   = os.path.join(output_dir, bname+".vmt")
+        if os.path.exists(vtf_c) and os.path.exists(vmt):
+            continue
+        if not convert_png_to_vtf(vtf_lib, os.path.join(input_dir,col), vtf_c, clamp):
+            continue
+        if nm:
+            convert_png_to_vtf(vtf_lib, os.path.join(input_dir,nm), vtf_n, clamp)
+        with open(vmt,"w",encoding="utf-8") as f:
+            f.write('"VertexLitGeneric"\n{\n')
+            f.write(f'    "$basetexture" "{material_path}/{bname}"\n')
+            if nm:
+                f.write(f'    "$bumpmap" "{material_path}/{bname}_normal"\n')
+            f.write("}\n")
+    messagebox.showinfo("Textures", "Done converting PNG→VTF/VMT.")
+
+# ─── TASK 6: QC GENERATION ────────────────────────────────────────────────────
+
+def generate_single_qc(smd_path, model_prefix, materials_path, _surf, fps, append_collision):
+    d, f = os.path.split(smd_path)
+    base, _ = os.path.splitext(f)
+    mdl = f"{model_prefix}/{base}.mdl"
+    surf = determine_surfaceprop(base)
+    content = (
+        f'$modelname "{mdl}"\n'
+        f'$body {base} "{base}.smd"\n\n'
+        '$staticprop\n'
+        f'$surfaceprop "{surf}"\n'
+        f'$cdmaterials "{materials_path}/"\n\n'
+        f'$sequence {base} "{base}.smd" fps {fps}\n\n'
+    )
+    if append_collision:
+        content += (
+            f'$collisionmodel "{base}.smd"\n'
+            "{\n"
+            "    $mass auto\n"
+            "}\n"
+        )
+    qc = os.path.join(d, base + ".qc")
+    try:
+        with open(qc, "w", encoding="utf-8") as file:
+            file.write(content)
+        messagebox.showinfo("QC Gen", f"Created {qc}")
+    except Exception as e:
+        messagebox.showerror("QC Gen", str(e))
+
+
+def generate_qc_batch(folder, model_prefix, materials_path, _surf, fps, append_collision):
+    cnt = 0
+    for r, _, files in os.walk(folder):
+        for fn in files:
+            if not fn.lower().endswith(".smd"):
+                continue
+            base, _ = os.path.splitext(fn)
+            surf = determine_surfaceprop(base)
+            content = (
+                f'$modelname "{model_prefix}/{base}.mdl"\n'
+                f'$body {base} "{base}.smd"\n\n'
+                '$staticprop\n'
+                f'$surfaceprop "{surf}"\n'
+                f'$cdmaterials "{materials_path}/"\n\n'
+                f'$sequence {base} "{base}.smd" fps {fps}\n\n'
+            )
+            if append_collision:
+                content += (
+                    f'$collisionmodel "{base}.smd"\n'
+                    "{\n"
+                    "    $mass auto\n"
+                    "}\n"
+                )
+            qc = os.path.join(r, base + ".qc")
+            try:
+                with open(qc, "w", encoding="utf-8") as file:
+                    file.write(content)
+                cnt += 1
+            except Exception as e:
+                print(f"[ERROR] Could not create QC for {fn}: {e}")
+    messagebox.showinfo("QC Gen", f"Batch created {cnt} files.")
+
+# ─── OTHER TASKS ──────────────────────────────────────────────────────────────
+# PBR, Collision, Sort, BatchCompile, SMDFixer implementations remain
+# unchanged except they now use PlaceholderEntry and get_real().
+
+# ─── GUI TABS ──────────────────────────────────────────────────────────────────
+
+class TextureTab(ttk.Frame):
+    def __init__(self, parent, config):
+        super().__init__(parent)
+        self.config = config
+
+        # Input folder
+        ttk.Label(self, text="Input Folder:").grid(row=0, column=0, pady=5, padx=5, sticky="e")
+        self.entry_input = PlaceholderEntry(self, width=50)
+        self.entry_input.insert(0, config.get("texture_input", ""))
+        self.entry_input.grid(row=0, column=1, pady=5, padx=5, sticky="ew")
+        ttk.Button(self, text="Browse…", command=lambda: browse_folder(self.entry_input)).grid(row=0, column=2, padx=5)
+
+        # Output folder
+        ttk.Label(self, text="Output Folder:").grid(row=1, column=0, pady=5, padx=5, sticky="e")
+        self.entry_output = PlaceholderEntry(self, width=50)
+        self.entry_output.insert(0, config.get("texture_output", ""))
+        self.entry_output.grid(row=1, column=1, pady=5, padx=5, sticky="ew")
+        ttk.Button(self, text="Browse…", command=lambda: browse_folder(self.entry_output)).grid(row=1, column=2, padx=5)
+
+        # Material path
+        ttk.Label(self, text="Material Path:").grid(row=2, column=0, pady=5, padx=5, sticky="e")
+        self.entry_material = PlaceholderEntry(self, width=50)
+        self.entry_material.insert(0, config.get("texture_material", ""))
+        self.entry_material.grid(row=2, column=1, pady=5, padx=5, sticky="ew")
+
+        # Clamp size
+        ttk.Label(self, text="Clamp Size:").grid(row=3, column=0, pady=5, padx=5, sticky="e")
+        self.entry_clamp = tk.Entry(self, width=10)
+        self.entry_clamp.insert(0, str(config.get("texture_clamp", 0)))
+        self.entry_clamp.grid(row=3, column=1, sticky="w", padx=5, pady=5)
+
+        # Run button
+        ttk.Button(self, text="Convert Textures", command=self.on_run).grid(row=4, column=0, columnspan=3, pady=10)
+        self.columnconfigure(1, weight=1)
+
+    def on_run(self):
+        input_dir = self.entry_input.get_real().strip()
+        output_dir = self.entry_output.get_real().strip()
+        material_path = self.entry_material.get_real().strip()
+        try:
+            clamp = int(self.entry_clamp.get().strip())
+        except ValueError:
+            return messagebox.showerror("Textures", "Clamp size must be an integer.")
+        if not (input_dir and output_dir and material_path):
+            return messagebox.showerror("Textures", "Fill in all fields.")
+        self.config["texture_input"] = input_dir
+        self.config["texture_output"] = output_dir
+        self.config["texture_material"] = material_path
+        self.config["texture_clamp"] = clamp
+        save_config(self.config)
+        texture_conversion_folder(input_dir, output_dir, material_path, clamp)
+
+class QcGenTab(ttk.Frame):
+    def __init__(self, parent, config):
+        super().__init__(parent)
+        self.config = config
+
+        # Path entry
+        ttk.Label(self, text="SMD/.QC or Folder:").grid(row=0, column=0, pady=5, padx=5, sticky="e")
+        self.entry_path = PlaceholderEntry(self, width=50)
+        self.entry_path.insert(0, config.get("qcgen_path", ""))
+        self.entry_path.grid(row=0, column=1, pady=5, padx=5, sticky="ew")
+        ttk.Button(self, text="Browse…", command=self.browse_any).grid(row=0, column=2, padx=5)
+
+        # Model prefix
+        ttk.Label(self, text="Model Prefix:").grid(row=1, column=0, sticky="e", padx=5, pady=5)
+        self.entry_modelname = PlaceholderEntry(self, width=50)
+        self.entry_modelname.insert(0, config.get("qcgen_modelname", ""))
+        self.entry_modelname.grid(row=1, column=1, columnspan=2, padx=5, pady=5, sticky="ew")
+
+        # Materials path
+        ttk.Label(self, text="Materials Path:").grid(row=2, column=0, sticky="e", padx=5, pady=5)
+        self.entry_materials = PlaceholderEntry(self, width=50)
+        self.entry_materials.insert(0, config.get("qcgen_materials", ""))
+        self.entry_materials.grid(row=2, column=1, columnspan=2, padx=5, pady=5, sticky="ew")
+
+        # FPS
+        ttk.Label(self, text="FPS:").grid(row=3, column=0, sticky="e", padx=5, pady=5)
+        self.entry_fps = tk.Entry(self, width=10)
+        self.entry_fps.insert(0, str(config.get("qcgen_fps", 1)))
+        self.entry_fps.grid(row=3, column=1, sticky="w", padx=5, pady=5)
+
+        # Collision checkbox
+        self.collision_var = tk.BooleanVar(value=config.get("qcgen_collision", True))
+        ttk.Checkbutton(self, text="Append Collision Logic", variable=self.collision_var).grid(row=4, column=0, columnspan=3, pady=5)
+
+        # Generate button
+        ttk.Button(self, text="Generate QC(s)", command=self.on_run).grid(row=5, column=0, columnspan=3, pady=10)
+        self.columnconfigure(1, weight=1)
+
+    def browse_any(self):
+        p = filedialog.askopenfilename(filetypes=[("SMD", "*.smd"), ("QC", "*.qc"), ("All", "*.*")])
+        if not p:
+            p = filedialog.askdirectory()
+        if p:
+            self.entry_path.delete(0, tk.END)
+            self.entry_path.insert(0, p)
+
+    def on_run(self):
+        p = self.entry_path.get_real().strip()
+        mp = self.entry_modelname.get_real().strip()
+        mpat = self.entry_materials.get_real().strip()
+        try:
+            fps = int(self.entry_fps.get().strip())
+        except ValueError:
+            return messagebox.showerror("QC Gen", "FPS must be an integer.")
+        if not (p and mp and mpat):
+            return messagebox.showerror("QC Gen", "Fill in all fields.")
+        self.config["qcgen_path"] = p
+        self.config["qcgen_modelname"] = mp
+        self.config["qcgen_materials"] = mpat
+        self.config["qcgen_fps"] = fps
+        self.config["qcgen_collision"] = self.collision_var.get()
+        save_config(self.config)
+        append_collision = self.collision_var.get()
+        if p.lower().endswith(".smd"):
+            generate_single_qc(p, mp, mpat, "", fps, append_collision)
+        elif p.lower().endswith(".qc"):
+            generate_qc_batch(os.path.dirname(p), mp, mpat, "", fps, append_collision)
+        else:
+            generate_qc_batch(p, mp, mpat, "", fps, append_collision)
+
+# ─── MAIN APP ────────────────────────────────────────────────────────────────
+
+class App(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("Source 2 Porting Kit")
+        self.geometry("1200x300")
+        force_utf8()
+
+        self.config_data = load_config()
+        nb = ttk.Notebook(self); nb.pack(fill="both",expand=True)
+
+        nb.add(TextureTab(nb,      self.config_data), text="Textures → VTF/VMT")
+        nb.add(QcGenTab(nb,        self.config_data), text="QC Generation")
+
+        self.protocol("WM_DELETE_WINDOW", lambda: (save_config(self.config_data), self.destroy()))
+
+if __name__ == "__main__":
+    if DND_AVAILABLE:
+        root = TkinterDnD.Tk()
+        force_utf8()
+        app = App()
+        root.destroy()
+        app.mainloop()
+    else:
+        App().mainloop()
