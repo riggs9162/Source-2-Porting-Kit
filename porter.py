@@ -130,6 +130,13 @@ def convert_png_to_vtf(vtf_lib, png_src, vtf_dst, clamp):
     vtf_lib.image_save(vtf_dst)
     return True
 
+def _extract_base_name(filename: str) -> str:
+    """Return the texture name without the Source 2 suffixes."""
+    name = os.path.splitext(os.path.basename(filename))[0]
+    m = re.match(r"(.*?)(?:_color_|_normal_).*", name, re.IGNORECASE)
+    return m.group(1) if m else name
+
+
 def texture_conversion_folder(input_dir, output_dir, material_path, clamp, vmt_type):
     if not os.path.isdir(input_dir):
         messagebox.showerror("Textures", f"Input not found:\n{input_dir}")
@@ -145,10 +152,10 @@ def texture_conversion_folder(input_dir, output_dir, material_path, clamp, vmt_t
         if not fn.lower().endswith(".png"): continue
         ln = fn.lower()
         if "_color_" in ln and "_orm_" not in ln:
-            base = re.sub(r"_color_[^_]+_.*\.png$","",fn)
+            base = _extract_base_name(fn)
             grouped.setdefault(base, {})["color"] = fn
         elif "_normal_" in ln:
-            base = re.sub(r"_normal_[^_]+_.*\.png$","",fn)
+            base = _extract_base_name(fn)
             grouped.setdefault(base, {})["normal"] = fn
 
     for base,m in grouped.items():
