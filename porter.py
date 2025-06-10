@@ -27,8 +27,7 @@ CONTENT_SUFFIX_PATTERN = re.compile(r"(?P<name>\b[\w\d\-_]+)\.\d{3}\b")
 
 def force_utf8():
     if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8")
-    # For environments where reconfigure is not available, do nothing
+        sys.stdout.reconfigure(encoding="utf-8") # type: ignore
 
 def load_config():
     if os.path.isfile(CONFIG_FILE):
@@ -47,21 +46,24 @@ def save_config(cfg):
 # ─── AUTO-SURFACEPROP ─────────────────────────────────────────────────────────
 
 _SURFACE_KEYWORDS = {
-    'concrete': 'concrete',
-    'metal':    'metal',
-    'wood':     'wood',
-    'glass':    'glass',
     'brick':    'brick',
+    'concrete': 'concrete',
     'dirt':     'dirt',
-    'tile':     'tile',
+    'glass':    'glass',
     'grass':    'grass',
+    'gravel':   'gravel',
+    'metal':    'metal',
+    'plaster':  'plaster',
+    'sand':     'sand',
+    'tile':     'tile',
     'water':    'water',
+    'wood':     'wood',
 }
 
 def determine_surfaceprop(name: str) -> str:
     ln = name.lower()
-    for key, prop in _SURFACE_KEYWORDS.items():
-        if key in ln:
+    for keyword, prop in _SURFACE_KEYWORDS.items():
+        if ln.startswith(keyword) or ln.endswith(keyword) or keyword in ln:
             return prop
     return 'default'
 
@@ -75,7 +77,6 @@ class PlaceholderEntry(ttk.Entry):
         super().__init__(master, **kwargs)
         if DND_AVAILABLE:
             try:
-                # Use the tkinterdnd2 API for drop_target_register
                 self.tk.call('tkdnd::drop_target', 'register', self, DND_FILES)
                 self.bind("<<Drop>>", self._on_drop)
             except Exception as e:
@@ -137,7 +138,7 @@ def _extract_base_name(filename: str) -> str:
     return m.group(1) if m else name
 
 
-def texture_conversion_folder(input_dir, output_dir, material_path, clamp, vmt_type):
+def texture_conversion_folder(input_dir, output_dir, material_path, clamp, vmt_type, surface_prop, extra_params=None):
     if not os.path.isdir(input_dir):
         messagebox.showerror("Textures", f"Input not found:\n{input_dir}")
         return
@@ -149,7 +150,8 @@ def texture_conversion_folder(input_dir, output_dir, material_path, clamp, vmt_t
     vtf_lib = VTFLib.VTFLib()
     grouped = {}
     for fn in os.listdir(input_dir):
-        if not fn.lower().endswith(".png"): continue
+        if not fn.lower().endswith(".png"):
+            continue
         ln = fn.lower()
         if "_color_" in ln and "_orm_" not in ln:
             base = _extract_base_name(fn)
@@ -158,27 +160,38 @@ def texture_conversion_folder(input_dir, output_dir, material_path, clamp, vmt_t
             base = _extract_base_name(fn)
             grouped.setdefault(base, {})["normal"] = fn
 
-    for base,m in grouped.items():
+    for base, m in grouped.items():
         col = m.get("color")
-        if not col: continue
+        if not col:
+            continue
         nm = m.get("normal")
         bname = os.path.basename(base)
-        vtf_c = os.path.join(output_dir, bname+".vtf")
-        vtf_n = os.path.join(output_dir, bname+"_normal.vtf") if nm else None
-        vmt   = os.path.join(output_dir, bname+".vmt")
+        vtf_c = os.path.join(output_dir, bname + ".vtf")
+        vtf_n = os.path.join(output_dir, bname + "_normal.vtf") if nm else None
+        vmt = os.path.join(output_dir, bname + ".vmt")
+        vmt_type = vmt_type if vmt_type in ["VertexLitGeneric", "LightmappedGeneric", "UnlitGeneric", "WorldVertexTransition"] else "VertexLitGeneric"
+        if (surface_prop == "default" or not surface_prop):
+            surface_prop = determine_surfaceprop(bname)
         if os.path.exists(vtf_c) and os.path.exists(vmt):
             continue
-        if not convert_png_to_vtf(vtf_lib, os.path.join(input_dir,col), vtf_c, clamp):
+        if not convert_png_to_vtf(vtf_lib, os.path.join(input_dir, col), vtf_c, clamp):
             continue
         if nm:
-            convert_png_to_vtf(vtf_lib, os.path.join(input_dir,nm), vtf_n, clamp)
-        with open(vmt,"w",encoding="utf-8") as f:
+            convert_png_to_vtf(vtf_lib, os.path.join(input_dir, nm), vtf_n, clamp)
+        with open(vmt, "w", encoding="utf-8") as f:
             f.write(f'"{vmt_type}"\n{{\n')
             f.write(f'    "$basetexture" "{material_path}/{bname}"\n')
             if nm:
-                f.write(f'    "$bumpmap" "{material_path}/{bname}_normal"\n')
+                f.write(f'    "$bumpmap" "{material_path}/{bname}_normal"\n\n')
+            f.write(f'    "$surfaceprop" "{surface_prop}"\n\n')
+            if vmt_type == "VertexLitGeneric":
+                f.write('    "$model" "1"\n\n')
+            if extra_params:
+                for k, v in extra_params.items():
+                    f.write(f'    "${k}" "{v}"\n')
             f.write("}\n")
-    messagebox.showinfo("Textures", "Done converting PNG→VTF/VMT.")
+    messagebox.showinfo("Textures", "Texture conversion complete.\n"
+                        f"Converted {len(grouped)} textures to VTF/VMT in {output_dir}.")
 
 # ─── TASK 6: QC GENERATION ────────────────────────────────────────────────────
 
@@ -243,10 +256,6 @@ def generate_qc_batch(folder, model_prefix, materials_path, _surf, fps, append_c
                 print(f"[ERROR] Could not create QC for {fn}: {e}")
     messagebox.showinfo("QC Gen", f"Batch created {cnt} files.")
 
-# ─── OTHER TASKS ──────────────────────────────────────────────────────────────
-# PBR, Collision, Sort, BatchCompile, SMDFixer implementations remain
-# unchanged except they now use PlaceholderEntry and get_real().
-
 # ─── GUI TABS ──────────────────────────────────────────────────────────────────
 
 class TextureTab(ttk.Frame):
@@ -276,35 +285,52 @@ class TextureTab(ttk.Frame):
 
         # Clamp size
         ttk.Label(self, text="Clamp Size:").grid(row=3, column=0, pady=5, padx=5, sticky="e")
-        self.entry_clamp = tk.Entry(self, width=10)
+        self.entry_clamp = PlaceholderEntry(self, width=50)
         self.entry_clamp.insert(0, str(config.get("texture_clamp", 0)))
         self.entry_clamp.grid(row=3, column=1, sticky="w", padx=5, pady=5)
 
-        # Shader type dropdown
+        # Shader type
         ttk.Label(self, text="VMT Type:").grid(row=4, column=0, pady=5, padx=5, sticky="e")
-        self.shader_var = tk.StringVar(value=config.get("texture_shader", "VertexLitGeneric"))
-        self.combo_shader = ttk.Combobox(
-            self,
-            textvariable=self.shader_var,
-            values=["VertexLitGeneric", "LightmappedGeneric", "UnlitGeneric"],
-            state="readonly",
-            width=20,
-        )
-        self.combo_shader.grid(row=4, column=1, sticky="w", padx=5, pady=5)
+        self.entry_shader = PlaceholderEntry(self, width=50)
+        self.entry_shader.insert(0, str(config.get("texture_shader", "VertexLitGeneric")))
+        self.entry_shader.grid(row=4, column=1, sticky="w", padx=5, pady=5)
+        ttk.Label(self, text="(VertexLitGeneric, LightmappedGeneric, UnlitGeneric, WorldVertexTransition)").grid(row=4, column=2, sticky="w", padx=5)
+
+        # Surface property
+        ttk.Label(self, text="Surface Property:").grid(row=5, column=0, pady=5, padx=5, sticky="e")
+        self.entry_surface = PlaceholderEntry(self, width=50)
+        self.entry_surface.insert(0, str(config.get("texture_surface", "")))
+        self.entry_surface.grid(row=5, column=1, sticky="w", padx=5, pady=5)
+        ttk.Label(self, text="(default, concrete, metal, wood, glass, brick, dirt, tile, grass, water)").grid(row=5, column=2, sticky="w", padx=5)
+
+        # Extra parameters (optional)
+        ttk.Label(self, text="Extra Parameters (JSON):").grid(row=6, column=0, pady=5, padx=5, sticky="e")
+        self.extra_params_text = ScrolledText(self, width=50, height=10)
+        self.extra_params_text.insert(tk.END, json.dumps(config.get("texture_extra_params", {}), indent=2))
+        self.extra_params_text.grid(row=6, column=1, columnspan=2, pady=5, padx=5, sticky="ew")
+
+        # Extra parameters info
+        ttk.Label(self, text="Optional parameters for VMT. Example:").grid(row=7, column=0, columnspan=3, sticky="w", padx=5)
+        ttk.Label(self, text='{"envmap": "env_cubemap", "phong": "1", "phongboost": "2"}').grid(row=8, column=0, columnspan=3, sticky="w", padx=5)
 
         # Run button
-        ttk.Button(self, text="Convert Textures", command=self.on_run).grid(row=5, column=0, columnspan=3, pady=10)
+        ttk.Button(self, text="Convert Textures", command=self.on_run).grid(row=9, column=0, columnspan=3, pady=10)
         self.columnconfigure(1, weight=1)
 
     def on_run(self):
         input_dir = self.entry_input.get_real().strip()
         output_dir = self.entry_output.get_real().strip()
         material_path = self.entry_material.get_real().strip()
+        shader = self.entry_shader.get_real().strip()
+        surface = self.entry_surface.get_real().strip()
         try:
             clamp = int(self.entry_clamp.get().strip())
         except ValueError:
             return messagebox.showerror("Textures", "Clamp size must be an integer.")
-        shader = self.shader_var.get().strip()
+        try:
+            extra_params = json.loads(self.extra_params_text.get("1.0", tk.END).strip())
+        except json.JSONDecodeError:
+            return messagebox.showerror("Textures", "Invalid JSON in Extra Parameters.")
         if not (input_dir and output_dir and material_path):
             return messagebox.showerror("Textures", "Fill in all fields.")
         self.config["texture_input"] = input_dir
@@ -312,8 +338,10 @@ class TextureTab(ttk.Frame):
         self.config["texture_material"] = material_path
         self.config["texture_clamp"] = clamp
         self.config["texture_shader"] = shader
+        self.config["texture_surface"] = surface
+        self.config["texture_extra_params"] = extra_params
         save_config(self.config)
-        texture_conversion_folder(input_dir, output_dir, material_path, clamp, shader)
+        texture_conversion_folder(input_dir, output_dir, material_path, clamp, shader, surface, extra_params)
 
 class QcGenTab(ttk.Frame):
     def __init__(self, parent, config):
@@ -349,8 +377,20 @@ class QcGenTab(ttk.Frame):
         self.collision_var = tk.BooleanVar(value=config.get("qcgen_collision", True))
         ttk.Checkbutton(self, text="Append Collision Logic", variable=self.collision_var).grid(row=4, column=0, columnspan=3, pady=5)
 
+        # Surface property dropdown
+        ttk.Label(self, text="Surface Property:").grid(row=5, column=0, pady=5, padx=5, sticky="e")
+        self.surface_var = tk.StringVar(value=config.get("qcgen_surface", "default"))
+        self.combo_surface = ttk.Combobox(
+            self,
+            textvariable=self.surface_var,
+            values=["default", "concrete", "metal", "wood", "glass", "brick", "dirt", "tile", "grass", "water"],
+            state="readonly",
+            width=20,
+        )
+        self.combo_surface.grid(row=5, column=1, sticky="w", padx=5, pady=5)
+
         # Generate button
-        ttk.Button(self, text="Generate QC(s)", command=self.on_run).grid(row=5, column=0, columnspan=3, pady=10)
+        ttk.Button(self, text="Generate QC(s)", command=self.on_run).grid(row=6, column=0, columnspan=3, pady=10)
         self.columnconfigure(1, weight=1)
 
     def browse_any(self):
@@ -369,6 +409,7 @@ class QcGenTab(ttk.Frame):
             fps = int(self.entry_fps.get().strip())
         except ValueError:
             return messagebox.showerror("QC Gen", "FPS must be an integer.")
+        surface = self.surface_var.get().strip()
         if not (p and mp and mpat):
             return messagebox.showerror("QC Gen", "Fill in all fields.")
         self.config["qcgen_path"] = p
@@ -376,14 +417,15 @@ class QcGenTab(ttk.Frame):
         self.config["qcgen_materials"] = mpat
         self.config["qcgen_fps"] = fps
         self.config["qcgen_collision"] = self.collision_var.get()
+        self.config["qcgen_surface"] = surface
         save_config(self.config)
         append_collision = self.collision_var.get()
         if p.lower().endswith(".smd"):
-            generate_single_qc(p, mp, mpat, "", fps, append_collision)
+            generate_single_qc(p, mp, mpat, surface, fps, append_collision)
         elif p.lower().endswith(".qc"):
-            generate_qc_batch(os.path.dirname(p), mp, mpat, "", fps, append_collision)
+            generate_qc_batch(os.path.dirname(p), mp, mpat, surface, fps, append_collision)
         else:
-            generate_qc_batch(p, mp, mpat, "", fps, append_collision)
+            generate_qc_batch(p, mp, mpat, surface, fps, append_collision)
 
 # ─── MAIN APP ────────────────────────────────────────────────────────────────
 
@@ -391,7 +433,7 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Source 2 Porting Kit")
-        self.geometry("1200x300")
+        self.geometry("1200x800")
         force_utf8()
 
         self.config_data = load_config()
