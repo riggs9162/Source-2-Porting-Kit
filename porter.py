@@ -195,16 +195,19 @@ def texture_conversion_folder(input_dir, output_dir, material_path, clamp, vmt_t
 
 # ─── TASK 6: QC GENERATION ────────────────────────────────────────────────────
 
-def generate_single_qc(smd_path, model_prefix, materials_path, _surf, fps, append_collision):
+def generate_single_qc(smd_path, model_prefix, materials_path, surface, fps, append_collision):
     d, f = os.path.split(smd_path)
     base, _ = os.path.splitext(f)
     mdl = f"{model_prefix}/{base}.mdl"
-    surf = determine_surfaceprop(base)
+    if (surface == "default" or not surface):
+        surface = determine_surfaceprop(base)
     content = (
         f'$modelname "{mdl}"\n'
         f'$body {base} "{base}.smd"\n\n'
         '$staticprop\n'
-        f'$surfaceprop "{surf}"\n'
+        '$contents "solid"\n'
+        f'$surfaceprop "{surface}"\n'
+        '$illumposition 0 0 0\n\n'
         f'$cdmaterials "{materials_path}/"\n\n'
         f'$sequence {base} "{base}.smd" fps {fps}\n\n'
     )
@@ -212,7 +215,11 @@ def generate_single_qc(smd_path, model_prefix, materials_path, _surf, fps, appen
         content += (
             f'$collisionmodel "{base}.smd"\n'
             "{\n"
-            "    $mass auto\n"
+            "    $concave\n"
+            "    $automass\n"
+            "    $inertia 1\n"
+            "    $damping 0\n"
+            "    $rotdamping 0\n"
             "}\n"
         )
     qc = os.path.join(d, base + ".qc")
@@ -223,20 +230,22 @@ def generate_single_qc(smd_path, model_prefix, materials_path, _surf, fps, appen
     except Exception as e:
         messagebox.showerror("QC Gen", str(e))
 
-
-def generate_qc_batch(folder, model_prefix, materials_path, _surf, fps, append_collision):
+def generate_qc_batch(folder, model_prefix, materials_path, surface, fps, append_collision):
     cnt = 0
     for r, _, files in os.walk(folder):
         for fn in files:
             if not fn.lower().endswith(".smd"):
                 continue
             base, _ = os.path.splitext(fn)
-            surf = determine_surfaceprop(base)
+            if (surface == "default" or not surface):
+                surface = determine_surfaceprop(base)
             content = (
                 f'$modelname "{model_prefix}/{base}.mdl"\n'
                 f'$body {base} "{base}.smd"\n\n'
                 '$staticprop\n'
-                f'$surfaceprop "{surf}"\n'
+                '$contents "solid"\n'
+                f'$surfaceprop "{surface}"\n'
+                '$illumposition 0 0 0\n\n'
                 f'$cdmaterials "{materials_path}/"\n\n'
                 f'$sequence {base} "{base}.smd" fps {fps}\n\n'
             )
@@ -244,7 +253,11 @@ def generate_qc_batch(folder, model_prefix, materials_path, _surf, fps, append_c
                 content += (
                     f'$collisionmodel "{base}.smd"\n'
                     "{\n"
-                    "    $mass auto\n"
+                    "    $concave\n"
+                    "    $automass\n"
+                    "    $inertia 1\n"
+                    "    $damping 0\n"
+                    "    $rotdamping 0\n"
                     "}\n"
                 )
             qc = os.path.join(r, base + ".qc")
@@ -307,11 +320,10 @@ class TextureTab(ttk.Frame):
         ttk.Label(self, text="Extra Parameters (JSON):").grid(row=6, column=0, pady=5, padx=5, sticky="e")
         self.extra_params_text = ScrolledText(self, width=50, height=10)
         self.extra_params_text.insert(tk.END, json.dumps(config.get("texture_extra_params", {}), indent=2))
-        self.extra_params_text.grid(row=6, column=1, columnspan=2, pady=5, padx=5, sticky="ew")
+        self.extra_params_text.grid(row=6, column=1, pady=5, padx=5, sticky="ew")
 
         # Extra parameters info
-        ttk.Label(self, text="Optional parameters for VMT. Example:").grid(row=7, column=0, columnspan=3, sticky="w", padx=5)
-        ttk.Label(self, text='{"envmap": "env_cubemap", "phong": "1", "phongboost": "2"}').grid(row=8, column=0, columnspan=3, sticky="w", padx=5)
+        ttk.Label(self, text='Optional parameters for VMT. Example:\n{\n\t"envmap": "env_cubemap",\n\n\t"phong": "1",\n\t"phongboost": "2"\n}').grid(row=6, column=2, columnspan=3, sticky="w", padx=5)
 
         # Run button
         ttk.Button(self, text="Convert Textures", command=self.on_run).grid(row=9, column=0, columnspan=3, pady=10)
@@ -359,35 +371,32 @@ class QcGenTab(ttk.Frame):
         ttk.Label(self, text="Model Prefix:").grid(row=1, column=0, sticky="e", padx=5, pady=5)
         self.entry_modelname = PlaceholderEntry(self, width=50)
         self.entry_modelname.insert(0, config.get("qcgen_modelname", ""))
-        self.entry_modelname.grid(row=1, column=1, columnspan=2, padx=5, pady=5, sticky="ew")
+        self.entry_modelname.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
 
         # Materials path
         ttk.Label(self, text="Materials Path:").grid(row=2, column=0, sticky="e", padx=5, pady=5)
         self.entry_materials = PlaceholderEntry(self, width=50)
         self.entry_materials.insert(0, config.get("qcgen_materials", ""))
-        self.entry_materials.grid(row=2, column=1, columnspan=2, padx=5, pady=5, sticky="ew")
+        self.entry_materials.grid(row=2, column=1, padx=5, pady=5, sticky="ew")
+        ttk.Label(self, text="VertexLitGeneric: models/your/path").grid(row=2, column=2, sticky="w", padx=5)
+        ttk.Label(self, text="LightmappedGeneric: your/path", anchor="w").grid(row=2, column=3, sticky="w", padx=5)
+
+        # Surface property
+        ttk.Label(self, text="Surface Property:").grid(row=3, column=0, pady=5, padx=5, sticky="e")
+        self.entry_surface = PlaceholderEntry(self, width=50)
+        self.entry_surface.insert(0, str(config.get("texture_surface", "")))
+        self.entry_surface.grid(row=3, column=1, sticky="w", padx=5, pady=5)
+        ttk.Label(self, text="(default, concrete, metal, wood, glass, brick, dirt, tile, grass, water)").grid(row=3, column=2, sticky="w", padx=5)
 
         # FPS
-        ttk.Label(self, text="FPS:").grid(row=3, column=0, sticky="e", padx=5, pady=5)
+        ttk.Label(self, text="FPS:").grid(row=4, column=0, sticky="e", padx=5, pady=5)
         self.entry_fps = tk.Entry(self, width=10)
         self.entry_fps.insert(0, str(config.get("qcgen_fps", 1)))
-        self.entry_fps.grid(row=3, column=1, sticky="w", padx=5, pady=5)
+        self.entry_fps.grid(row=4, column=1, sticky="w", padx=5, pady=5)
 
         # Collision checkbox
         self.collision_var = tk.BooleanVar(value=config.get("qcgen_collision", True))
-        ttk.Checkbutton(self, text="Append Collision Logic", variable=self.collision_var).grid(row=4, column=0, columnspan=3, pady=5)
-
-        # Surface property dropdown
-        ttk.Label(self, text="Surface Property:").grid(row=5, column=0, pady=5, padx=5, sticky="e")
-        self.surface_var = tk.StringVar(value=config.get("qcgen_surface", "default"))
-        self.combo_surface = ttk.Combobox(
-            self,
-            textvariable=self.surface_var,
-            values=["default", "concrete", "metal", "wood", "glass", "brick", "dirt", "tile", "grass", "water"],
-            state="readonly",
-            width=20,
-        )
-        self.combo_surface.grid(row=5, column=1, sticky="w", padx=5, pady=5)
+        ttk.Checkbutton(self, text="Append Collision Logic", variable=self.collision_var).grid(row=5, column=0, columnspan=3, pady=5)
 
         # Generate button
         ttk.Button(self, text="Generate QC(s)", command=self.on_run).grid(row=6, column=0, columnspan=3, pady=10)
@@ -405,11 +414,11 @@ class QcGenTab(ttk.Frame):
         p = self.entry_path.get_real().strip()
         mp = self.entry_modelname.get_real().strip()
         mpat = self.entry_materials.get_real().strip()
+        surface = self.entry_surface.get_real().strip()
         try:
             fps = int(self.entry_fps.get().strip())
         except ValueError:
             return messagebox.showerror("QC Gen", "FPS must be an integer.")
-        surface = self.surface_var.get().strip()
         if not (p and mp and mpat):
             return messagebox.showerror("QC Gen", "Fill in all fields.")
         self.config["qcgen_path"] = p
