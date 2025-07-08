@@ -148,50 +148,62 @@ def texture_conversion_folder(input_dir, output_dir, material_path, clamp, vmt_t
     os.makedirs(output_dir, exist_ok=True)
 
     vtf_lib = VTFLib.VTFLib()
-    grouped = {}
-    for fn in os.listdir(input_dir):
-        if not fn.lower().endswith(".png"):
-            continue
-        ln = fn.lower()
-        if "_color_" in ln and "_orm_" not in ln:
-            base = _extract_base_name(fn)
-            grouped.setdefault(base, {})["color"] = fn
-        elif "_normal_" in ln:
-            base = _extract_base_name(fn)
-            grouped.setdefault(base, {})["normal"] = fn
+    total_converted = 0
 
-    for base, m in grouped.items():
-        col = m.get("color")
-        if not col:
-            continue
-        nm = m.get("normal")
-        bname = os.path.basename(base)
-        vtf_c = os.path.join(output_dir, bname + ".vtf")
-        vtf_n = os.path.join(output_dir, bname + "_normal.vtf") if nm else None
-        vmt = os.path.join(output_dir, bname + ".vmt")
-        vmt_type = vmt_type if vmt_type in ["VertexLitGeneric", "LightmappedGeneric", "UnlitGeneric", "WorldVertexTransition"] else "VertexLitGeneric"
-        if (surface_prop == "default" or not surface_prop):
-            surface_prop = determine_surfaceprop(bname)
-        if os.path.exists(vtf_c) and os.path.exists(vmt):
-            continue
-        if not convert_png_to_vtf(vtf_lib, os.path.join(input_dir, col), vtf_c, clamp):
-            continue
-        if nm:
-            convert_png_to_vtf(vtf_lib, os.path.join(input_dir, nm), vtf_n, clamp)
-        with open(vmt, "w", encoding="utf-8") as f:
-            f.write(f'"{vmt_type}"\n{{\n')
-            f.write(f'    "$basetexture" "{material_path}/{bname}"\n')
+    for root, dirs, files in os.walk(input_dir):
+        rel_path = os.path.relpath(root, input_dir)
+        out_dir = os.path.join(output_dir, rel_path) if rel_path != "." else output_dir
+        os.makedirs(out_dir, exist_ok=True)
+
+        grouped = {}
+        for fn in files:
+            if not fn.lower().endswith(".png"):
+                continue
+            ln = fn.lower()
+            if ("_color_" in ln or "_color2_" in ln) and "_orm_" not in ln:
+                base = _extract_base_name(fn)
+                grouped.setdefault(base, {})["color"] = fn
+            elif "_normal_" in ln:
+                base = _extract_base_name(fn)
+                grouped.setdefault(base, {})["normal"] = fn
+
+        for base, m in grouped.items():
+            col = m.get("color")
+            if not col:
+                continue
+            nm = m.get("normal")
+            bname = os.path.basename(base)
+            vtf_c = os.path.join(out_dir, bname + ".vtf")
+            vtf_n = os.path.join(out_dir, bname + "_normal.vtf") if nm else None
+            vmt = os.path.join(out_dir, bname + ".vmt")
+            vmt_type_final = vmt_type if vmt_type in ["VertexLitGeneric", "LightmappedGeneric", "UnlitGeneric", "WorldVertexTransition"] else "VertexLitGeneric"
+            surface_prop_final = surface_prop if surface_prop and surface_prop != "default" else determine_surfaceprop(bname)
+            if os.path.exists(vtf_c) and os.path.exists(vmt):
+                continue
+            if not convert_png_to_vtf(vtf_lib, os.path.join(root, col), vtf_c, clamp):
+                continue
             if nm:
-                f.write(f'    "$bumpmap" "{material_path}/{bname}_normal"\n\n')
-            f.write(f'    "$surfaceprop" "{surface_prop}"\n\n')
-            if vmt_type == "VertexLitGeneric":
-                f.write('    "$model" "1"\n\n')
-            if extra_params:
-                for k, v in extra_params.items():
-                    f.write(f'    "${k}" "{v}"\n')
-            f.write("}\n")
-    messagebox.showinfo("Textures", "Texture conversion complete.\n"
-                        f"Converted {len(grouped)} textures to VTF/VMT in {output_dir}.")
+                convert_png_to_vtf(vtf_lib, os.path.join(root, nm), vtf_n, clamp)
+            with open(vmt, "w", encoding="utf-8") as f:
+                f.write(f'"{vmt_type_final}"\n{{\n')
+                # Compute material path relative to output_dir
+                rel_mat_path = os.path.relpath(out_dir, output_dir).replace("\\", "/")
+                mat_path = f"{material_path}/{rel_mat_path}" if rel_mat_path != "." else material_path
+                mat_path = mat_path.rstrip("/")
+                f.write(f'    "$basetexture" "{mat_path}/{bname}"\n')
+                if nm:
+                    f.write(f'    "$bumpmap" "{mat_path}/{bname}_normal"\n')
+                f.write(f'    "$basetexturetransform" "center 0 0 scale 4 4 rotate 0 translate 0 0"\n\n')
+                f.write(f'    "$surfaceprop" "{surface_prop_final}"\n\n')
+                if vmt_type_final == "VertexLitGeneric":
+                    f.write('    "$model" "1"\n\n')
+                if extra_params:
+                    for k, v in extra_params.items():
+                        f.write(f'    "${k}" "{v}"\n')
+                f.write("}\n")
+            total_converted += 1
+
+    messagebox.showinfo("Textures", f"Texture conversion complete.\nConverted {total_converted} textures to VTF/VMT in {output_dir}.")
 
 # ─── TASK 6: QC GENERATION ────────────────────────────────────────────────────
 

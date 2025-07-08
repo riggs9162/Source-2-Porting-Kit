@@ -58,7 +58,10 @@ class AOBakerApp:
         path = filedialog.askopenfilename(filetypes=[("Image Files", "*.png *.jpg *.jpeg *.tga")])
         if path:
             try:
-                self.ao_image = Image.open(path).convert("L")
+                # Load as RGB first to handle red channel AO maps
+                ao_rgb = Image.open(path).convert("RGB")
+                # Extract red channel as grayscale (handles both white/black and red/black AO)
+                self.ao_image = ao_rgb.split()[0]  # Get red channel
                 self.log(f"Loaded AO: {os.path.basename(path)}")
                 self.update_preview()
             except Exception as e:
