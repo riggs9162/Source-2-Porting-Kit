@@ -15,11 +15,14 @@ class Region:
         self.y = y
         self.w = w
         self.h = h
+
     def to_dict(self):
         return {"name": self.name, "x": self.x, "y": self.y, "w": self.w, "h": self.h}
+
     @classmethod
     def from_dict(cls, d):
         return cls(d["name"], d["x"], d["y"], d["w"], d["h"])
+
     def __str__(self):
         return f"{self.name}: ({self.x}, {self.y}, {self.w}, {self.h})"
 
@@ -92,7 +95,7 @@ class ExtractSubtexturesGUI(tk.Tk):
         self.listbox.pack()
         self.listbox.bind("<<ListboxSelect>>", self.on_region_select)
 
-        # Region name
+        # Region name input
         name_frame = ttk.Frame(ctrl)
         name_frame.pack(fill="x", pady=(5,0))
         ttk.Label(name_frame, text="Name:").pack(side="left")
@@ -194,7 +197,7 @@ class ExtractSubtexturesGUI(tk.Tk):
         snap = self.snap_sizes[self.snap_index.get()]
         x = (x//snap)*snap
         y = (y//snap)*snap
-        # Snap W/H to pow2
+        # Snap W/H to power-of-two
         w = self._closest_pow2(w, self.image.size[0])
         h = self._closest_pow2(h, self.image.size[1])
         # Update sliders
@@ -241,7 +244,7 @@ class ExtractSubtexturesGUI(tk.Tk):
         w = self.w_slider.get(); h = self.h_slider.get()
         reg = Region(name, x, y, w, h)
         self.regions.append(reg)
-        self.listbox.insert("end", str(reg))
+        self.listbox.insert(tk.END, str(reg))
         self.canvas.delete(self.rect_id)
         self.rect_id = None
 
@@ -280,7 +283,7 @@ class ExtractSubtexturesGUI(tk.Tk):
             messagebox.showerror("Error", "No regions to save.")
             return
         path = filedialog.asksaveasfilename(
-            title="Save Mesh...", defaultextension=".json",
+            title="Save Mesh…", defaultextension=".json",
             filetypes=[("JSON","*.json"),("All","*.*")]
         )
         if not path:
@@ -291,47 +294,55 @@ class ExtractSubtexturesGUI(tk.Tk):
         messagebox.showinfo("Saved", f"Mesh saved to {path}")
 
     def load_mesh(self):
+        # Load a previously-saved JSON “mesh”
         path = filedialog.askopenfilename(
-            title="Load Mesh...", filetypes=[("JSON","*.json"),("All","*.*")]
+            title="Load Mesh…", filetypes=[("JSON files","*.json"),("All","*.*")]
         )
         if not path:
+            return
+        if not hasattr(self, "image") or self.image is None:
+            messagebox.showerror("Error", "Load your source PNG first before importing a mesh.")
             return
         try:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            regs = [Region.from_dict(d) for d in data.get("regions",[])]
+            regs = [Region.from_dict(d) for d in data.get("regions", [])]
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to load mesh: {e}")
+            messagebox.showerror("Error", f"Failed to load mesh:\n{e}")
             return
+
         # Clear existing
-        self.regions = []
-        self.listbox.delete(0, "end")
+        self.regions.clear()
+        self.listbox.delete(0, tk.END)
         self.canvas.delete("all")
         self._refresh_canvas()
-        # Add loaded
+
+        # Add loaded regions
         for reg in regs:
             self.regions.append(reg)
-            self.listbox.insert("end", str(reg))
+            self.listbox.insert(tk.END, str(reg))
             self._draw_region(reg)
-        messagebox.showinfo("Loaded", f"{len(regs)} regions loaded from {path}")
+
+        messagebox.showinfo("Loaded", f"{len(regs)} regions loaded from:\n{os.path.basename(path)}")
 
     def export_all(self):
         if not hasattr(self, "output_dir"):
-            messagebox.showerror("Error","Please select an output folder.")
+            messagebox.showerror("Error", "Please select an output folder.")
             return
         if not self.regions:
-            messagebox.showerror("Error","No regions defined.")
+            messagebox.showerror("Error", "No regions defined.")
             return
         clamp = self.clamp_var.get()
         suffix = self.suffix_var.get().strip()
         convert_script = os.path.join(os.path.dirname(__file__), "convert_image.py")
         if not os.path.isfile(convert_script):
-            messagebox.showerror("Error","convert_image.py not found.")
+            messagebox.showerror("Error", "convert_image.py not found.")
             return
         for reg in self.regions:
             crop = self.image.crop((reg.x, reg.y, reg.x+reg.w, reg.y+reg.h))
             tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-            crop.save(tmp.name); tmp.close()
+            crop.save(tmp.name)
+            tmp.close()
             name = reg.name + suffix
             out_vtf = os.path.join(self.output_dir, f"{name}.vtf")
             cmd = [sys.executable, convert_script, tmp.name, out_vtf, str(clamp)]
@@ -340,6 +351,11 @@ class ExtractSubtexturesGUI(tk.Tk):
                 messagebox.showwarning("Error", f"Conversion failed for {reg.name}: {proc.stderr.strip()}")
             os.unlink(tmp.name)
         messagebox.showinfo("Done", "Export complete.")
+
+    def _draw_region(self, region, outline="blue"):
+        x1, y1 = region.x*self.scale, region.y*self.scale
+        x2, y2 = (region.x+region.w)*self.scale, (region.y+region.h)*self.scale
+        self.canvas.create_rectangle(x1, y1, x2, y2, outline=outline)
 
 if __name__ == "__main__":
     app = ExtractSubtexturesGUI()
