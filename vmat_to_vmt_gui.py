@@ -112,18 +112,45 @@ class VmatToVmtApp(tk.Tk):
         if shader.lower()=="layer0": shader="VertexLitGeneric"
         return shader,props
 
+    def _find_texture_file(self, base_folder, texture_path):
+        """Find a texture file, checking both the base folder and subfolders."""
+        if not texture_path:
+            return None
+        
+        # First try the exact basename in the base folder
+        basename = os.path.basename(texture_path)
+        direct_path = os.path.join(base_folder, basename)
+        if os.path.isfile(direct_path):
+            return direct_path
+        
+        # If not found, search in subfolders
+        for root, dirs, files in os.walk(base_folder):
+            if basename in files:
+                found_path = os.path.join(root, basename)
+                if os.path.isfile(found_path):
+                    self._log(f"Found texture in subfolder: {found_path}")
+                    return found_path
+        
+        self._log(f"Warning: Could not find texture file: {basename}")
+        return None
+
     def _load_aux_textures(self):
         shader,props=self._parse_vmat()
         if not props: return
         fld=os.path.dirname(self.vmat_var.get())
+        
+        # Load roughness texture
         rkey=props.get("TextureRoughness")
         if rkey:
-            p=os.path.join(fld,os.path.basename(rkey))
-            if os.path.isfile(p): self.rough_image=Image.open(p).convert("L")
+            p = self._find_texture_file(fld, rkey)
+            if p: self.rough_image=Image.open(p).convert("L")
+        
+        # Load ambient occlusion texture
         aok=props.get("TextureAmbientOcclusion")
         if aok:
-            p=os.path.join(fld,os.path.basename(aok))
-            if os.path.isfile(p): self.ao_image=Image.open(p).convert("L")
+            p = self._find_texture_file(fld, aok)
+            if p: self.ao_image=Image.open(p).convert("L")
+        
         self.update_preview()
 
     def update_preview(self,event=None):
@@ -133,8 +160,8 @@ class VmatToVmtApp(tk.Tk):
         base=props.get("TextureColor")
         if not base: return
         fld=os.path.dirname(path)
-        png=os.path.join(fld,os.path.basename(base))
-        if not os.path.isfile(png): return
+        png = self._find_texture_file(fld, base)
+        if not png: return
         self.base_image=Image.open(png).convert("RGB")
         img=self.base_image.copy()
         if self.bake_rough_var.get() and self.rough_image:
@@ -175,13 +202,18 @@ class VmatToVmtApp(tk.Tk):
 
         # Base
         base_key=props["TextureColor"]
-        base_name=os.path.splitext(os.path.basename(base_key))[0]
+        base_name=os.path.splitext(os.path.basename(vmat))[0]  # Use VMAT name instead of color texture name
         base_dst=os.path.join(out,base_name+".vtf")
         if self.baked_image:
             tmp=tempfile.NamedTemporaryFile(suffix=".png",delete=False)
             self.baked_image.save(tmp.name); ok=run_convert(tmp.name,base_dst); tmp.close(); os.unlink(tmp.name)
         else:
-            ok=run_convert(os.path.join(os.path.dirname(vmat),base_name+".png"),base_dst)
+            base_png = self._find_texture_file(os.path.dirname(vmat), base_key)
+            if base_png:
+                ok=run_convert(base_png, base_dst)
+            else:
+                self._log(f"[ERROR] Could not find base texture: {base_key}")
+                ok=False
         if ok: count+=1
 
         # Normal/Metalness
@@ -190,20 +222,26 @@ class VmatToVmtApp(tk.Tk):
         if metal:
             # merge metal into alpha then invert immediately
             if bump:
-                nimg=Image.open(os.path.join(os.path.dirname(vmat),os.path.basename(bump))).convert("RGBA")
+                bump_file = self._find_texture_file(os.path.dirname(vmat), bump)
+                if bump_file:
+                    nimg=Image.open(bump_file).convert("RGBA")
+                else:
+                    nimg=Image.new("RGBA",self.baked_image.size if self.baked_image else (512,512))
             else:
-                nimg=Image.new("RGBA",self.baked_image.size)
-            mimg=Image.open(os.path.join(os.path.dirname(vmat),os.path.basename(metal))).convert("L")
-            mimg=mimg.resize(nimg.size,Image.NEAREST)
-            r,g,b,_=nimg.split(); nimg=Image.merge("RGBA",(r,g,b,mimg))
-            # invert alpha channel now
-            r2,g2,b2,a2=nimg.split(); a2=ImageChops.invert(a2); nimg=Image.merge("RGBA",(r2,g2,b2,a2))
-            # save permanent PNG for inspection
-            norm_png=os.path.join(out,base_name+"_normal.png")
-            nimg.save(norm_png)
-            norm_src=norm_png
+                nimg=Image.new("RGBA",self.baked_image.size if self.baked_image else (512,512))
+            metal_file = self._find_texture_file(os.path.dirname(vmat), metal)
+            if metal_file:
+                mimg=Image.open(metal_file).convert("L")
+                mimg=mimg.resize(nimg.size,Image.NEAREST)
+                r,g,b,_=nimg.split(); nimg=Image.merge("RGBA",(r,g,b,mimg))
+                # invert alpha channel now
+                r2,g2,b2,a2=nimg.split(); a2=ImageChops.invert(a2); nimg=Image.merge("RGBA",(r2,g2,b2,a2))
+                # save permanent PNG for inspection
+                norm_png=os.path.join(out,base_name+"_normal.png")
+                nimg.save(norm_png)
+                norm_src=norm_png
         elif bump:
-            norm_src=os.path.join(os.path.dirname(vmat),os.path.basename(bump))
+            norm_src = self._find_texture_file(os.path.dirname(vmat), bump)
 
         if norm_src:
             norm_dst=os.path.join(out,base_name+"_normal.vtf")
