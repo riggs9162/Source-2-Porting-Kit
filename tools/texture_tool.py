@@ -9,14 +9,24 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from tkinter.scrolledtext import ScrolledText
 from PIL import Image
-import VTFLibWrapper.VTFLib as VTFLib
-import VTFLibWrapper.VTFLibEnums as VTFLibEnums
+
+# Try to import VTFLib for texture conversion
+try:
+    import VTFLibWrapper.VTFLib as VTFLib
+    import VTFLibWrapper.VTFLibEnums as VTFLibEnums
+    VTFLIB_AVAILABLE = True
+except ImportError:
+    VTFLIB_AVAILABLE = False
 
 from .base_tool import BaseTool, register_tool
 from .utils import PlaceholderEntry, browse_folder, determine_surfaceprop, save_config
 
 
 def convert_png_to_vtf(vtf_lib, png_src, vtf_dst, clamp):
+    if not VTFLIB_AVAILABLE:
+        print(f"[ERROR] VTFLib not available for conversion: {png_src}")
+        return False
+        
     try:
         img = Image.open(png_src).convert("RGBA")
     except Exception as e:
@@ -28,17 +38,22 @@ def convert_png_to_vtf(vtf_lib, png_src, vtf_dst, clamp):
         img = img.resize((int(w*scale),int(h*scale)), Image.Resampling.LANCZOS)
         w,h = img.size
     data = img.tobytes()
-    amin,amax = img.getchannel("A").getextrema()
-    fmt = (VTFLibEnums.ImageFormat.ImageFormatDXT1
-           if (amin==255 and amax==255)
-           else VTFLibEnums.ImageFormat.ImageFormatDXT5)
-    opts = vtf_lib.create_default_params_structure()
-    opts.ImageFormat = fmt
-    opts.Flags       = VTFLibEnums.ImageFlag.ImageFlagEightBitAlpha
-    opts.Resize      = 1
-    vtf_lib.image_create_single(w,h,data,opts)
-    vtf_lib.image_save(vtf_dst)
-    return True
+    
+    try:
+        amin,amax = img.getchannel("A").getextrema()
+        fmt = (VTFLibEnums.ImageFormat.ImageFormatDXT1
+               if (amin==255 and amax==255)
+               else VTFLibEnums.ImageFormat.ImageFormatDXT5)
+        opts = vtf_lib.create_default_params_structure()
+        opts.ImageFormat = fmt
+        opts.Flags       = VTFLibEnums.ImageFlag.ImageFlagEightBitAlpha
+        opts.Resize      = 1
+        vtf_lib.image_create_single(w,h,data,opts)
+        vtf_lib.image_save(vtf_dst)
+        return True
+    except Exception as e:
+        print(f"[ERROR] VTF conversion failed for {png_src}: {e}")
+        return False
 
 
 def _extract_base_name(filename: str) -> str:
@@ -49,6 +64,12 @@ def _extract_base_name(filename: str) -> str:
 
 
 def texture_conversion_folder(input_dir, output_dir, material_path, clamp, vmt_type, surface_prop, extra_params=None):
+    if not VTFLIB_AVAILABLE:
+        messagebox.showerror("Missing Dependency", 
+                            "VTFLib is required for texture conversion.\n"
+                            "Please install VTFLibWrapper to use this tool.")
+        return
+        
     if not os.path.isdir(input_dir):
         messagebox.showerror("Textures", f"Input not found:\n{input_dir}")
         return
@@ -57,7 +78,12 @@ def texture_conversion_folder(input_dir, output_dir, material_path, clamp, vmt_t
         return
     os.makedirs(output_dir, exist_ok=True)
 
-    vtf_lib = VTFLib.VTFLib()
+    try:
+        vtf_lib = VTFLib.VTFLib()
+    except Exception as e:
+        messagebox.showerror("VTFLib Error", f"Failed to initialize VTFLib: {e}")
+        return
+        
     total_converted = 0
 
     for root, dirs, files in os.walk(input_dir):

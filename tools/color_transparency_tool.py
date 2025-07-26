@@ -202,8 +202,8 @@ class ColorTransparencyTab(ttk.Frame):
             messagebox.showerror("Error", f"Failed to load image: {e}")
             self.status_label.config(text="Error loading image", foreground="red")
 
-        def update_preview_image(self):
-            """Update the before preview image."""
+    def update_preview_image(self):
+        """Update the before preview image."""
         if not self.base_image:
             return
 
@@ -405,6 +405,7 @@ class ColorTransparencyTab(ttk.Frame):
         # Process all images in the folder
         processed = 0
         errors = 0
+        skipped = 0
 
         for filename in os.listdir(input_folder):
             if filename.lower().endswith(('.png', '.jpg', '.jpeg', '.tga', '.bmp')):
@@ -415,36 +416,56 @@ class ColorTransparencyTab(ttk.Frame):
                 try:
                     # Load image
                     img = Image.open(input_path).convert("RGBA")
+                    
+                    # Check image size to prevent memory issues
+                    width, height = img.size
+                    total_pixels = width * height
+                    
+                    if total_pixels > 50_000_000:  # Skip very large images (50 megapixels)
+                        print(f"Skipping {filename}: too large ({width}x{height})")
+                        skipped += 1
+                        continue
 
                     # Apply transparency
-                    width, height = img.size
                     for x in range(width):
                         for y in range(height):
-                            pixel = img.getpixel((x, y))
-                            pixel_color = (pixel[0], pixel[1], pixel[2])
+                            try:
+                                pixel = img.getpixel((x, y))
+                                pixel_color = (pixel[0], pixel[1], pixel[2])
 
-                            distance = self.color_distance(pixel_color, target_color)
-                            max_distance = tolerance * 4.41
+                                distance = self.color_distance(pixel_color, target_color)
+                                max_distance = tolerance * 4.41
 
-                            if distance <= max_distance:
-                                if tolerance > 0:
-                                    fade_factor = 1.0 - (distance / max_distance)
-                                    new_alpha = int(alpha + (pixel[3] - alpha) * (1.0 - fade_factor))
-                                else:
-                                    new_alpha = alpha
+                                if distance <= max_distance:
+                                    if tolerance > 0:
+                                        fade_factor = 1.0 - (distance / max_distance)
+                                        new_alpha = int(alpha + (pixel[3] - alpha) * (1.0 - fade_factor))
+                                    else:
+                                        new_alpha = alpha
 
-                                new_alpha = max(0, min(255, new_alpha))
-                                img.putpixel((x, y), (pixel[0], pixel[1], pixel[2], new_alpha))
+                                    new_alpha = max(0, min(255, new_alpha))
+                                    img.putpixel((x, y), (pixel[0], pixel[1], pixel[2], new_alpha))
+                            except (IndexError, ValueError) as e:
+                                # Skip individual pixel errors
+                                continue
 
                     # Save result
                     img.save(output_path)
                     processed += 1
 
+                except MemoryError:
+                    print(f"Memory error processing {filename}: image too large")
+                    errors += 1
                 except Exception as e:
                     print(f"Error processing {filename}: {e}")
                     errors += 1
 
-        messagebox.showinfo("Batch Complete",
-                            f"Processed {processed} images.\\n{errors} errors occurred.")
-        self.status_label.config(text=f"Batch complete: {processed} processed, {errors} errors",
+        result_msg = f"Processed {processed} images."
+        if errors > 0:
+            result_msg += f"\n{errors} errors occurred."
+        if skipped > 0:
+            result_msg += f"\n{skipped} images skipped (too large)."
+            
+        messagebox.showinfo("Batch Complete", result_msg)
+        self.status_label.config(text=f"Batch complete: {processed} processed, {errors} errors, {skipped} skipped",
                                 foreground="green" if errors == 0 else "orange")

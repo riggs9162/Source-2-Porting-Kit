@@ -218,6 +218,7 @@ class PorterApp(tk.Tk if not DND_AVAILABLE else TkinterDnD.Tk):
             # File Management
             "Search & Replace": "File Management",
             "VMT Generator": "File Management",
+            "VMT Duplicator": "File Management",
             "Soundscape Searcher": "File Management",
             
             # Image Processing

@@ -26,6 +26,14 @@ def apply_metal_transparency(base_image_path, mask_image_path, output_path, tran
         base_image = Image.open(base_image_path).convert("RGBA")
         mask_image = Image.open(mask_image_path).convert("L")
         
+        # Check image size to prevent memory issues
+        width, height = base_image.size
+        total_pixels = width * height
+        
+        if total_pixels > 50_000_000:  # Skip very large images (50 megapixels)
+            messagebox.showerror("Error", f"Image too large ({width}x{height}). Please use smaller images.")
+            return False
+        
         # Resize mask to match base if needed
         if base_image.size != mask_image.size:
             mask_image = mask_image.resize(base_image.size, Image.LANCZOS)
@@ -40,17 +48,24 @@ def apply_metal_transparency(base_image_path, mask_image_path, output_path, tran
         
         for y in range(base_image.height):
             for x in range(base_image.width):
-                r, g, b, a = pixels[x, y]
-                mask_value = mask_pixels[x, y] / 255.0
-                
-                # Adjust alpha based on mask value and transparency factor
-                new_alpha = int(a * (1.0 - mask_value * transparency_factor))
-                out_pixels[x, y] = (r, g, b, new_alpha)
+                try:
+                    r, g, b, a = pixels[x, y]
+                    mask_value = mask_pixels[x, y] / 255.0
+                    
+                    # Adjust alpha based on mask value and transparency factor
+                    new_alpha = int(a * (1.0 - mask_value * transparency_factor))
+                    out_pixels[x, y] = (r, g, b, new_alpha)
+                except (IndexError, ValueError):
+                    # Skip individual pixel errors
+                    continue
         
         # Save output image
         output.save(output_path)
         return True
         
+    except MemoryError:
+        messagebox.showerror("Error", "Memory error: Image too large to process.")
+        return False
     except Exception as e:
         messagebox.showerror("Error", f"Failed to process images: {str(e)}")
         return False

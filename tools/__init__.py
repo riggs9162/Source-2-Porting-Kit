@@ -7,7 +7,6 @@ This package contains all the individual tools that can be loaded by the main po
 from .base_tool import tool_registry
 
 # Import all tools to register them
-from . import ao_baker_tool
 from . import bone_backport_tool
 from . import brightness_to_alpha_tool
 from . import color_transparency_tool

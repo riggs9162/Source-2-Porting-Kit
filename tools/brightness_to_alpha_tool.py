@@ -25,6 +25,14 @@ def convert_brightness_to_alpha(image_path, output_path, threshold=200, invert=F
         # Load image and convert to RGBA
         image = Image.open(image_path).convert("RGBA")
         
+        # Check image size to prevent memory issues
+        width, height = image.size
+        total_pixels = width * height
+        
+        if total_pixels > 50_000_000:  # Skip very large images (50 megapixels)
+            print(f"Image too large ({width}x{height}): {image_path}")
+            return False
+        
         # Get grayscale version for brightness calculation
         grayscale = image.convert("L")
         
@@ -34,21 +42,28 @@ def convert_brightness_to_alpha(image_path, output_path, threshold=200, invert=F
         # Process pixels
         for y in range(image.height):
             for x in range(image.width):
-                r, g, b, a = image.getpixel((x, y))
-                brightness = grayscale.getpixel((x, y))
-                
-                # Calculate alpha based on brightness and threshold
-                if invert:
-                    alpha = 255 if brightness < threshold else 0
-                else:
-                    alpha = 255 if brightness >= threshold else 0
-                
-                result.putpixel((x, y), (r, g, b, alpha))
+                try:
+                    r, g, b, a = image.getpixel((x, y))
+                    brightness = grayscale.getpixel((x, y))
+                    
+                    # Calculate alpha based on brightness and threshold
+                    if invert:
+                        alpha = 255 if brightness < threshold else 0
+                    else:
+                        alpha = 255 if brightness >= threshold else 0
+                    
+                    result.putpixel((x, y), (r, g, b, alpha))
+                except (IndexError, ValueError):
+                    # Skip individual pixel errors
+                    continue
         
         # Save result
         result.save(output_path)
         return True
         
+    except MemoryError:
+        print(f"Memory error processing image: {image_path}")
+        return False
     except Exception as e:
         print(f"Error converting brightness to alpha: {e}")
         return False
