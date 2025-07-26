@@ -9,6 +9,14 @@ import os
 from .base_tool import BaseTool, register_tool
 from .utils import PlaceholderEntry, browse_file
 
+# Try to import VTFLib for VTF conversion
+try:
+    import VTFLibWrapper.VTFLib as VTFLib
+    import VTFLibWrapper.VTFLibEnums as VTFLibEnums
+    VTFLIB_AVAILABLE = True
+except ImportError:
+    VTFLIB_AVAILABLE = False
+
 @register_tool
 class FakePBRBakerTool(BaseTool):
     @property
@@ -250,10 +258,10 @@ class FakePBRBakerTab(ttk.Frame):
         
         ttk.Button(button_frame, text="Reset to Defaults", 
                   command=self.reset_settings).pack(side="left")
-        ttk.Button(button_frame, text="Bake Full Resolution", 
-                  command=self.bake_full).pack(side="left", padx=(10, 0))
-        ttk.Button(button_frame, text="Save Result", 
-                  command=self.save_result).pack(side="left", padx=(10, 0))
+        ttk.Button(button_frame, text="Bake & Save", 
+                  command=self.bake_and_save).pack(side="left", padx=(10, 0))
+        ttk.Button(button_frame, text="Save as VTF", 
+                  command=self.save_as_vtf).pack(side="left", padx=(10, 0))
         ttk.Button(button_frame, text="Batch Process Folder", 
                   command=self.batch_process).pack(side="right")
         
@@ -641,35 +649,31 @@ class FakePBRBakerTab(ttk.Frame):
         self.update_preview()
         self.status_label.config(text="Settings reset to defaults", foreground="green")
     
-    def bake_full(self):
-        """Bake at full resolution."""
+    def bake_and_save(self):
+        """Bake at full resolution and save the result."""
         if not self.base_image:
             messagebox.showerror("Error", "Please load a base texture first.")
             return
         
+        # First bake at full resolution
         self.status_label.config(text="Baking full resolution...", foreground="blue")
         self.update()  # Update UI
         
         result = self.bake_textures()
-        if result:
-            self.baked_image = result
-            # Update preview with downscaled version
-            preview_img = result.copy()
-            preview_img.thumbnail((200, 200))
-            photo = ImageTk.PhotoImage(preview_img)
-            self.preview_result.config(image=photo, text="")
-            self.preview_result.image = photo
-            
-            self.status_label.config(text="Full resolution baking complete", foreground="green")
-        else:
+        if not result:
             self.status_label.config(text="Baking failed", foreground="red")
-    
-    def save_result(self):
-        """Save the baked result."""
-        if not self.baked_image:
-            messagebox.showerror("Error", "No baked image to save. Please bake first.")
             return
         
+        self.baked_image = result
+        
+        # Update preview with downscaled version
+        preview_img = result.copy()
+        preview_img.thumbnail((200, 200))
+        photo = ImageTk.PhotoImage(preview_img)
+        self.preview_result.config(image=photo, text="")
+        self.preview_result.image = photo
+        
+        # Now save the result
         output_path = filedialog.asksaveasfilename(
             title="Save Baked Result",
             defaultextension=".png",
@@ -685,11 +689,100 @@ class FakePBRBakerTab(ttk.Frame):
                     save_image = self.baked_image
                 
                 save_image.save(output_path)
-                self.status_label.config(text=f"Saved: {os.path.basename(output_path)}", foreground="green")
+                self.status_label.config(text=f"Baked and saved: {os.path.basename(output_path)}", foreground="green")
                 
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to save image: {e}")
                 self.status_label.config(text="Error saving image", foreground="red")
+        else:
+            self.status_label.config(text="Baking complete - save cancelled", foreground="blue")
+    
+    def save_as_vtf(self):
+        """Bake at full resolution and save as VTF file."""
+        if not VTFLIB_AVAILABLE:
+            messagebox.showerror("Missing Dependency", 
+                                "VTFLib is required for VTF conversion.\n"
+                                "Please install VTFLibWrapper to use this feature.")
+            return
+            
+        if not self.base_image:
+            messagebox.showerror("Error", "Please load a base texture first.")
+            return
+        
+        # First bake at full resolution
+        self.status_label.config(text="Baking for VTF conversion...", foreground="blue")
+        self.update()  # Update UI
+        
+        result = self.bake_textures()
+        if not result:
+            self.status_label.config(text="Baking failed", foreground="red")
+            return
+        
+        self.baked_image = result
+        
+        # Update preview with downscaled version
+        preview_img = result.copy()
+        preview_img.thumbnail((200, 200))
+        photo = ImageTk.PhotoImage(preview_img)
+        self.preview_result.config(image=photo, text="")
+        self.preview_result.image = photo
+        
+        # Get output path for VTF
+        output_path = filedialog.asksaveasfilename(
+            title="Save as VTF",
+            defaultextension=".vtf",
+            filetypes=[("VTF Files", "*.vtf")]
+        )
+        
+        if output_path:
+            try:
+                # Convert PIL image to VTF
+                self.convert_image_to_vtf(self.baked_image, output_path)
+                self.status_label.config(text=f"Baked and saved as VTF: {os.path.basename(output_path)}", foreground="green")
+                
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to save VTF: {e}")
+                self.status_label.config(text="Error saving VTF", foreground="red")
+        else:
+            self.status_label.config(text="Baking complete - VTF save cancelled", foreground="blue")
+    
+    def convert_image_to_vtf(self, image, vtf_path):
+        """Convert a PIL image to VTF format."""
+        if not VTFLIB_AVAILABLE:
+            raise Exception("VTFLib not available")
+        
+        try:
+            # Initialize VTFLib
+            vtf_lib = VTFLib.VTFLib()
+            
+            # Convert image to RGBA
+            if image.mode != "RGBA":
+                image = image.convert("RGBA")
+            
+            w, h = image.size
+            data = image.tobytes()
+            
+            # Determine format based on alpha channel
+            try:
+                amin, amax = image.getchannel("A").getextrema()
+                fmt = (VTFLibEnums.ImageFormat.ImageFormatDXT1
+                       if (amin == 255 and amax == 255)
+                       else VTFLibEnums.ImageFormat.ImageFormatDXT5)
+            except:
+                fmt = VTFLibEnums.ImageFormat.ImageFormatDXT5
+            
+            # Create VTF options
+            opts = vtf_lib.create_default_params_structure()
+            opts.ImageFormat = fmt
+            opts.Flags = VTFLibEnums.ImageFlag.ImageFlagEightBitAlpha
+            opts.Resize = 1
+            
+            # Create and save VTF
+            vtf_lib.image_create_single(w, h, data, opts)
+            vtf_lib.image_save(vtf_path)
+            
+        except Exception as e:
+            raise Exception(f"VTF conversion failed: {e}")
     
     def batch_process(self):
         """Batch process a folder of textures."""

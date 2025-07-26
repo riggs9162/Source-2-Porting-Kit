@@ -112,6 +112,14 @@ class SearchReplaceTab(ttk.Frame):
         ttk.Checkbutton(search_options_frame, text="Create backups",
                         variable=self.create_backup_var).pack(side="left", padx=(10, 0))
 
+        # VMT-specific options
+        vmt_options_frame = ttk.Frame(options_frame)
+        vmt_options_frame.pack(fill="x", pady=(5, 0))
+
+        self.vmt_smart_mode_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(vmt_options_frame, text="VMT Smart Mode (only show files referenced in VMT texture parameters)",
+                        variable=self.vmt_smart_mode_var).pack(side="left")
+
         # Action buttons
         button_frame = ttk.Frame(main_frame)
         button_frame.pack(fill="x", pady=(0, 10))
@@ -170,12 +178,94 @@ class SearchReplaceTab(ttk.Frame):
                 if not extensions:  # If no filter, include all files
                     target_files.append(file_path)
                 else:
+                    file_lower = file.lower()
                     for ext in extensions:
-                        if file.lower().endswith(ext[1:]):  # Remove * from *.ext
+                        # Remove the "*." prefix and check if file ends with the extension
+                        ext_suffix = ext[2:] if ext.startswith('*.') else ext
+                        if file_lower.endswith('.' + ext_suffix):
                             target_files.append(file_path)
                             break
 
+        # Apply VMT smart filtering if enabled
+        if self.vmt_smart_mode_var.get():
+            target_files = self.filter_files_by_vmt_references(target_files, folder_path)
+
         return target_files
+
+    def get_vmt_texture_references(self, vmt_file_path):
+        """Extract texture references from a VMT file."""
+        texture_refs = []
+        
+        try:
+            with open(vmt_file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                content = f.read().lower()
+                
+                # Common VMT texture parameters
+                texture_params = [
+                    r'\$basetexture\s+["\']?([^"\'\s\}]+)',
+                    r'\$bumpmap\s+["\']?([^"\'\s\}]+)',
+                    r'\$normalmap\s+["\']?([^"\'\s\}]+)',
+                    r'\$envmapmask\s+["\']?([^"\'\s\}]+)',
+                    r'\$detail\s+["\']?([^"\'\s\}]+)',
+                    r'\$phongexponenttexture\s+["\']?([^"\'\s\}]+)',
+                    r'\$lightwarptexture\s+["\']?([^"\'\s\}]+)',
+                    r'\$texture2\s+["\']?([^"\'\s\}]+)',
+                    r'\$iris\s+["\']?([^"\'\s\}]+)',
+                    r'\$corneatexture\s+["\']?([^"\'\s\}]+)',
+                ]
+                
+                import re
+                for param_pattern in texture_params:
+                    matches = re.findall(param_pattern, content, re.IGNORECASE)
+                    for match in matches:
+                        # Clean up the texture path
+                        texture_path = match.strip().strip('"\'')
+                        if texture_path:
+                            texture_refs.append(texture_path)
+                            
+        except Exception as e:
+            print(f"Error reading VMT file {vmt_file_path}: {e}")
+            
+        return texture_refs
+
+    def is_texture_referenced_in_vmts(self, texture_name, folder_path):
+        """Check if a texture is actually referenced in any VMT files."""
+        # Find all VMT files in the folder
+        vmt_files = []
+        for root, dirs, files in os.walk(folder_path):
+            for file in files:
+                if file.lower().endswith('.vmt'):
+                    vmt_files.append(os.path.join(root, file))
+        
+        # Check each VMT file for references to this texture
+        texture_name_lower = texture_name.lower()
+        for vmt_file in vmt_files:
+            texture_refs = self.get_vmt_texture_references(vmt_file)
+            for ref in texture_refs:
+                # Extract just the filename from the texture reference
+                ref_filename = os.path.basename(ref).lower()
+                if texture_name_lower in ref_filename or ref_filename in texture_name_lower:
+                    return True
+                    
+        return False
+
+    def filter_files_by_vmt_references(self, target_files, folder_path):
+        """Filter files to only include those referenced in VMT files."""
+        filtered_files = []
+        
+        for file_path in target_files:
+            filename = os.path.basename(file_path)
+            
+            # Always include VMT files themselves
+            if filename.lower().endswith('.vmt'):
+                filtered_files.append(file_path)
+            else:
+                # For other files, check if they're referenced in VMTs
+                base_name = os.path.splitext(filename)[0]
+                if self.is_texture_referenced_in_vmts(base_name, folder_path):
+                    filtered_files.append(file_path)
+                    
+        return filtered_files
 
     def search_in_filename(self, filename, search_text, case_sensitive, whole_words):
         """Check if search text is found in filename."""
@@ -184,13 +274,13 @@ class SearchReplaceTab(ttk.Frame):
 
         if whole_words:
             import re
-            pattern = r'\\b' + re.escape(search_term) + r'\\b'
+            pattern = r'\b' + re.escape(search_term) + r'\b'
             return bool(re.search(pattern, search_target, 0 if case_sensitive else re.IGNORECASE))
         else:
             return search_term in search_target
 
-        def search_in_file_content(self, file_path, search_text, case_sensitive, whole_words):
-            """Search for text in file content and return line numbers where found."""
+    def search_in_file_content(self, file_path, search_text, case_sensitive, whole_words):
+        """Search for text in file content and return line numbers where found."""
         matches = []
 
         try:
@@ -201,7 +291,7 @@ class SearchReplaceTab(ttk.Frame):
 
                     if whole_words:
                         import re
-                        pattern = r'\\b' + re.escape(search_term) + r'\\b'
+                        pattern = r'\b' + re.escape(search_term) + r'\b'
                         if re.search(pattern, search_target, 0 if case_sensitive else re.IGNORECASE):
                             matches.append(line_num)
                     else:
@@ -220,7 +310,7 @@ class SearchReplaceTab(ttk.Frame):
 
         if whole_words:
             import re
-            pattern = r'\\b' + re.escape(search_text) + r'\\b'
+            pattern = r'\b' + re.escape(search_text) + r'\b'
             new_filename = re.sub(pattern, replace_text, filename,
                                 flags=0 if case_sensitive else re.IGNORECASE)
         else:
@@ -246,7 +336,7 @@ class SearchReplaceTab(ttk.Frame):
 
             if whole_words:
                 import re
-                pattern = r'\\b' + re.escape(search_text) + r'\\b'
+                pattern = r'\b' + re.escape(search_text) + r'\b'
                 new_content = re.sub(pattern, replace_text, content,
                                     flags=0 if case_sensitive else re.IGNORECASE)
             else:
@@ -268,10 +358,15 @@ class SearchReplaceTab(ttk.Frame):
                     f.write(new_content)
 
                 # Count replacements
-                if case_sensitive:
-                    count = original_content.count(search_text)
+                if whole_words:
+                    import re
+                    pattern = r'\b' + re.escape(search_text) + r'\b'
+                    count = len(re.findall(pattern, original_content, flags=0 if case_sensitive else re.IGNORECASE))
                 else:
-                    count = original_content.lower().count(search_text.lower())
+                    if case_sensitive:
+                        count = original_content.count(search_text)
+                    else:
+                        count = original_content.lower().count(search_text.lower())
 
                 return count
 
@@ -310,7 +405,7 @@ class SearchReplaceTab(ttk.Frame):
             self.results_text.insert("1.0", "No files found matching the specified criteria.")
             return
 
-        preview_text = f"Preview of changes for search term '{search_text}':\\n\\n"
+        preview_text = f"Preview of changes for search term '{search_text}':\n\n"
 
         filename_changes = 0
         content_changes = 0
@@ -338,12 +433,12 @@ class SearchReplaceTab(ttk.Frame):
                     content_changes += 1
 
             if file_results:
-                preview_text += f"{os.path.relpath(file_path, folder_path)}:\\n"
-                preview_text += "\\n".join(file_results) + "\\n\\n"
+                preview_text += f"{os.path.relpath(file_path, folder_path)}:\n"
+                preview_text += "\n".join(file_results) + "\n\n"
 
-        preview_text += f"Summary:\\n"
-        preview_text += f"Files with filename changes: {filename_changes}\\n"
-        preview_text += f"Files with content changes: {content_changes}\\n"
+        preview_text += f"Summary:\n"
+        preview_text += f"Files with filename changes: {filename_changes}\n"
+        preview_text += f"Files with content changes: {content_changes}\n"
 
         self.results_text.delete("1.0", "end")
         self.results_text.insert("1.0", preview_text)
@@ -377,10 +472,10 @@ class SearchReplaceTab(ttk.Frame):
 
         # Confirm the operation
         result = messagebox.askyesno("Confirm Changes",
-                                    f"Apply search and replace operation?\\n\\n"
-                                    f"Search: '{search_text}'\\n"
-                                    f"Replace: '{replace_text}'\\n\\n"
-                                    f"Target: {folder_path}\\n"
+                                    f"Apply search and replace operation?\n\n"
+                                    f"Search: '{search_text}'\n"
+                                    f"Replace: '{replace_text}'\n\n"
+                                    f"Target: {folder_path}\n"
                                     f"Backups: {'Yes' if create_backup else 'No'}")
         if not result:
             return
@@ -396,7 +491,7 @@ class SearchReplaceTab(ttk.Frame):
         total_replacements = 0
         errors = []
 
-        results_text = f"Search and Replace Results:\\n\\n"
+        results_text = f"Search and Replace Results:\n\n"
 
         try:
             for file_path in target_files:
@@ -435,32 +530,32 @@ class SearchReplaceTab(ttk.Frame):
                             errors.append(f"Error modifying content of {file_path}: {e}")
 
                 if file_changed:
-                    results_text += f"{os.path.relpath(file_path, folder_path)}:\\n"
-                    results_text += "\\n".join(file_results) + "\\n\\n"
+                    results_text += f"{os.path.relpath(file_path, folder_path)}:\n"
+                    results_text += "\n".join(file_results) + "\n\n"
 
             # Summary
-            results_text += f"Operation Summary:\\n"
-            results_text += f"Files renamed: {files_renamed}\\n"
-            results_text += f"Files with content changes: {files_content_changed}\\n"
-            results_text += f"Total text replacements: {total_replacements}\\n"
-            results_text += f"Errors: {len(errors)}\\n\\n"
+            results_text += f"Operation Summary:\n"
+            results_text += f"Files renamed: {files_renamed}\n"
+            results_text += f"Files with content changes: {files_content_changed}\n"
+            results_text += f"Total text replacements: {total_replacements}\n"
+            results_text += f"Errors: {len(errors)}\n\n"
 
             if errors:
-                results_text += "Errors encountered:\\n"
+                results_text += "Errors encountered:\n"
                 for error in errors[:10]:  # Show first 10 errors
-                    results_text += f"  {error}\\n"
+                    results_text += f"  {error}\n"
                 if len(errors) > 10:
-                    results_text += f"  ... and {len(errors) - 10} more errors\\n"
+                    results_text += f"  ... and {len(errors) - 10} more errors\n"
 
             self.results_text.delete("1.0", "end")
             self.results_text.insert("1.0", results_text)
 
             # Show completion message
             messagebox.showinfo("Operation Complete",
-                                f"Search and replace completed.\\n\\n"
-                                f"Files renamed: {files_renamed}\\n"
-                                f"Files with content changes: {files_content_changed}\\n"
-                                f"Total replacements: {total_replacements}\\n"
+                                f"Search and replace completed.\n\n"
+                                f"Files renamed: {files_renamed}\n"
+                                f"Files with content changes: {files_content_changed}\n"
+                                f"Total replacements: {total_replacements}\n"
                                 f"Errors: {len(errors)}")
 
             self.status_label.config(

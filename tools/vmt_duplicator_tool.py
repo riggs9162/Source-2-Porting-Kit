@@ -170,36 +170,88 @@ class VMTDuplicatorTab(ttk.Frame):
             self.preview_files()
 
     def find_associated_files(self, vmt_path):
-        """Find VTF files associated with the VMT file."""
+        """Find VTF files associated with the VMT file by reading actual texture references."""
         if not os.path.exists(vmt_path):
             return []
 
-        base_name = os.path.splitext(os.path.basename(vmt_path))[0]
         source_dir = os.path.dirname(vmt_path)
-        
-        # Look for VTF files with the same base name
         associated_files = []
         
-        # Common texture suffixes
-        common_suffixes = ['', '_normal', '_spec', '_detail', '_bump', '_height', '_ao', '_rough', '_metal']
+        # Read the VMT file to find actual texture references
+        texture_refs = self.get_vmt_texture_references(vmt_path)
         
-        for suffix in common_suffixes:
-            vtf_name = f"{base_name}{suffix}.vtf"
-            vtf_path = os.path.join(source_dir, vtf_name)
-            if os.path.exists(vtf_path):
-                associated_files.append(vtf_path)
-
-        # Also look for any other VTF files that start with the base name
+        # Extract base names from texture references
+        texture_names = set()
+        for texture_ref in texture_refs:
+            # Extract just the filename from the texture path
+            texture_name = os.path.basename(texture_ref)
+            texture_names.add(texture_name)
+            
+            # Also add without extension if it has one
+            if '.' in texture_name:
+                texture_name_no_ext = os.path.splitext(texture_name)[0]
+                texture_names.add(texture_name_no_ext)
+        
+        # If no texture references found, fall back to VMT base name only
+        if not texture_names:
+            vmt_base_name = os.path.splitext(os.path.basename(vmt_path))[0]
+            texture_names.add(vmt_base_name)
+        
+        # Now look for VTF files that match these texture names
         try:
             for file in os.listdir(source_dir):
-                if file.lower().endswith('.vtf') and file.startswith(base_name):
-                    vtf_path = os.path.join(source_dir, file)
-                    if vtf_path not in associated_files:
-                        associated_files.append(vtf_path)
+                if file.lower().endswith('.vtf'):
+                    file_base = os.path.splitext(file)[0]
+                    
+                    # Check if this VTF file matches any of our texture names
+                    if file_base in texture_names:
+                        vtf_path = os.path.join(source_dir, file)
+                        if vtf_path not in associated_files:
+                            associated_files.append(vtf_path)
+                            
         except (OSError, PermissionError):
             pass
 
         return associated_files
+
+    def get_vmt_texture_references(self, vmt_file_path):
+        """Extract texture references from a VMT file."""
+        texture_refs = []
+        
+        try:
+            with open(vmt_file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                content = f.read()
+                
+                # Common VMT texture parameters - corrected patterns for quoted parameter names
+                texture_params = [
+                    r'"\$basetexture"\s+"([^"]+)"',          # Match quoted parameter and quoted texture paths
+                    r'"\$bumpmap"\s+"([^"]+)"',              # Match quoted parameter and quoted texture paths
+                    r'"\$normalmap"\s+"([^"]+)"',            # Match quoted parameter and quoted texture paths
+                    r'"\$envmapmask"\s+"([^"]+)"',           # Match quoted parameter and quoted texture paths
+                    r'"\$detail"\s+"([^"]+)"',               # Match quoted parameter and quoted texture paths
+                    r'"\$phongexponenttexture"\s+"([^"]+)"', # Match quoted parameter and quoted texture paths
+                    r'"\$lightwarptexture"\s+"([^"]+)"',     # Match quoted parameter and quoted texture paths
+                    r'"\$texture2"\s+"([^"]+)"',             # Match quoted parameter and quoted texture paths
+                    r'"\$iris"\s+"([^"]+)"',                 # Match quoted parameter and quoted texture paths
+                    r'"\$corneatexture"\s+"([^"]+)"',        # Match quoted parameter and quoted texture paths
+                    # Fallback patterns for unquoted parameter names (less common)
+                    r'\$basetexture\s+["\']?([^"\'\s\}]+)',
+                    r'\$bumpmap\s+["\']?([^"\'\s\}]+)',
+                    r'\$normalmap\s+["\']?([^"\'\s\}]+)',
+                ]
+                
+                for param_pattern in texture_params:
+                    matches = re.findall(param_pattern, content, re.IGNORECASE)
+                    for match in matches:
+                        # Clean up the texture path
+                        texture_path = match.strip().strip('"\'')
+                        if texture_path:
+                            texture_refs.append(texture_path)
+                            
+        except Exception as e:
+            print(f"Error reading VMT file {vmt_file_path}: {e}")
+            
+        return texture_refs
 
     def preview_files(self):
         """Preview the files that will be copied."""
