@@ -7,7 +7,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
 from .base_tool import BaseTool, register_tool
-from .utils import save_config
+from .utils import browse_file_with_context, save_config
 
 
 def modify_qc_smd_files(qc_path, smd_path, model_prefix, texture_prefix):
@@ -116,14 +116,20 @@ class QcSmdPrefixTab(ttk.Frame):
         self.log_text.see(tk.END)
     
     def select_qc(self):
-        path = filedialog.askopenfilename(filetypes=[("QC Files", "*.qc")])
+        path = browse_file_with_context(
+            entry=None, context_key="qc_smd_prefix_qc_file",
+            filetypes=[("QC Files", "*.qc")], title="Select QC File"
+        )
         if path:
             self.qc_path = path
             self.qc_label.config(text=os.path.basename(path))
             self.log(f"Selected QC file: {os.path.basename(path)}")
     
     def select_smd(self):
-        path = filedialog.askopenfilename(filetypes=[("SMD Files", "*.smd")])
+        path = browse_file_with_context(
+            entry=None, context_key="qc_smd_prefix_smd_file",
+            filetypes=[("SMD Files", "*.smd")], title="Select SMD File"
+        )
         if path:
             self.smd_path = path
             self.smd_label.config(text=os.path.basename(path))
