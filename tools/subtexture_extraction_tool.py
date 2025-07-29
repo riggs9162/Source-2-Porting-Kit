@@ -9,7 +9,7 @@ from tkinter import ttk, filedialog, messagebox
 from tkinter.scrolledtext import ScrolledText
 from PIL import Image, ImageTk, ImageDraw
 from .base_tool import BaseTool, register_tool
-from .utils import PlaceholderEntry, browse_file
+from .utils import PlaceholderEntry, browse_file, browse_file_with_context, browse_folder_with_context, save_file_with_context
 
 class Region:
     """Represents a rectangular region for extraction."""
@@ -221,12 +221,12 @@ class SubtextureExtractionTab(ttk.Frame):
     
     def browse_image(self):
         """Browse for source image file."""
-        path = browse_file(
+        path = browse_file_with_context(
+            self.image_path, context_key="subtexture_extraction_source_image",
             title="Select Source Image",
             filetypes=[("Image Files", "*.png *.jpg *.jpeg *.tga *.bmp")]
         )
         if path:
-            self.image_path.set_text(path)
             self.load_image()
     
     def load_image(self):
@@ -536,7 +536,8 @@ class SubtextureExtractionTab(ttk.Frame):
             messagebox.showinfo("No Regions", "No regions to save.")
             return
         
-        output_path = filedialog.asksaveasfilename(
+        output_path = save_file_with_context(
+            context_key="subtexture_extraction_save_regions",
             title="Save Regions",
             defaultextension=".json",
             filetypes=[("JSON Files", "*.json")]
@@ -560,7 +561,8 @@ class SubtextureExtractionTab(ttk.Frame):
     
     def load_regions(self):
         """Load regions from a JSON file."""
-        file_path = filedialog.askopenfilename(
+        file_path = browse_file_with_context(
+            entry=None, context_key="subtexture_extraction_load_regions",
             title="Load Regions",
             filetypes=[("JSON Files", "*.json")]
         )
@@ -633,7 +635,10 @@ class SubtextureExtractionTab(ttk.Frame):
             messagebox.showerror("Error", "Please load a source image first.")
             return
         
-        output_folder = filedialog.askdirectory(title="Select output folder for extracted regions")
+        output_folder = browse_folder_with_context(
+            entry=None, context_key="subtexture_extraction_batch_output",
+            title="Select output folder for extracted regions"
+        )
         if not output_folder:
             return
         
@@ -684,7 +689,8 @@ class SubtextureExtractionTab(ttk.Frame):
             extracted_image = self.source_image.crop((x1, y1, x2, y2))
             
             # Save extracted image
-            output_path = filedialog.asksaveasfilename(
+            output_path = save_file_with_context(
+                context_key="subtexture_extraction_single_save",
                 title=f"Save extracted region: {region.name}",
                 defaultextension=".png",
                 initialvalue=f"{region.name}.png",
