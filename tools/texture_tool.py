@@ -19,7 +19,7 @@ except ImportError:
     VTFLIB_AVAILABLE = False
 
 from .base_tool import BaseTool, register_tool
-from .utils import PlaceholderEntry, browse_folder, determine_surfaceprop, save_config
+from .utils import PlaceholderEntry, browse_folder, determine_surfaceprop, browse_folder_with_context, save_config
 
 
 def convert_png_to_vtf(vtf_lib, png_src, vtf_dst, clamp):
@@ -152,14 +152,14 @@ class TextureTab(ttk.Frame):
         self.entry_input = PlaceholderEntry(self, width=50)
         self.entry_input.insert(0, config.get("texture_input", ""))
         self.entry_input.grid(row=0, column=1, pady=5, padx=5, sticky="ew")
-        ttk.Button(self, text="Browse…", command=lambda: browse_folder(self.entry_input)).grid(row=0, column=2, padx=5)
+        ttk.Button(self, text="Browse…", command=lambda: browse_folder_with_context(self.entry_input, context_key="texture_tool_input_folder", title="Select Input Folder")).grid(row=0, column=2, padx=5)
 
         # Output folder
         ttk.Label(self, text="Output Folder:").grid(row=1, column=0, pady=5, padx=5, sticky="e")
         self.entry_output = PlaceholderEntry(self, width=50)
         self.entry_output.insert(0, config.get("texture_output", ""))
         self.entry_output.grid(row=1, column=1, pady=5, padx=5, sticky="ew")
-        ttk.Button(self, text="Browse…", command=lambda: browse_folder(self.entry_output)).grid(row=1, column=2, padx=5)
+        ttk.Button(self, text="Browse…", command=lambda: browse_folder_with_context(self.entry_output, context_key="texture_tool_output_folder", title="Select Output Folder")).grid(row=1, column=2, padx=5)
 
         # Material path
         ttk.Label(self, text="Material Path:").grid(row=2, column=0, pady=5, padx=5, sticky="e")
