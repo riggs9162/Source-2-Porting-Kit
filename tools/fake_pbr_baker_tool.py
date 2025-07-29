@@ -7,7 +7,7 @@ from tkinter import ttk, filedialog, messagebox
 from PIL import Image, ImageTk, ImageEnhance, ImageOps, ImageChops
 import os
 from .base_tool import BaseTool, register_tool
-from .utils import PlaceholderEntry, browse_file
+from .utils import PlaceholderEntry, browse_file_with_context
 
 # Try to import VTFLib for VTF conversion
 try:
@@ -47,7 +47,7 @@ class FakePBRBakerTab(ttk.Frame):
             'dark': 0.0,
             'white': 0.0,
             'invert': False,
-            'preview_res': 512
+            'preview_res': 256
         }
         
         # Images and thumbnails
@@ -271,7 +271,7 @@ class FakePBRBakerTab(ttk.Frame):
     
     def browse_base(self):
         """Browse for base texture file."""
-        path = browse_file(
+        path = browse_file_with_context(
             title="Select Base Texture",
             filetypes=[("Image Files", "*.png *.jpg *.jpeg *.tga *.bmp")]
         )
@@ -281,7 +281,7 @@ class FakePBRBakerTab(ttk.Frame):
     
     def browse_rough(self):
         """Browse for roughness texture file."""
-        path = browse_file(
+        path = browse_file_with_context(
             title="Select Roughness Map",
             filetypes=[("Image Files", "*.png *.jpg *.jpeg *.tga *.bmp")]
         )
@@ -291,7 +291,7 @@ class FakePBRBakerTab(ttk.Frame):
     
     def browse_ao(self):
         """Browse for AO texture file."""
-        path = browse_file(
+        path = browse_file_with_context(
             title="Select AO Map",
             filetypes=[("Image Files", "*.png *.jpg *.jpeg *.tga *.bmp")]
         )
@@ -301,7 +301,7 @@ class FakePBRBakerTab(ttk.Frame):
     
     def browse_metal(self):
         """Browse for metal mask file."""
-        path = browse_file(
+        path = browse_file_with_context(
             title="Select Metal Mask",
             filetypes=[("Image Files", "*.png *.jpg *.jpeg *.tga *.bmp")]
         )
