@@ -148,6 +148,64 @@ def browse_file(entry: PlaceholderEntry = None, filetypes=None, title="Select Fi
     return p
 
 
+# Context-aware browse functions that remember last used paths
+_browse_contexts = {}
+
+
+def browse_folder_with_context(entry: PlaceholderEntry = None, context_key: str = "default", title="Select Folder"):
+    """Browse for a folder with context-aware path memory."""
+    initial_dir = _browse_contexts.get(context_key, "")
+    if initial_dir and not os.path.exists(initial_dir):
+        initial_dir = ""
+    
+    p = filedialog.askdirectory(title=title, initialdir=initial_dir)
+    if p:
+        _browse_contexts[context_key] = p
+        if entry:
+            entry.set_text(p)
+    return p
+
+
+def browse_file_with_context(entry: PlaceholderEntry = None, context_key: str = "default", 
+                           filetypes=None, title="Select File"):
+    """Browse for a file with context-aware path memory."""
+    if filetypes is None:
+        filetypes = [("All files", "*.*")]
+    
+    initial_dir = _browse_contexts.get(context_key, "")
+    if initial_dir and not os.path.exists(initial_dir):
+        initial_dir = ""
+    
+    p = filedialog.askopenfilename(filetypes=filetypes, title=title, initialdir=initial_dir)
+    if p:
+        _browse_contexts[context_key] = os.path.dirname(p)
+        if entry:
+            entry.set_text(p)
+    return p
+
+
+def save_file_with_context(context_key: str = "default", title="Save File", 
+                         defaultextension="", initialvalue="", filetypes=None):
+    """Save a file with context-aware path memory."""
+    if filetypes is None:
+        filetypes = [("All files", "*.*")]
+    
+    initial_dir = _browse_contexts.get(context_key, "")
+    if initial_dir and not os.path.exists(initial_dir):
+        initial_dir = ""
+    
+    p = filedialog.asksaveasfilename(
+        title=title, 
+        defaultextension=defaultextension,
+        initialvalue=initialvalue,
+        filetypes=filetypes, 
+        initialdir=initial_dir
+    )
+    if p:
+        _browse_contexts[context_key] = os.path.dirname(p)
+    return p
+
+
 # Convenience functions for tools that just want to browse without an entry widget
 def select_folder(title="Select Folder"):
     """Simple folder selection dialog."""
