@@ -8,7 +8,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import re
 from .base_tool import BaseTool, register_tool
-from .utils import PlaceholderEntry, browse_file
+from .utils import PlaceholderEntry, browse_file, browse_file_with_context, browse_folder_with_context
 
 @register_tool
 class VMTDuplicatorTool(BaseTool):
@@ -121,20 +121,19 @@ class VMTDuplicatorTab(ttk.Frame):
 
     def browse_vmt_file(self):
         """Browse for VMT file."""
-        path = browse_file(
+        path = browse_file_with_context(
+            self.vmt_path, context_key="vmt_duplicator_source_file",
             title="Select VMT File",
             filetypes=[("VMT Files", "*.vmt"), ("All Files", "*.*")]
         )
         if path:
-            self.vmt_path.set_text(path)
             self.auto_fill_settings(path)
             self.on_vmt_path_change()
 
     def browse_output_dir(self):
         """Browse for output directory."""
-        directory = filedialog.askdirectory(title="Select Output Directory")
-        if directory:
-            self.output_dir.set_text(directory)
+        path = browse_folder_with_context(self.output_dir, context_key="vmt_duplicator_output_dir",
+                                        title="Select Output Directory")
 
     def toggle_output_dir(self):
         """Toggle output directory field based on checkbox."""
