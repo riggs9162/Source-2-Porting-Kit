@@ -12,7 +12,7 @@ from tkinter.scrolledtext import ScrolledText
 from PIL import Image, ImageTk, ImageChops
 
 from .base_tool import BaseTool, register_tool
-from .utils import PlaceholderEntry, browse_folder, browse_file, save_config
+from .utils import PlaceholderEntry, browse_folder, browse_file, save_config, browse_file_with_context, browse_folder_with_context
 
 # Try to import VTFLib
 try:
@@ -150,12 +150,19 @@ class VmatToVmtTab(ttk.Frame):
         self.log_text.see(tk.END)
     
     def browse_vmat(self):
-        path = filedialog.askopenfilename(filetypes=[("VMAT Files", "*.vmat"), ("All Files", "*.*")])
+        path = browse_file_with_context(
+            entry=None, context_key="vmat_to_vmt_source_file",
+            filetypes=[("VMAT Files", "*.vmat"), ("All Files", "*.*")],
+            title="Select VMAT File"
+        )
         if path:
             self.vmat_var.set(path)
     
     def browse_output(self):
-        path = filedialog.askdirectory()
+        path = browse_folder_with_context(
+            entry=None, context_key="vmat_to_vmt_output_dir",
+            title="Select Output Directory"
+        )
         if path:
             self.output_var.set(path)
     
