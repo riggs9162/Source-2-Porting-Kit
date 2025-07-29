@@ -10,7 +10,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from tkinter.scrolledtext import ScrolledText
 from .base_tool import BaseTool, register_tool
-from .utils import PlaceholderEntry, browse_folder
+from .utils import PlaceholderEntry, browse_folder, browse_folder_with_context
 
 @register_tool
 class SoundscapeSearcherTool(BaseTool):
@@ -147,9 +147,8 @@ class SoundscapeSearcherTab(ttk.Frame):
     
     def browse_root_folder(self):
         """Browse for root folder."""
-        path = browse_folder(title="Select folder to search in")
-        if path:
-            self.root_folder.set_text(path)
+        path = browse_folder_with_context(self.root_folder, context_key="soundscape_searcher_root_folder",
+                                        title="Select folder to search in")
     
     def clear_log(self):
         """Clear the log text."""
