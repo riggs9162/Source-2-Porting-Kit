@@ -22,5 +22,6 @@ from . import subtexture_extraction_tool
 from . import texture_tool
 from . import vmat_to_vmt_tool
 from . import vmt_generator_tool
+from . import filename_sanitizer_tool
 
 __all__ = ['tool_registry']
