@@ -7,7 +7,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from tkinter.scrolledtext import ScrolledText
 from .base_tool import BaseTool, register_tool
-from .utils import PlaceholderEntry, browse_folder, browse_file
+from .utils import PlaceholderEntry, browse_folder, browse_file, browse_folder_with_context, browse_file_with_context, save_file_with_context
 
 @register_tool
 class VMTGeneratorTool(BaseTool):
@@ -136,25 +136,23 @@ class VMTGeneratorTab(ttk.Frame):
 
     def browse_vtf_folder(self):
         """Browse for VTF folder."""
-        path = browse_folder(title="Select folder containing VTF files")
-        if path:
-            self.vtf_folder.set_text(path)
+        path = browse_folder_with_context(self.vtf_folder, context_key="vmt_generator_vtf_folder", 
+                                        title="Select folder containing VTF files")
 
     def browse_template(self):
         """Browse for template VMT file."""
-        path = browse_file(
+        path = browse_file_with_context(
+            self.template_path, context_key="vmt_generator_template",
             title="Select template VMT file",
             filetypes=[("VMT Files", "*.vmt"), ("Text Files", "*.txt"), ("All Files", "*.*")]
         )
         if path:
-            self.template_path.set_text(path)
             self.load_template_file()
 
     def browse_output_folder(self):
         """Browse for output folder."""
-        path = browse_folder(title="Select output folder for VMT files")
-        if path:
-            self.output_folder.set_text(path)
+        path = browse_folder_with_context(self.output_folder, context_key="vmt_generator_output_folder",
+                                        title="Select output folder for VMT files")
 
     def load_template_file(self):
         """Load template from the selected file."""
@@ -176,7 +174,8 @@ class VMTGeneratorTab(ttk.Frame):
 
     def save_template(self):
         """Save current template to a file."""
-        output_path = filedialog.asksaveasfilename(
+        output_path = save_file_with_context(
+            context_key="vmt_generator_save_template",
             title="Save Template",
             defaultextension=".vmt",
             filetypes=[("VMT Files", "*.vmt"), ("Text Files", "*.txt")]
