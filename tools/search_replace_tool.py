@@ -7,7 +7,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from tkinter.scrolledtext import ScrolledText
 from .base_tool import BaseTool, register_tool
-from .utils import PlaceholderEntry, browse_folder
+from .utils import PlaceholderEntry, browse_folder, browse_folder_with_context
 
 @register_tool
 class SearchReplaceTool(BaseTool):
@@ -142,9 +142,8 @@ class SearchReplaceTab(ttk.Frame):
 
     def browse_folder(self):
         """Browse for target folder."""
-        path = browse_folder(title="Select folder to search and replace in")
-        if path:
-            self.folder_path.set_text(path)
+        path = browse_folder_with_context(self.folder_path, context_key="search_replace_folder",
+                                        title="Select folder to search and replace in")
 
     def get_file_extensions(self):
         """Parse file extensions from the input field."""
