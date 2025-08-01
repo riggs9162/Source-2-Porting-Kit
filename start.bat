@@ -12,27 +12,27 @@ if %errorlevel% neq 0 (
 )
 
 REM Check for required packages
-echo Checking dependencies...
+echo Checking dependencies
 python -c "import PIL" >nul 2>&1
 if %errorlevel% neq 0 (
-    echo Installing Pillow (Python Imaging Library)...
+    echo Installing Pillow (Python Imaging Library)
     python -m pip install Pillow
 )
 
 python -c "import tkinterdnd2" >nul 2>&1
 if %errorlevel% neq 0 (
-    echo Installing tkinterdnd2 (for drag and drop support)...
+    echo Installing tkinterdnd2 (for drag and drop support)
     python -m pip install tkinterdnd2
 )
 
 python -c "import pydub" >nul 2>&1
 if %errorlevel% neq 0 (
-    echo Installing pydub (for audio processing)...
+    echo Installing pydub (for audio processing)
     python -m pip install pydub
     echo Note: For audio conversion, you may need to install ffmpeg separately.
 )
 
 echo.
-echo Starting Modular Source 2 Porting Kit...
-python porter_modular.py
+echo Starting Modular Source 2 Porting Kit
+python porter.py
 pause
