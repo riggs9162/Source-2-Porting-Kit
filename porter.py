@@ -32,7 +32,7 @@ except ImportError:
 
 RPC_STATE = 'Browsing Tools'
 RPC_DETAILS = 'Source 2 Porting Kit'
-RPC_CLIENT_ID = "1386390615138369718"  # Replace this with your own client id
+RPC_CLIENT_ID = 'REPLACE'  # Replace this with your own client id
 
 # Global variables for RPC
 presence = None
