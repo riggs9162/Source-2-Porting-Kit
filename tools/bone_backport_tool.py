@@ -12,53 +12,69 @@ from .utils import PlaceholderEntry, browse_folder
 
 # Bone mapping from Source 2 to ValveBiped (Source 1)
 BONE_MAPPING = {
-    # Pelvis & Spine
+    # Root
     "pelvis":        "ValveBiped.Bip01_Pelvis",
+
+    # Spine
     "spine_0":       "ValveBiped.Bip01_Spine",
     "spine_1":       "ValveBiped.Bip01_Spine1",
     "spine_2":       "ValveBiped.Bip01_Spine2",
-    "spine_3":       "ValveBiped.Bip01_Spine4",
-    "neck_01":       "ValveBiped.Bip01_Neck1",
+    "spine_3":       "ValveBiped.Bip01_Spine4",  # optional
+
+    # Neck & Head
+    "neck_0":        "ValveBiped.Bip01_Neck1",
     "head":          "ValveBiped.Bip01_Head1",
 
-    # Left Arm & Fingers
+    # Left Arm
     "clavicle_L":            "ValveBiped.Bip01_L_Clavicle",
     "arm_upper_L":           "ValveBiped.Bip01_L_UpperArm",
     "arm_lower_L":           "ValveBiped.Bip01_L_Forearm",
     "hand_L":                "ValveBiped.Bip01_L_Hand",
+
+    # Left Fingers
     "finger_thumb_0_L":      "ValveBiped.Bip01_L_Finger0",
     "finger_thumb_1_L":      "ValveBiped.Bip01_L_Finger01",
     "finger_thumb_2_L":      "ValveBiped.Bip01_L_Finger02",
+
     "finger_index_meta_L":   "ValveBiped.Bip01_L_Finger1",
     "finger_index_0_L":      "ValveBiped.Bip01_L_Finger11",
     "finger_index_1_L":      "ValveBiped.Bip01_L_Finger12",
+
     "finger_middle_meta_L":  "ValveBiped.Bip01_L_Finger2",
     "finger_middle_0_L":     "ValveBiped.Bip01_L_Finger21",
     "finger_middle_1_L":     "ValveBiped.Bip01_L_Finger22",
+
     "finger_ring_meta_L":    "ValveBiped.Bip01_L_Finger3",
     "finger_ring_0_L":       "ValveBiped.Bip01_L_Finger31",
     "finger_ring_1_L":       "ValveBiped.Bip01_L_Finger32",
+
     "finger_pinky_meta_L":   "ValveBiped.Bip01_L_Finger4",
     "finger_pinky_0_L":      "ValveBiped.Bip01_L_Finger41",
     "finger_pinky_1_L":      "ValveBiped.Bip01_L_Finger42",
 
-    # Right Arm & Fingers
+    # Right Arm
     "clavicle_R":            "ValveBiped.Bip01_R_Clavicle",
     "arm_upper_R":           "ValveBiped.Bip01_R_UpperArm",
     "arm_lower_R":           "ValveBiped.Bip01_R_Forearm",
     "hand_R":                "ValveBiped.Bip01_R_Hand",
+
+    # Right Fingers
     "finger_thumb_0_R":      "ValveBiped.Bip01_R_Finger0",
     "finger_thumb_1_R":      "ValveBiped.Bip01_R_Finger01",
     "finger_thumb_2_R":      "ValveBiped.Bip01_R_Finger02",
+
     "finger_index_meta_R":   "ValveBiped.Bip01_R_Finger1",
     "finger_index_0_R":      "ValveBiped.Bip01_R_Finger11",
     "finger_index_1_R":      "ValveBiped.Bip01_R_Finger12",
+
     "finger_middle_meta_R":  "ValveBiped.Bip01_R_Finger2",
     "finger_middle_0_R":     "ValveBiped.Bip01_R_Finger21",
     "finger_middle_1_R":     "ValveBiped.Bip01_R_Finger22",
+
     "finger_ring_meta_R":    "ValveBiped.Bip01_R_Finger3",
     "finger_ring_0_R":       "ValveBiped.Bip01_R_Finger31",
     "finger_ring_1_R":       "ValveBiped.Bip01_R_Finger32",
+
     "finger_pinky_meta_R":   "ValveBiped.Bip01_R_Finger4",
     "finger_pinky_0_R":      "ValveBiped.Bip01_R_Finger41",
     "finger_pinky_1_R":      "ValveBiped.Bip01_R_Finger42",
@@ -75,6 +91,19 @@ BONE_MAPPING = {
     "ankle_R":               "ValveBiped.Bip01_R_Foot",
     "ball_R":                "ValveBiped.Bip01_R_Toe0",
 }
+
+UNMAPPED_BONES = [
+    "blender_implicit",
+    "finger_index_2_L", "finger_middle_2_L", "finger_ring_2_L", "finger_pinky_2_L",
+    "finger_index_2_R", "finger_middle_2_R", "finger_ring_2_R", "finger_pinky_2_R",
+    "arm_upper_L_TWIST", "arm_upper_L_TWIST1", "arm_lower_L_TWIST", "arm_lower_L_TWIST1",
+    "arm_upper_R_TWIST", "arm_upper_R_TWIST1", "arm_lower_R_TWIST", "arm_lower_R_TWIST1",
+    "scap_0_L", "scap_0_R",
+    "neck_0_TWIST", "neckNape_HLPR",
+    "pect_0_L", "pect_0_R",
+    "foot_pole_L", "foot_pole_R", "knee_pole_L", "knee_pole_R",
+    "weapon_hand_R"
+]
 
 @register_tool
 class BoneBackportTool(BaseTool):
@@ -128,6 +157,10 @@ class BoneBackportTab(ttk.Frame):
         self.process_qc_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(options_frame, text="Process QC files",
                     variable=self.process_qc_var).pack(anchor="w")
+
+        self.process_qci_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(options_frame, text="Process QCIs",
+                    variable=self.process_qci_var).pack(anchor="w")
 
         self.process_smd_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(options_frame, text="Process SMD files",
@@ -196,20 +229,23 @@ class BoneBackportTab(ttk.Frame):
     def find_files(self, folder_path):
         """Find QC and SMD files in the specified folder."""
         qc_files = []
+        qci_files = []
         smd_files = []
 
         if not os.path.exists(folder_path):
-            return qc_files, smd_files
+            return qc_files, qci_files, smd_files
 
         for root, dirs, files in os.walk(folder_path):
             for file in files:
                 file_path = os.path.join(root, file)
                 if file.lower().endswith('.qc'):
                     qc_files.append(file_path)
+                elif file.lower().endswith('.qci'):
+                    qci_files.append(file_path)
                 elif file.lower().endswith('.smd'):
                     smd_files.append(file_path)
 
-        return qc_files, smd_files
+        return qc_files, qci_files, smd_files
 
     def process_qc_file(self, file_path, bone_mapping, preview_mode=False):
         """Process a QC file to replace bone names."""
@@ -287,10 +323,10 @@ class BoneBackportTab(ttk.Frame):
             return
 
         bone_mapping = self.get_full_mapping()
-        qc_files, smd_files = self.find_files(folder_path)
+        qc_files, qci_files, smd_files = self.find_files(folder_path)
 
-        if not qc_files and not smd_files:
-            messagebox.showinfo("No Files", "No QC or SMD files found in the selected folder.")
+        if not qc_files and not smd_files and not qci_files:
+            messagebox.showinfo("No Files", "No QC, QCI, or SMD files found in the selected folder.")
             return
 
         # Create preview window
@@ -316,6 +352,20 @@ class BoneBackportTab(ttk.Frame):
                         preview_text += f"\n{os.path.basename(qc_file)}: No changes needed\n"
                 except Exception as e:
                     preview_text += f"\n{os.path.basename(qc_file)}: Error - {e}\n"
+
+        # Preview QCI files
+        if self.process_qci_var.get() and qci_files:
+            preview_text += "\nQCI Files:\n"
+            for qci_file in qci_files:
+                try:
+                    changes = self.process_qc_file(qci_file, bone_mapping, preview_mode=True)
+                    if changes:
+                        preview_text += f"\n{os.path.basename(qci_file)}:\n"
+                        preview_text += "\n".join(changes) + "\n"
+                    else:
+                        preview_text += f"\n{os.path.basename(qci_file)}: No changes needed\n"
+                except Exception as e:
+                    preview_text += f"\n{os.path.basename(qci_file)}: Error - {e}\n"
 
         # Preview SMD files
         if self.process_smd_var.get() and smd_files:
@@ -347,16 +397,18 @@ class BoneBackportTab(ttk.Frame):
             return
 
         bone_mapping = self.get_full_mapping()
-        qc_files, smd_files = self.find_files(folder_path)
+        qc_files, qci_files, smd_files = self.find_files(folder_path)
 
-        if not qc_files and not smd_files:
-            messagebox.showinfo("No Files", "No QC or SMD files found in the selected folder.")
+        if not qc_files and not qci_files and not smd_files:
+            messagebox.showinfo("No Files", "No QC, QCI, or SMD files found in the selected folder.")
             return
 
         # Confirm processing
         file_count = 0
         if self.process_qc_var.get():
             file_count += len(qc_files)
+        if self.process_qci_var.get():
+            file_count += len(qci_files)
         if self.process_smd_var.get():
             file_count += len(smd_files)
 
@@ -382,6 +434,18 @@ class BoneBackportTab(ttk.Frame):
                         processed += 1
                     except Exception as e:
                         print(f"Error processing QC file {qc_file}: {e}")
+                        errors += 1
+
+            # Process QCI files
+            if self.process_qci_var.get():
+                for qci_file in qci_files:
+                    try:
+                        changes = self.process_qc_file(qci_file, bone_mapping)
+                        if changes:
+                            total_changes += len(changes)
+                        processed += 1
+                    except Exception as e:
+                        print(f"Error processing QCI file {qci_file}: {e}")
                         errors += 1
 
             # Process SMD files
