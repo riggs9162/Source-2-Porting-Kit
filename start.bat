@@ -32,6 +32,12 @@ if %errorlevel% neq 0 (
     echo Note: For audio conversion, you may need to install ffmpeg separately.
 )
 
+python -c "import discord-rich-presence" >nul 2>&1
+if %errorlevel% neq 0 (
+    echo Installing discord-rich-presence (for discord RPC)
+    python -m pip install discord-rich-presence
+)
+
 echo.
 echo Starting Modular Source 2 Porting Kit
 python porter.py
