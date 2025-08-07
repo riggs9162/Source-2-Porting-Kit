@@ -4,11 +4,9 @@ try:
 except BaseException:
     from .VTFLibEnums import *
 
-
 class ImageFormatInfo(Structure):
     def get_name(self):
         return self.name.value if self.name != 0 else "NONE"
-
 
 ImageFormatInfo._fields_ = [
     ('name', c_char_p),

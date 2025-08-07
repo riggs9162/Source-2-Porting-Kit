@@ -250,9 +250,9 @@ class PorterApp(tk.Tk if not DND_AVAILABLE else TkinterDnD.Tk):
             for dep in tool.dependencies:
                 try:
                     __import__(dep)
-                    status = "✓ Available"
+                    status = "Available"
                 except ImportError:
-                    status = "✗ Missing"
+                    status = "Missing"
                 info_text += f"  • {dep}: {status}\n"
 
             info_text += "\nTo install missing dependencies, run:\n"

@@ -1,4 +1,35 @@
+# Configuration
 config.json
-/tools/__pycache__
-/__pycache__
+
+# Python cache
+__pycache__/
 *.pyc
+*.pyo
+*.pyd
+.Python
+
+# PyInstaller build artifacts
+build/
+dist/
+*.spec.bak
+*.exe
+*.app
+
+# Build logs
+*.log
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temporary files
+*.tmp
+*.temp
+~*
