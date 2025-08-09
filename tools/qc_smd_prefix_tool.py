@@ -7,7 +7,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
 from .base_tool import BaseTool, register_tool
-from .utils import browse_file_with_context, save_config
+from .utils import PlaceholderEntry, browse_file_with_context, save_config
 
 
 def modify_qc_smd_files(qc_path, smd_path, model_prefix, texture_prefix):
@@ -74,18 +74,17 @@ class QcSmdPrefixTab(ttk.Frame):
         super().__init__(parent)
         self.config = config
         
-        self.qc_path = ""
-        self.smd_path = ""
-        
-        # QC File Selection
-        ttk.Button(self, text="Select QC File", command=self.select_qc).grid(row=0, column=0, pady=5, padx=5, sticky="w")
-        self.qc_label = ttk.Label(self, text="No QC file selected")
-        self.qc_label.grid(row=0, column=1, pady=5, padx=5, sticky="w")
-        
-        # SMD File Selection
-        ttk.Button(self, text="Select SMD File", command=self.select_smd).grid(row=1, column=0, pady=5, padx=5, sticky="w")
-        self.smd_label = ttk.Label(self, text="No SMD file selected")
-        self.smd_label.grid(row=1, column=1, pady=5, padx=5, sticky="w")
+        # QC File Selection (editable path + Browse)
+        ttk.Label(self, text="QC File:").grid(row=0, column=0, pady=5, padx=5, sticky="w")
+        self.qc_path_entry = PlaceholderEntry(self, width=60, placeholder="Select or paste QC file path…")
+        self.qc_path_entry.grid(row=0, column=1, pady=5, padx=5, sticky="ew")
+        ttk.Button(self, text="Browse…", command=self.select_qc).grid(row=0, column=2, pady=5, padx=5, sticky="w")
+
+        # SMD File Selection (editable path + Browse)
+        ttk.Label(self, text="SMD File:").grid(row=1, column=0, pady=5, padx=5, sticky="w")
+        self.smd_path_entry = PlaceholderEntry(self, width=60, placeholder="Select or paste SMD file path…")
+        self.smd_path_entry.grid(row=1, column=1, pady=5, padx=5, sticky="ew")
+        ttk.Button(self, text="Browse…", command=self.select_smd).grid(row=1, column=2, pady=5, padx=5, sticky="w")
         
         # Model Prefix
         ttk.Label(self, text="Model Prefix (adds to QC + renames SMD):").grid(row=2, column=0, pady=5, padx=5, sticky="w")
@@ -117,26 +116,24 @@ class QcSmdPrefixTab(ttk.Frame):
     
     def select_qc(self):
         path = browse_file_with_context(
-            entry=None, context_key="qc_smd_prefix_qc_file",
+            entry=self.qc_path_entry, context_key="qc_smd_prefix_qc_file",
             filetypes=[("QC Files", "*.qc")], title="Select QC File"
         )
         if path:
-            self.qc_path = path
-            self.qc_label.config(text=os.path.basename(path))
             self.log(f"Selected QC file: {os.path.basename(path)}")
     
     def select_smd(self):
         path = browse_file_with_context(
-            entry=None, context_key="qc_smd_prefix_smd_file",
+            entry=self.smd_path_entry, context_key="qc_smd_prefix_smd_file",
             filetypes=[("SMD Files", "*.smd")], title="Select SMD File"
         )
         if path:
-            self.smd_path = path
-            self.smd_label.config(text=os.path.basename(path))
             self.log(f"Selected SMD file: {os.path.basename(path)}")
     
     def on_apply(self):
-        if not self.qc_path or not self.smd_path:
+        qc_path = self.qc_path_entry.get()
+        smd_path = self.smd_path_entry.get()
+        if not qc_path or not smd_path:
             messagebox.showerror("Missing File", "You must select both a QC and an SMD file.")
             return
             
@@ -155,7 +152,7 @@ class QcSmdPrefixTab(ttk.Frame):
         # Process files
         try:
             self.log(f"Applying prefixes - Model: '{model_prefix}', Texture: '{texture_prefix}'")
-            new_qc, new_smd = modify_qc_smd_files(self.qc_path, self.smd_path, model_prefix, texture_prefix)
+            new_qc, new_smd = modify_qc_smd_files(qc_path, smd_path, model_prefix, texture_prefix)
             self.log(f"Created new QC: {os.path.basename(new_qc)}")
             self.log(f"Created new SMD: {os.path.basename(new_smd)}")
             messagebox.showinfo("Success", f"Files processed successfully:\n\nNew QC: {os.path.basename(new_qc)}\nNew SMD: {os.path.basename(new_smd)}")
