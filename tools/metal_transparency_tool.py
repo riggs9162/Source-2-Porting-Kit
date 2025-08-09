@@ -8,7 +8,7 @@ from tkinter import ttk, filedialog, messagebox
 from PIL import Image, ImageTk
 
 from .base_tool import BaseTool, register_tool
-from .utils import save_config
+from .utils import PlaceholderEntry, browse_file_with_context, save_file_with_context
 
 
 def apply_metal_transparency(base_image_path, mask_image_path, output_path, transparency_factor):
@@ -96,27 +96,40 @@ class MetalTransparencyTab(ttk.Frame):
         # Controls frame
         controls_frame = ttk.Frame(self)
         controls_frame.pack(fill="x", padx=10, pady=5)
-        
-        # Load buttons
-        ttk.Button(controls_frame, text="Load Base Texture", command=self.load_base).grid(row=0, column=0, padx=5, pady=5)
-        ttk.Button(controls_frame, text="Load Metal Mask", command=self.load_mask).grid(row=0, column=1, padx=5, pady=5)
-        
+
+        # Base texture row (editable entry + browse + load)
+        ttk.Label(controls_frame, text="Base Texture:").grid(row=0, column=0, padx=5, pady=5, sticky="e")
+        self.base_path_entry = PlaceholderEntry(controls_frame, placeholder="Path to base texture image...")
+        self.base_path_entry.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
+        ttk.Button(controls_frame, text="Browse...", command=self.select_base).grid(row=0, column=2, padx=5, pady=5)
+        ttk.Button(controls_frame, text="Load", command=lambda: self.load_base(from_entry=True)).grid(row=0, column=3, padx=5, pady=5)
+
+        # Metal mask row (editable entry + browse + load)
+        ttk.Label(controls_frame, text="Metal Mask:").grid(row=1, column=0, padx=5, pady=5, sticky="e")
+        self.mask_path_entry = PlaceholderEntry(controls_frame, placeholder="Path to metal mask image...")
+        self.mask_path_entry.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
+        ttk.Button(controls_frame, text="Browse...", command=self.select_mask).grid(row=1, column=2, padx=5, pady=5)
+        ttk.Button(controls_frame, text="Load", command=lambda: self.load_mask(from_entry=True)).grid(row=1, column=3, padx=5, pady=5)
+
         # Transparency slider
-        ttk.Label(controls_frame, text="Metal Transparency (%):").grid(row=1, column=0, padx=5, pady=5, sticky="e")
+        ttk.Label(controls_frame, text="Metal Transparency (%):").grid(row=2, column=0, padx=5, pady=5, sticky="e")
         self.trans_slider = ttk.Scale(controls_frame, from_=0, to=100, orient=tk.HORIZONTAL, length=300,
-                                     command=lambda v: self.update_preview())
+                        command=lambda v: self.update_preview())
         self.trans_slider.set(50)  # Default to 50%
-        self.trans_slider.grid(row=1, column=1, padx=5, pady=5, sticky="w")
-        
+        self.trans_slider.grid(row=2, column=1, padx=5, pady=5, sticky="w")
+
         # Output path
-        ttk.Label(controls_frame, text="Output File:").grid(row=2, column=0, padx=5, pady=5, sticky="e")
+        ttk.Label(controls_frame, text="Output File:").grid(row=3, column=0, padx=5, pady=5, sticky="e")
         self.output_path_var = tk.StringVar()
-        ttk.Entry(controls_frame, textvariable=self.output_path_var, width=40).grid(row=2, column=1, padx=5, pady=5, sticky="w")
-        ttk.Button(controls_frame, text="Browse...", command=self.browse_output).grid(row=2, column=2, padx=5, pady=5)
-        
+        ttk.Entry(controls_frame, textvariable=self.output_path_var, width=40).grid(row=3, column=1, padx=5, pady=5, sticky="ew")
+        ttk.Button(controls_frame, text="Browse...", command=self.browse_output).grid(row=3, column=2, padx=5, pady=5)
+
         # Save button
-        ttk.Button(controls_frame, text="Save Output", command=self.save_output).grid(row=3, column=0, columnspan=3, pady=10)
-        
+        ttk.Button(controls_frame, text="Save Output", command=self.save_output).grid(row=4, column=0, columnspan=4, pady=10)
+
+        # Make entry column expand
+        controls_frame.columnconfigure(1, weight=1)
+
         # Log area
         ttk.Label(self, text="Log:").pack(anchor="w", padx=10)
         self.log_text = tk.Text(self, height=6, state=tk.DISABLED)
@@ -129,11 +142,27 @@ class MetalTransparencyTab(ttk.Frame):
         self.log_text.see(tk.END)
         self.log_text.config(state=tk.DISABLED)
     
-    def load_base(self):
-        path = filedialog.askopenfilename(filetypes=[("Image Files", "*.png *.jpg *.jpeg *.tga")])
+    def select_base(self):
+        path = browse_file_with_context(self.base_path_entry, context_key="metal_base", filetypes=[("Image Files", "*.png *.jpg *.jpeg *.tga")], title="Select Base Texture")
+        if path:
+            self.base_image_path = path
+            # Optionally auto-load preview when selecting
+            self.load_base(from_entry=True)
+
+    def load_base(self, from_entry: bool = False):
+        if from_entry:
+            path = self.base_path_entry.get()
+            if not path:
+                path = filedialog.askopenfilename(filetypes=[("Image Files", "*.png *.jpg *.jpeg *.tga")])
+        else:
+            path = filedialog.askopenfilename(filetypes=[("Image Files", "*.png *.jpg *.jpeg *.tga")])
         if not path:
             return
-            
+        # Keep entry in sync
+        if hasattr(self, 'base_path_entry') and path:
+            self.base_path_entry.delete(0, tk.END)
+            self.base_path_entry.insert(0, path)
+
         self.base_image_path = path
         try:
             # Show preview
@@ -151,12 +180,28 @@ class MetalTransparencyTab(ttk.Frame):
             
         except Exception as e:
             self.log(f"Error loading base texture: {str(e)}")
-    
-    def load_mask(self):
-        path = filedialog.askopenfilename(filetypes=[("Image Files", "*.png *.jpg *.jpeg *.tga")])
+
+    def select_mask(self):
+        path = browse_file_with_context(self.mask_path_entry, context_key="metal_mask", filetypes=[("Image Files", "*.png *.jpg *.jpeg *.tga")], title="Select Metal Mask")
+        if path:
+            self.mask_image_path = path
+            # Optionally auto-load preview when selecting
+            self.load_mask(from_entry=True)
+
+    def load_mask(self, from_entry: bool = False):
+        if from_entry:
+            path = self.mask_path_entry.get()
+            if not path:
+                path = filedialog.askopenfilename(filetypes=[("Image Files", "*.png *.jpg *.jpeg *.tga")])
+        else:
+            path = filedialog.askopenfilename(filetypes=[("Image Files", "*.png *.jpg *.jpeg *.tga")])
         if not path:
             return
-            
+        # Keep entry in sync
+        if hasattr(self, 'mask_path_entry') and path:
+            self.mask_path_entry.delete(0, tk.END)
+            self.mask_path_entry.insert(0, path)
+
         self.mask_image_path = path
         try:
             # Show preview
@@ -176,23 +221,28 @@ class MetalTransparencyTab(ttk.Frame):
             self.log(f"Error loading metal mask: {str(e)}")
     
     def browse_output(self):
-        path = filedialog.asksaveasfilename(
-            defaultextension=".png",
-            filetypes=[("PNG files", "*.png"), ("All files", "*.*")]
-        )
+        path = save_file_with_context(context_key="metal_output", title="Save Output",
+                                      defaultextension=".png", filetypes=[("PNG files", "*.png"), ("All files", "*.*")])
         if path:
             self.output_path_var.set(path)
     
     def update_preview(self):
-        if not self.base_image_path or not self.mask_image_path:
+        # Prefer values from entries, fall back to last loaded paths
+        base_path = getattr(self, 'base_path_entry', None).get() if hasattr(self, 'base_path_entry') else ""
+        mask_path = getattr(self, 'mask_path_entry', None).get() if hasattr(self, 'mask_path_entry') else ""
+        if not base_path:
+            base_path = self.base_image_path
+        if not mask_path:
+            mask_path = self.mask_image_path
+        if not base_path or not mask_path:
             return
             
         try:
             # Generate a preview with current transparency setting
             transparency = self.trans_slider.get() / 100.0
             
-            base_img = Image.open(self.base_image_path).convert("RGBA")
-            mask_img = Image.open(self.mask_image_path).convert("L")
+            base_img = Image.open(base_path).convert("RGBA")
+            mask_img = Image.open(mask_path).convert("L")
             
             # Resize mask to match base if needed
             if base_img.size != mask_img.size:
@@ -224,21 +274,27 @@ class MetalTransparencyTab(ttk.Frame):
             self.log(f"Preview error: {str(e)}")
     
     def save_output(self):
-        if not self.base_image_path or not self.mask_image_path:
-            messagebox.showerror("Error", "You must load both a base image and a mask image first.")
+        # Accept typed paths too
+        base_path = getattr(self, 'base_path_entry', None).get() if hasattr(self, 'base_path_entry') else ""
+        mask_path = getattr(self, 'mask_path_entry', None).get() if hasattr(self, 'mask_path_entry') else ""
+        if not base_path:
+            base_path = self.base_image_path
+        if not mask_path:
+            mask_path = self.mask_image_path
+        if not base_path or not mask_path:
+            messagebox.showerror("Error", "Please provide both a base image and a mask image.")
             return
-            
+
         output_path = self.output_path_var.get()
         if not output_path:
-            output_path = filedialog.asksaveasfilename(
-                defaultextension=".png",
-                filetypes=[("PNG files", "*.png"), ("All files", "*.*")]
-            )
+            output_path = save_file_with_context(context_key="metal_output", title="Save Output",
+                                                defaultextension=".png",
+                                                filetypes=[("PNG files", "*.png"), ("All files", "*.*")])
             if not output_path:
                 return
                 
         transparency = self.trans_slider.get() / 100.0
-        if apply_metal_transparency(self.base_image_path, self.mask_image_path, output_path, transparency):
+        if apply_metal_transparency(base_path, mask_path, output_path, transparency):
             self.log(f"Output saved to: {os.path.basename(output_path)}")
             messagebox.showinfo("Success", f"Output saved to: {output_path}")
 
