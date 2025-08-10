@@ -64,13 +64,11 @@ def update_rpc_presence():
     """Update the Discord RPC presence with current state and details."""
     if presence:
         try:
-            print(f"Updating RPC: {RPC_STATE} | {RPC_DETAILS}")
             presence.set({
                 "state": RPC_STATE,
                 "details": RPC_DETAILS,
                 "timestamps": {"start": rpc_start_time}
             })
-            print("RPC update sent successfully")
         except Exception as e:
             print(f"Failed to update Discord RPC: {e}")
 
@@ -464,7 +462,7 @@ class PorterApp(tk.Tk if not DND_AVAILABLE else TkinterDnD.Tk):
             ("Materials", ["Material Conversion"]),
             ("Models", ["Model Processing"]),
             ("Audio", ["Audio Processing"]),
-            ("Misc", ["File Management", "Image Processing", "Texture Processing"]) 
+            ("Misc", ["File Management", "Image Processing", "Texture Processing"])
         ]
 
         for group_name, group_categories in group_order:
@@ -620,6 +618,7 @@ class PorterApp(tk.Tk if not DND_AVAILABLE else TkinterDnD.Tk):
             "Brightness to Alpha": "Image Processing",
             "Color Transparency": "Image Processing",
             "Fake PBR Baker": "Image Processing",
+            "Hotspot Editor": "Image Processing",
             "Metal Transparency": "Image Processing",
             "Subtexture Extraction": "Image Processing",
 
