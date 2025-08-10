@@ -137,9 +137,11 @@ class MetalTransparencyTab(ttk.Frame):
     
     def log(self, message):
         """Add a message to the log."""
+        if not hasattr(self, 'log_text'):
+            self.log_text = tk.Text(self, state=tk.DISABLED, height=10, wrap=tk.WORD)
+            self.log_text.pack(fill="x", padx=5, pady=5)
         self.log_text.config(state=tk.NORMAL)
-        self.log_text.insert(tk.END, message + "\n")
-        self.log_text.see(tk.END)
+        self.log_text.insert("end", message + "\n")
         self.log_text.config(state=tk.DISABLED)
     
     def select_base(self):
