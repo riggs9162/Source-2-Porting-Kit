@@ -4,3 +4,4 @@ tkinterdnd2>=0.3.0
 discord-rich-presence>=1.0.0
 pydub>=0.25.0
 pyinstaller>=5.0.0
+PySide6>=6.6

@@ -251,6 +251,14 @@ class FakePBRBakerTab(ttk.Frame):
         res_combo.bind("<<ComboboxSelected>>", self.update_preview)
         
         controls_row3.columnconfigure(1, weight=1)
+
+        # Fourth row of controls
+        controls_row4 = ttk.Frame(controls_frame)
+        controls_row4.pack(fill="x", pady=(5, 0))
+
+        self.generate_mipmaps_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(controls_row4, text="Generate Mipmaps (VTF)",
+                   variable=self.generate_mipmaps_var).pack(side="left")
         
         # Action buttons
         button_frame = ttk.Frame(main_frame)
@@ -737,7 +745,7 @@ class FakePBRBakerTab(ttk.Frame):
         if output_path:
             try:
                 # Convert PIL image to VTF
-                self.convert_image_to_vtf(self.baked_image, output_path)
+                self.convert_image_to_vtf(self.baked_image, output_path, self.generate_mipmaps_var.get())
                 self.status_label.config(text=f"Baked and saved as VTF: {os.path.basename(output_path)}", foreground="green")
                 
             except Exception as e:
@@ -746,7 +754,7 @@ class FakePBRBakerTab(ttk.Frame):
         else:
             self.status_label.config(text="Baking complete - VTF save cancelled", foreground="blue")
     
-    def convert_image_to_vtf(self, image, vtf_path):
+    def convert_image_to_vtf(self, image, vtf_path, generate_mipmaps=True):
         """Convert a PIL image to VTF format."""
         if not VTFLIB_AVAILABLE:
             raise Exception("VTFLib not available")
@@ -776,6 +784,7 @@ class FakePBRBakerTab(ttk.Frame):
             opts.ImageFormat = fmt
             opts.Flags = VTFLibEnums.ImageFlag.ImageFlagEightBitAlpha
             opts.Resize = 1
+            opts.Mipmaps = 1 if generate_mipmaps else 0
             
             # Create and save VTF
             vtf_lib.image_create_single(w, h, data, opts)

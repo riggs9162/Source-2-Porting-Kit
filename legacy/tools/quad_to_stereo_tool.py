@@ -87,7 +87,7 @@ class QuadToStereoTab(ttk.Frame):
 
         # Pattern explanation
         pattern_info = ttk.Label(pattern_frame,
-                            text="Quad audio files should be named: basename_L.mp3, basename_LS.mp3, basename_R.mp3, basename_RS.mp3")
+                            text="Supported formats: basename_L/LS/R/RS or basename_front_l/front_r/rear_l/rear_r (.mp3 or .wav)")
         pattern_info.pack(anchor="w", pady=(0, 5))
 
         # Pattern input
@@ -219,34 +219,93 @@ class QuadToStereoTab(ttk.Frame):
         self.log_text.delete("1.0", "end")
         self.log_text.configure(state='disabled')
 
-    def find_quad_groups(self, root_path):
+    def find_quad_groups(self, root_path, log_incomplete=False):
         """Find all quad audio groups under root path."""
-        pattern = re.compile(r'(.+?)_(l|ls|r|rs)\.mp3$', re.IGNORECASE)
+        # Pattern 1: basename_l.mp3, basename_ls.mp3, basename_r.mp3, basename_rs.mp3
+        pattern1 = re.compile(r'(.+?)_(l|ls|r|rs)\.(mp3|wav)$', re.IGNORECASE)
+        # Pattern 2: basename_front_l.wav, basename_front_r.wav, basename_rear_l.wav, basename_rear_r.wav
+        pattern2 = re.compile(r'(.+?)_(front|rear)_(l|r)\.(mp3|wav)$', re.IGNORECASE)
+        
         groups = {}
+        matched_files = []
+        unmatched_files = []
 
         if not os.path.exists(root_path):
-            return groups
+            return groups, {}
 
         for root, dirs, files in os.walk(root_path):
             for file in files:
-                match = pattern.match(file)
+                # Skip non-audio files
+                if not file.lower().endswith(('.mp3', '.wav', '.ogg')):
+                    continue
+                # Skip non-audio files
+                if not file.lower().endswith(('.mp3', '.wav', '.ogg')):
+                    continue
+                
+                matched = False
+                
+                # Try pattern 1 first (L, LS, R, RS)
+                match = pattern1.match(file)
                 if match:
                     base_name = match.group(1)
                     channel = match.group(2).lower()
                     file_path = os.path.join(root, file)
 
                     if base_name not in groups:
-                        groups[base_name] = {'root': root}
+                        groups[base_name] = {'root': root, 'pattern': 1}
 
                     groups[base_name][channel] = file_path
+                    matched_files.append((file, f"Pattern 1: {base_name} - {channel}"))
+                    matched = True
+                    continue
+                
+                # Try pattern 2 (front_l, front_r, rear_l, rear_r)
+                match = pattern2.match(file)
+                if match:
+                    base_name = match.group(1)
+                    position = match.group(2).lower()  # front or rear
+                    side = match.group(3).lower()  # l or r
+                    file_path = os.path.join(root, file)
+
+                    if base_name not in groups:
+                        groups[base_name] = {'root': root, 'pattern': 2}
+
+                    # Map front_l -> l, front_r -> r, rear_l -> ls, rear_r -> rs
+                    if position == 'front' and side == 'l':
+                        groups[base_name]['l'] = file_path
+                        channel_mapped = 'l'
+                    elif position == 'front' and side == 'r':
+                        groups[base_name]['r'] = file_path
+                        channel_mapped = 'r'
+                    elif position == 'rear' and side == 'l':
+                        groups[base_name]['ls'] = file_path
+                        channel_mapped = 'ls'
+                    elif position == 'rear' and side == 'r':
+                        groups[base_name]['rs'] = file_path
+                        channel_mapped = 'rs'
+                    
+                    matched_files.append((file, f"Pattern 2: {base_name} - {position}_{side} -> {channel_mapped}"))
+                    matched = True
+                
+                if not matched:
+                    unmatched_files.append(file)
+
+                if not matched:
+                    unmatched_files.append(file)
 
         # Filter complete groups (must have all 4 channels)
         complete_groups = {}
+        incomplete_groups = {}
         for base_name, files in groups.items():
             if all(ch in files for ch in ['l', 'ls', 'r', 'rs']):
                 complete_groups[base_name] = files
+            elif log_incomplete:
+                incomplete_groups[base_name] = files
 
-        return complete_groups
+        # Return debug info too
+        if log_incomplete:
+            return complete_groups, incomplete_groups, matched_files, unmatched_files
+        return complete_groups, incomplete_groups
 
     def scan_quad_groups(self):
         """Scan for quad audio groups and display results."""
@@ -257,11 +316,44 @@ class QuadToStereoTab(ttk.Frame):
 
         self.logger.info(f"Scanning for quad audio groups in: {input_folder}")
 
-        groups = self.find_quad_groups(input_folder)
+        result = self.find_quad_groups(input_folder, log_incomplete=True)
+        groups, incomplete_groups, matched_files, unmatched_files = result
+
+        # Show what files were found
+        total_audio_files = len(matched_files) + len(unmatched_files)
+        self.logger.info(f"Found {total_audio_files} audio files in directory")
+        
+        if matched_files:
+            self.logger.info(f"Matched {len(matched_files)} files to quad patterns:")
+            for file, info in matched_files[:20]:  # Show first 20 to avoid spam
+                self.logger.info(f"  ✓ {file} -> {info}")
+            if len(matched_files) > 20:
+                self.logger.info(f"  ... and {len(matched_files) - 20} more")
+        
+        if unmatched_files:
+            self.logger.warning(f"Could not match {len(unmatched_files)} files to any quad pattern:")
+            for file in unmatched_files[:10]:  # Show first 10
+                self.logger.warning(f"  ✗ {file}")
+            if len(unmatched_files) > 10:
+                self.logger.warning(f"  ... and {len(unmatched_files) - 10} more")
+
+        if not groups and not incomplete_groups:
+            self.logger.warning("No quad audio files found (neither complete nor incomplete groups).")
+            self.status_label.config(text="No quad files found", foreground="orange")
+            return
+        
+        if incomplete_groups:
+            self.logger.warning(f"Found {len(incomplete_groups)} incomplete quad groups:")
+            for base_name, files in incomplete_groups.items():
+                missing = [ch for ch in ['l', 'ls', 'r', 'rs'] if ch not in files]
+                present = [ch for ch in ['l', 'ls', 'r', 'rs'] if ch in files]
+                self.logger.warning(f"  {base_name}: has {present}, missing {missing}")
+                for channel in present:
+                    self.logger.info(f"    {channel.upper()}: {os.path.basename(files[channel])}")
 
         if not groups:
-            self.logger.info("No complete quad audio groups found.")
-            self.status_label.config(text="No quad groups found", foreground="orange")
+            self.logger.warning("No complete quad audio groups found.")
+            self.status_label.config(text="No complete quad groups found", foreground="orange")
             return
 
         self.logger.info(f"Found {len(groups)} complete quad audio groups:")
@@ -296,7 +388,7 @@ class QuadToStereoTab(ttk.Frame):
                                 "Please install it with: pip install pydub")
             return
 
-        groups = self.find_quad_groups(input_folder)
+        groups, _ = self.find_quad_groups(input_folder)
 
         if not groups:
             messagebox.showinfo("No Files", "No complete quad audio groups found.")
@@ -342,11 +434,11 @@ class QuadToStereoTab(ttk.Frame):
                     skipped += 1
                     continue
 
-                # Load audio files
-                l_audio = AudioSegment.from_mp3(files['l'])
-                ls_audio = AudioSegment.from_mp3(files['ls'])
-                r_audio = AudioSegment.from_mp3(files['r'])
-                rs_audio = AudioSegment.from_mp3(files['rs'])
+                # Load audio files (auto-detect format)
+                l_audio = AudioSegment.from_file(files['l'])
+                ls_audio = AudioSegment.from_file(files['ls'])
+                r_audio = AudioSegment.from_file(files['r'])
+                rs_audio = AudioSegment.from_file(files['rs'])
 
                 # Ensure all files have the same length
                 min_length = min(len(l_audio), len(ls_audio), len(r_audio), len(rs_audio))

@@ -22,7 +22,7 @@ from .base_tool import BaseTool, register_tool
 from .utils import PlaceholderEntry, browse_folder, determine_surfaceprop, browse_folder_with_context, save_config
 
 
-def convert_png_to_vtf(vtf_lib, png_src, vtf_dst, clamp):
+def convert_png_to_vtf(vtf_lib, png_src, vtf_dst, clamp, generate_mipmaps):
     if not VTFLIB_AVAILABLE:
         print(f"[ERROR] VTFLib not available for conversion: {png_src}")
         return False
@@ -48,6 +48,7 @@ def convert_png_to_vtf(vtf_lib, png_src, vtf_dst, clamp):
         opts.ImageFormat = fmt
         opts.Flags       = VTFLibEnums.ImageFlag.ImageFlagEightBitAlpha
         opts.Resize      = 1
+        opts.Mipmaps     = 1 if generate_mipmaps else 0
         vtf_lib.image_create_single(w,h,data,opts)
         vtf_lib.image_save(vtf_dst)
         return True
@@ -63,7 +64,7 @@ def _extract_base_name(filename: str) -> str:
     return m.group(1) if m else name
 
 
-def texture_conversion_folder(input_dir, output_dir, material_path, clamp, vmt_type, surface_prop, extra_params=None):
+def texture_conversion_folder(input_dir, output_dir, material_path, clamp, vmt_type, surface_prop, extra_params=None, generate_mipmaps=True):
     if not VTFLIB_AVAILABLE:
         messagebox.showerror("Missing Dependency", 
                             "VTFLib is required for texture conversion.\n"
@@ -116,10 +117,10 @@ def texture_conversion_folder(input_dir, output_dir, material_path, clamp, vmt_t
             surface_prop_final = surface_prop if surface_prop and surface_prop != "default" else determine_surfaceprop(bname)
             if os.path.exists(vtf_c) and os.path.exists(vmt):
                 continue
-            if not convert_png_to_vtf(vtf_lib, os.path.join(root, col), vtf_c, clamp):
+            if not convert_png_to_vtf(vtf_lib, os.path.join(root, col), vtf_c, clamp, generate_mipmaps):
                 continue
             if nm:
-                convert_png_to_vtf(vtf_lib, os.path.join(root, nm), vtf_n, clamp)
+                convert_png_to_vtf(vtf_lib, os.path.join(root, nm), vtf_n, clamp, generate_mipmaps)
             with open(vmt, "w", encoding="utf-8") as f:
                 f.write(f'"{vmt_type_final}"\n{{\n')
                 # Compute material path relative to output_dir
@@ -196,6 +197,10 @@ class TextureTab(ttk.Frame):
         # Extra parameters info
         ttk.Label(self, text='Optional parameters for VMT. Example:\n{\n\t"envmap": "env_cubemap",\n\n\t"phong": "1",\n\t"phongboost": "2"\n}').grid(row=6, column=2, columnspan=3, sticky="w", padx=5)
 
+        # Mipmaps
+        self.generate_mipmaps_var = tk.BooleanVar(value=bool(config.get("texture_generate_mipmaps", True)))
+        ttk.Checkbutton(self, text="Generate Mipmaps", variable=self.generate_mipmaps_var).grid(row=7, column=1, sticky="w", padx=5, pady=5)
+
         # Run button
         ttk.Button(self, text="Convert Textures", command=self.on_run).grid(row=9, column=0, columnspan=3, pady=10)
         self.columnconfigure(1, weight=1)
@@ -223,8 +228,9 @@ class TextureTab(ttk.Frame):
         self.config["texture_shader"] = shader
         self.config["texture_surface"] = surface
         self.config["texture_extra_params"] = extra_params
+        self.config["texture_generate_mipmaps"] = self.generate_mipmaps_var.get()
         save_config(self.config)
-        texture_conversion_folder(input_dir, output_dir, material_path, clamp, shader, surface, extra_params)
+        texture_conversion_folder(input_dir, output_dir, material_path, clamp, shader, surface, extra_params, self.generate_mipmaps_var.get())
 
 
 @register_tool
