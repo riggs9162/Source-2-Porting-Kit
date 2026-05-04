@@ -23,6 +23,7 @@ from app.tools.alpha_mask_tool import AlphaMaskTool
 from app.tools.folder_search_replace_tool import FolderSearchReplaceTool
 from app.tools.texture_pbr_batch_tool import TexturePBRBatchTool
 from app.tools.vmat_pbr_tool import VmatPBRTool
+from app.tools.vtf_clamp_tool import VtfClampTool
 from app.tools.gltf_smd_batch_tool import GltfSmdBatchTool
 from app.tools.hotspot_editor_tool import HotspotEditorTool
 
@@ -125,6 +126,7 @@ class MainWindow(QMainWindow):
                 ("PBR Tool", PBRTool),
                 ("Texture PBR Batch", TexturePBRBatchTool),
                 ("VMAT PBR", VmatPBRTool),
+                ("VTF Clamp", VtfClampTool),
             ],
             "Sounds": [
                 ("Loop Point Converter", LoopPointTool),
