@@ -511,6 +511,92 @@ class TexturePBRBatchTool(BaseTool):
 
         layout.addStretch()
 
+    def _load_history(self):
+        try:
+            if self._history_file.exists():
+                with open(self._history_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, list):
+                        self.history = data
+        except Exception:
+            self.history = []
+
+    def _save_history_file(self):
+        try:
+            self._history_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(self._history_file, "w", encoding="utf-8") as f:
+                json.dump(self.history, f, indent=2)
+        except Exception:
+            pass
+
+    def _refresh_history_dropdown(self):
+        if not hasattr(self, "history_dropdown"):
+            return
+        self.history_dropdown.blockSignals(True)
+        self.history_dropdown.clear()
+        self.history_dropdown.addItem("-- Recent runs --")
+        for entry in self.history:
+            ts = entry.get("timestamp", "")
+            label = entry.get("label") or entry.get("input_root") or entry.get("output_root") or ts
+            self.history_dropdown.addItem(f"{ts} — {label}" if ts else label)
+        self.history_dropdown.blockSignals(False)
+
+    def _make_history_entry(self) -> dict:
+        input_root = self.input_root.text().strip()
+        output_root = self.output_root.text().strip()
+        return {
+            "timestamp": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "label": Path(input_root).name if input_root else output_root,
+            "input_root": input_root,
+            "output_root": output_root,
+            "mode": self.mode_combo.currentText(),
+            "preserve_structure": self.preserve_structure.isChecked(),
+            "overwrite": self.overwrite.isChecked(),
+            "include_emissive": self.include_emissive.isChecked(),
+            "generate_mipmaps": self.generate_mipmaps.isChecked(),
+            "material_path": self.material_path.text().strip(),
+        }
+
+    def _save_current_run_to_history(self):
+        entry = self._make_history_entry()
+        if not entry.get("input_root") and not entry.get("output_root"):
+            return
+
+        def _same(a: dict, b: dict) -> bool:
+            keys = [
+                "input_root", "output_root", "mode", "preserve_structure",
+                "overwrite", "include_emissive", "generate_mipmaps", "material_path"
+            ]
+            return all(a.get(k) == b.get(k) for k in keys)
+
+        if self.history and _same(self.history[0], entry):
+            return
+        self.history = [h for h in self.history if not _same(h, entry)]
+        self.history.insert(0, entry)
+        self.history = self.history[:20]
+        self._save_history_file()
+        self._refresh_history_dropdown()
+
+    def on_history_selected(self, index: int):
+        if index <= 0:
+            return
+        try:
+            entry = self.history[index - 1]
+        except Exception:
+            return
+
+        self.input_root.setText(entry.get("input_root") or "")
+        self.output_root.setText(entry.get("output_root") or "")
+        mode = entry.get("mode") or "Fake PBR"
+        mode_index = self.mode_combo.findText(mode)
+        if mode_index >= 0:
+            self.mode_combo.setCurrentIndex(mode_index)
+        self.preserve_structure.setChecked(bool(entry.get("preserve_structure", True)))
+        self.overwrite.setChecked(bool(entry.get("overwrite", False)))
+        self.include_emissive.setChecked(bool(entry.get("include_emissive", True)))
+        self.generate_mipmaps.setChecked(bool(entry.get("generate_mipmaps", True)))
+        self.material_path.setText(entry.get("material_path") or "models/ports")
+
     def _row(self, line_edit: QLineEdit, button: QPushButton) -> QWidget:
         w = QWidget()
         row = QHBoxLayout(w)
