@@ -29,11 +29,13 @@ from ..utils.vtf_encoder import VTFEncoder, VTFEncoderError
 from ..utils.helpers import get_config_dir
 from ..utils.image_processing import load_image, resize_to_match
 from ..utils.pbr_processing import (
-    process_base_texture,
-    pack_normal_with_envmap,
-    create_phong_texture
+    process_fakepbr_base_texture,
+    pack_normal_with_phong_mask,
+    create_phong_exponent_texture,
+    create_colored_envmap_mask,
+    compute_fakepbr_material_stats
 )
-from ..utils.vmt_generator import generate_pbr_vmt
+from ..utils.vmt_generator import generate_fakepbr_vmt
 
 
 class ProcessingCancelled(Exception):
