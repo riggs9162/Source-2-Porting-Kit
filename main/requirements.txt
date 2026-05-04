@@ -11,3 +11,4 @@ Pillow>=9.0.0
 numpy>=1.20.0
 pymeshlab>=2022.2
 pydub>=0.25.0
+srctools>=2.6

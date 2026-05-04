@@ -41,6 +41,7 @@ from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QColor
 
 from .base_tool import BaseTool
+from .smd_export import SmdExporter
 from ..utils.helpers import get_config_dir
 
 
@@ -252,20 +253,25 @@ class GltfMeshLoader:
 
             mesh = None
             if isinstance(loaded, trimesh.Scene):
-                # Preserve per-face materials by concatenating while tracking face material indices
                 submeshes = loaded.dump(concatenate=False)
                 if not submeshes:
                     return (None, "Mesh has no faces after loading")
 
+                # Manual numpy concatenation. trimesh.util.concatenate would atlas-pack
+                # the per-submesh TextureVisuals into a combined image and remap UVs into
+                # sub-rectangles, silently destroying tiling and material UV ranges.
                 material_names: List[str] = []
                 material_index: Dict[str, int] = {}
+                verts_list: List[np.ndarray] = []
+                faces_list: List[np.ndarray] = []
+                uvs_list: List[np.ndarray] = []
                 face_materials_list: List[np.ndarray] = []
+                vert_offset = 0
 
                 for sm in submeshes:
                     if sm is None or not hasattr(sm, 'faces') or len(sm.faces) == 0:
                         continue
 
-                    # Handle multi-material faces if available
                     if hasattr(sm.visual, 'face_materials') and sm.visual.face_materials is not None and \
                        hasattr(sm.visual, 'materials') and sm.visual.materials is not None:
                         local_materials = []
@@ -279,11 +285,9 @@ class GltfMeshLoader:
                             if mat_name not in material_index:
                                 material_index[mat_name] = len(material_names)
                                 material_names.append(mat_name)
-                            global_idx = material_index[mat_name]
-                            remapped[local_face_materials == local_idx] = global_idx
+                            remapped[local_face_materials == local_idx] = material_index[mat_name]
                         face_materials_list.append(remapped)
                     else:
-                        # Single-material mesh
                         mat_name = None
                         if hasattr(sm.visual, 'material') and sm.visual.material is not None:
                             mat_name = getattr(sm.visual.material, 'name', None)
@@ -295,24 +299,35 @@ class GltfMeshLoader:
                         if mat_name not in material_index:
                             material_index[mat_name] = len(material_names)
                             material_names.append(mat_name)
-                        global_idx = material_index[mat_name]
+                        face_materials_list.append(np.full(len(sm.faces), material_index[mat_name], dtype=int))
 
-                        face_materials_list.append(np.full(len(sm.faces), global_idx, dtype=int))
+                    nv = len(sm.vertices)
+                    verts_list.append(np.asarray(sm.vertices))
+                    faces_list.append(np.asarray(sm.faces) + vert_offset)
+                    try:
+                        uv = sm.visual.uv if hasattr(sm.visual, 'uv') else None
+                    except Exception:
+                        uv = None
+                    if uv is not None and len(uv) == nv:
+                        uvs_list.append(np.asarray(uv, dtype=np.float64))
+                    else:
+                        uvs_list.append(np.zeros((nv, 2), dtype=np.float64))
+                    vert_offset += nv
 
-                if not submeshes:
+                if not verts_list:
                     return (None, "Mesh has no faces after loading")
 
-                mesh = trimesh.util.concatenate(submeshes)
+                V = np.concatenate(verts_list)
+                F = np.concatenate(faces_list)
+                UV = np.concatenate(uvs_list)
+
+                mesh = trimesh.Trimesh(vertices=V, faces=F, process=False)
+                mesh.visual = trimesh.visual.TextureVisuals(uv=UV)
 
                 if face_materials_list:
-                    combined_face_materials = np.concatenate(face_materials_list)
-                    if not hasattr(mesh, 'metadata'):
-                        mesh.metadata = {}
                     mesh.metadata['gltf_material_names'] = material_names
-                    try:
-                        mesh.visual.face_materials = combined_face_materials
-                    except Exception:
-                        pass
+                    mesh.metadata['gltf_face_materials'] = np.concatenate(face_materials_list)
+
             elif isinstance(loaded, trimesh.Trimesh):
                 mesh = loaded
             else:
@@ -324,21 +339,10 @@ class GltfMeshLoader:
             # Preserve glTF texture coordinates exactly as loaded. Do not auto-normalize,
             # wrap, clamp, or otherwise "fix" UVs here; SMD export controls UV handling.
 
-            # Store material names from glTF data if available (fallback)
-            if gltf_data and 'materials' in gltf_data and (not hasattr(mesh, 'metadata') or 'gltf_material_names' not in mesh.metadata):
-                material_names = [mat.get('name', f'material_{i}') for i, mat in enumerate(gltf_data['materials'])]
-                if not hasattr(mesh, 'metadata'):
-                    mesh.metadata = {}
-                mesh.metadata['gltf_material_names'] = material_names
-
-            # If mesh has face materials but no metadata list, attempt to populate from visual materials
-            if hasattr(mesh.visual, 'face_materials') and mesh.visual.face_materials is not None:
-                if not hasattr(mesh, 'metadata'):
-                    mesh.metadata = {}
-                if 'gltf_material_names' not in mesh.metadata:
-                    if hasattr(mesh.visual, 'materials') and mesh.visual.materials is not None:
-                        material_names = [getattr(mat, 'name', None) or f"material_{i}" for i, mat in enumerate(mesh.visual.materials)]
-                        mesh.metadata['gltf_material_names'] = material_names
+            if gltf_data and 'materials' in gltf_data and 'gltf_material_names' not in mesh.metadata:
+                mesh.metadata['gltf_material_names'] = [
+                    mat.get('name', f'material_{i}') for i, mat in enumerate(gltf_data['materials'])
+                ]
 
             return (mesh, "")
 
@@ -387,11 +391,26 @@ class MeshProcessor:
 
     @staticmethod
     def sanitize(mesh: trimesh.Trimesh):
-        """Remove invalid geometry."""
+        """Remove invalid geometry. Keeps mesh.metadata['gltf_face_materials'] aligned."""
+        face_materials = None
+        if hasattr(mesh, 'metadata') and mesh.metadata:
+            fm = mesh.metadata.get('gltf_face_materials')
+            if fm is not None:
+                face_materials = np.asarray(fm)
+
         try:
             mesh.remove_infinite_values()
-            mesh.remove_degenerate_faces()
-            mesh.remove_duplicate_faces()
+            if face_materials is not None:
+                mask = mesh.nondegenerate_faces()
+                mesh.update_faces(mask)
+                face_materials = face_materials[mask]
+                mask = mesh.unique_faces()
+                mesh.update_faces(mask)
+                face_materials = face_materials[mask]
+                mesh.metadata['gltf_face_materials'] = face_materials
+            else:
+                mesh.remove_degenerate_faces()
+                mesh.remove_duplicate_faces()
             mesh.remove_unreferenced_vertices()
             mesh.fix_normals()
         except Exception:
@@ -606,166 +625,6 @@ class SurfacepropDetector:
                 return surfaceprop
 
         return 'default'
-
-
-class SmdWriter:
-    """Write static SMD files (SMD version 1)."""
-
-    @staticmethod
-    def _format_f(v: float) -> str:
-        return f"{v:.6f}"
-
-    @staticmethod
-    def write_static(
-        mesh: trimesh.Trimesh,
-        out_path: Path,
-        material_name: str,
-        flip_v: bool = True,
-        force_uv_zero: bool = False,
-        override_normals: Optional[np.ndarray] = None,
-        uv_mode: str = 'preserve'
-    ) -> Tuple[bool, str]:
-        """Write static SMD with single root bone. Supports per-face materials from glTF.
-        
-        Args:
-            uv_mode: How to handle UV coordinates:
-                'preserve' - Keep original UVs as-is
-                'wrap' - Apply modulo 1.0 to wrap UVs into 0-1 range (for tiling)
-                'clamp' - Clamp UVs to 0-1 range
-                'normalize' - Normalize UVs to 0-1 based on min/max
-                
-        Returns:
-            (success, warning_message) - warning_message is empty if no issues
-        """
-        if mesh is None or not hasattr(mesh, 'faces') or len(mesh.faces) == 0:
-            return (False, "Mesh has no faces")
-
-        vertices = mesh.vertices
-        faces = mesh.faces
-        warning_msg = ""
-
-        # Validate face indices
-        try:
-            if len(vertices) == 0:
-                return (False, "Mesh has no vertices")
-            max_index = len(vertices) - 1
-            valid_mask = np.all((faces >= 0) & (faces <= max_index), axis=1)
-            faces = faces[valid_mask]
-            if len(faces) == 0:
-                return (False, "No valid faces after index validation")
-        except Exception:
-            return (False, "Face validation failed")
-
-        # Get normals - use override if provided (for smooth physics meshes)
-        normals = None
-        if override_normals is not None:
-            normals = override_normals
-        else:
-            try:
-                normals = mesh.vertex_normals
-                if len(normals) != len(vertices):
-                    normals = None
-            except Exception:
-                normals = None
-
-        # Filter infinite values
-        finite_verts = np.isfinite(vertices).all(axis=1)
-        if normals is not None:
-            finite_normals = np.isfinite(normals).all(axis=1)
-            finite_faces = np.all(finite_verts[faces], axis=1) & np.all(finite_normals[faces], axis=1)
-        else:
-            finite_faces = np.all(finite_verts[faces], axis=1)
-        
-        faces = faces[finite_faces]
-        if len(faces) == 0:
-            return (False, "No valid faces after filtering")
-
-        # Get UVs with robust handling
-        uvs = None
-        if not force_uv_zero:
-            try:
-                raw_uvs = mesh.visual.uv
-                if raw_uvs is not None and len(raw_uvs) == len(vertices):
-                    # Gather UV statistics
-                    uv_min = np.min(raw_uvs, axis=0)
-                    uv_max = np.max(raw_uvs, axis=0)
-                    uv_range = uv_max - uv_min
-                    
-                    # Apply UV mode processing
-                    if uv_mode == 'wrap':
-                        # Wrap UVs to 0-1 range using modulo (preserves tiling patterns)
-                        uvs = np.mod(raw_uvs, 1.0)
-                    elif uv_mode == 'clamp':
-                        # Clamp UVs to 0-1 range
-                        uvs = np.clip(raw_uvs, 0.0, 1.0)
-                    elif uv_mode == 'normalize':
-                        # Normalize UVs to 0-1 based on actual min/max
-                        if uv_range[0] > 1e-6 and uv_range[1] > 1e-6:
-                            uvs = (raw_uvs - uv_min) / uv_range
-                        else:
-                            uvs = raw_uvs
-                    else:  # 'preserve'
-                        uvs = raw_uvs
-            except Exception:
-                uvs = None
-        
-        # Get per-face materials from glTF metadata if available
-        face_materials = None
-        material_names_list = None
-        if hasattr(mesh, 'metadata') and 'gltf_material_names' in mesh.metadata:
-            material_names_list = mesh.metadata['gltf_material_names']
-            # Check if mesh has face material indices
-            if hasattr(mesh.visual, 'face_materials'):
-                face_materials = mesh.visual.face_materials
-
-        # Write SMD
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(out_path, "w", encoding="utf-8") as f:
-            # Header
-            f.write("version 1\n")
-            f.write("nodes\n")
-            f.write("0 \"root\" -1\n")
-            f.write("end\n")
-            f.write("skeleton\n")
-            f.write("time 0\n")
-            f.write("0 0.000000 0.000000 0.000000 0.000000 0.000000 0.000000\n")
-            f.write("end\n")
-            f.write("triangles\n")
-
-            # Triangles
-            for face_idx, face in enumerate(faces):
-                # Use per-face material if available, otherwise fallback to default
-                mat_name = material_name
-                if face_materials is not None and material_names_list and face_idx < len(face_materials):
-                    mat_idx = face_materials[face_idx]
-                    if 0 <= mat_idx < len(material_names_list):
-                        mat_name = material_names_list[mat_idx]
-                
-                f.write(f"{mat_name}\n")
-                for vidx in face:
-                    v = vertices[vidx]
-                    n = normals[vidx] if normals is not None else np.array([0.0, 0.0, 1.0])
-                    
-                    if uvs is not None:
-                        uv = uvs[vidx]
-                        u = float(uv[0])
-                        tv = float(uv[1])
-                    else:
-                        u = 0.0
-                        tv = 0.0
-
-                    if flip_v:
-                        tv = 1.0 - tv
-
-                    f.write(
-                        f"0 {SmdWriter._format_f(v[0])} {SmdWriter._format_f(v[1])} {SmdWriter._format_f(v[2])} "
-                        f"{SmdWriter._format_f(n[0])} {SmdWriter._format_f(n[1])} {SmdWriter._format_f(n[2])} "
-                        f"{SmdWriter._format_f(u)} {SmdWriter._format_f(tv)}\n"
-                    )
-
-            f.write("end\n")
-
-        return (True, warning_msg)
 
 
 class QcWriter:
@@ -1003,7 +862,7 @@ class BatchRunner(QThread):
             # Write render SMD
             render_smd = out_dir / f"{model_set.name}.smd"
             if self.generate_smd:
-                success, uv_warning = SmdWriter.write_static(render_mesh, render_smd, model_set.name, self.flip_v, False, uv_mode=self.uv_mode)
+                success, uv_warning = SmdExporter.write_static(render_mesh, render_smd, model_set.name, self.flip_v, False, uv_mode=self.uv_mode)
                 if not success:
                     errors.append(f"{model_set.name}: Failed to write render SMD")
                     continue
@@ -1123,7 +982,7 @@ class BatchRunner(QThread):
                         physics_material = "physics_group_prop.wood_crate_material"
                         # Pass smooth normals explicitly to ensure they're written to SMD
                         if self.generate_smd:
-                            success, uv_warning = SmdWriter.write_static(physics_mesh, physics_smd, physics_material, self.flip_v, False, smooth_normals, uv_mode=self.uv_mode)
+                            success, uv_warning = SmdExporter.write_static(physics_mesh, physics_smd, physics_material, self.flip_v, False, smooth_normals, uv_mode=self.uv_mode)
                             if not success:
                                 physics_mesh = None
                                 errors.append(f"{model_set.name}: Failed to write physics SMD")
