@@ -319,6 +319,121 @@ def process_base_texture(
     return to_uint8(rgba)
 
 
+def process_fakepbr_base_texture(
+    color: np.ndarray,
+    ao: Optional[np.ndarray],
+    metallic: Optional[np.ndarray],
+    ao_strength: float = 0.7,
+    metal_diffuse_suppression: float = 0.85
+) -> np.ndarray:
+    """Bake Source 1 stock-compatible Fake PBR albedo.
+
+    RGB is AO-baked and darkened where metallic because Source 1 has no
+    metallic energy split. Alpha is kept opaque by default so it remains free
+    from accidental tint/translucency side effects.
+    """
+    from .image_processing import srgb_to_linear, linear_to_srgb, to_uint8
+
+    rgb = np.clip(color[:, :, :3], 0.0, 1.0)
+    height, width = rgb.shape[:2]
+    ao_value, _, metallic_value = _match_scalar_inputs(height, width, ao, None, metallic)
+
+    rgb_linear = srgb_to_linear(rgb)
+    rgb_linear *= np.power(ao_value[:, :, np.newaxis], ao_strength)
+    rgb_linear *= (1.0 - metal_diffuse_suppression * metallic_value[:, :, np.newaxis])
+    rgb_srgb = np.clip(linear_to_srgb(rgb_linear), 0.0, 1.0)
+
+    alpha = np.ones((height, width), dtype=np.float32)
+    return to_uint8(np.dstack([rgb_srgb, alpha]), clip=True)
+
+
+def build_phong_mask(
+    roughness: Optional[np.ndarray],
+    metallic: Optional[np.ndarray],
+    ao: Optional[np.ndarray],
+    height: int,
+    width: int
+) -> np.ndarray:
+    """Build the bumpmap alpha Phong mask recommended by the Fake PBR guide."""
+    ao_value, roughness_value, metallic_value = _match_scalar_inputs(height, width, ao, roughness, metallic)
+    phong_mask = (
+        (1.0 - roughness_value) * (0.04 + 0.96 * metallic_value) +
+        0.04 * (1.0 - metallic_value)
+    )
+    phong_mask *= ao_value
+    return np.clip(phong_mask, 0.0, 1.0)
+
+
+def pack_normal_with_phong_mask(
+    normal: np.ndarray,
+    ao: Optional[np.ndarray],
+    metallic: Optional[np.ndarray],
+    roughness: Optional[np.ndarray],
+    invert_green: bool = False
+) -> np.ndarray:
+    """Pack a Source bumpmap: RGB tangent normal, alpha Phong mask."""
+    from .image_processing import to_uint8
+
+    normal_rgb = np.clip(normal[:, :, :3].copy(), 0.0, 1.0)
+    if invert_green:
+        normal_rgb[:, :, 1] = 1.0 - normal_rgb[:, :, 1]
+
+    height, width = normal_rgb.shape[:2]
+    phong_mask = build_phong_mask(roughness, metallic, ao, height, width)
+    return to_uint8(np.dstack([normal_rgb, phong_mask]), clip=True)
+
+
+def create_phong_exponent_texture(
+    roughness: Optional[np.ndarray],
+    metallic: Optional[np.ndarray],
+    ao: Optional[np.ndarray],
+    gloss_gamma: float = 2.0,
+    height: int = 512,
+    width: int = 512
+) -> np.ndarray:
+    """Create $phongexponenttexture: R=exponent, G=metallic, A=rim mask."""
+    from .image_processing import to_uint8
+
+    if roughness is not None:
+        height, width = roughness.shape[:2]
+    elif metallic is not None:
+        height, width = metallic.shape[:2]
+    elif ao is not None:
+        height, width = ao.shape[:2]
+
+    _, roughness_value, metallic_value = _match_scalar_inputs(height, width, ao, roughness, metallic)
+    exp_r = np.power(np.clip(1.0 - roughness_value, 0.0, 1.0), gloss_gamma)
+    exp_g = metallic_value
+    exp_b = np.zeros((height, width), dtype=np.float32)
+    exp_a = np.ones((height, width), dtype=np.float32)
+    return to_uint8(np.dstack([exp_r, exp_g, exp_b, exp_a]), clip=True)
+
+
+def create_colored_envmap_mask(
+    color: np.ndarray,
+    ao: Optional[np.ndarray],
+    metallic: Optional[np.ndarray],
+    roughness: Optional[np.ndarray],
+    envmask_gamma: float = 1.5
+) -> np.ndarray:
+    """Create a colored RGB $envmapmask for stock Source metal tint fakery."""
+    from .image_processing import srgb_to_linear, to_uint8
+
+    rgb = np.clip(color[:, :, :3], 0.0, 1.0)
+    height, width = rgb.shape[:2]
+    ao_value, roughness_value, metallic_value = _match_scalar_inputs(height, width, ao, roughness, metallic)
+
+    original_albedo_linear = srgb_to_linear(rgb)
+    f0_dielectric = np.full_like(original_albedo_linear, 0.04)
+    metallic_3 = metallic_value[:, :, np.newaxis]
+    envmask_rgb = f0_dielectric * (1.0 - metallic_3) + original_albedo_linear * metallic_3
+    envmask_rgb *= np.power(np.clip(1.0 - roughness_value, 0.0, 1.0), envmask_gamma)[:, :, np.newaxis]
+    envmask_rgb *= ao_value[:, :, np.newaxis]
+
+    alpha = np.ones((height, width), dtype=np.float32)
+    return to_uint8(np.dstack([envmask_rgb, alpha]), clip=True)
+
+
 def pack_normal_with_envmap(
     normal: np.ndarray,
     ao: Optional[np.ndarray],
