@@ -205,13 +205,18 @@ Examples:
                             help='Material name/stem for output files')
     output_group.add_argument('--material-path', default='materials',
                             help='Relative material path in VMT (default: materials)')
+    output_group.add_argument('--target-branch', default='gmod',
+                            choices=['hl2', 'source2013_sp', 'source2013_mp', 'gmod', 'gmod_x86_64', 'tf2', 'l4d2'],
+                            help='Source 1 target branch for VMT feature gating (default: gmod)')
+    output_group.add_argument('--envmap', default='env_cubemap',
+                            help='VMT $envmap value (default: env_cubemap)')
     
     # Processing options
     proc_group = parser.add_argument_group('Processing Options')
-    proc_group.add_argument('--ao-strength', type=float, default=0.5,
-                          help='AO blend strength (0.0-1.0, default: 0.5)')
-    proc_group.add_argument('--gloss-gamma', type=float, default=2.2,
-                          help='Gloss curve gamma (default: 2.2)')
+    proc_group.add_argument('--ao-strength', type=float, default=0.7,
+                          help='AO bake strength (default: 0.7)')
+    proc_group.add_argument('--gloss-gamma', type=float, default=2.0,
+                          help='Roughness-to-exponent gamma (default: 2.0)')
     proc_group.add_argument('--invert-green', action='store_true',
                           help='Invert normal map green channel (DirectX mode)')
     
@@ -225,7 +230,9 @@ Examples:
     options = ProcessingOptions(
         ao_strength=args.ao_strength,
         gloss_gamma=args.gloss_gamma,
-        invert_green=args.invert_green
+        invert_green=args.invert_green,
+        target_branch=args.target_branch,
+        envmap=args.envmap
     )
     
     # Determine mode
