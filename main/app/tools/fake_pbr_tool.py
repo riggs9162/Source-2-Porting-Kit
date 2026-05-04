@@ -165,6 +165,7 @@ class FakePBRProcessor:
             self.log(f"[FakePBR] Processing at resolution: {width}x{height}")
             self.log(f"[FakePBR] AO Strength: {self.options.ao_strength:.2f}")
             self.log(f"[FakePBR] Gloss Gamma: {self.options.gloss_gamma:.2f}")
+            self.log(f"[FakePBR] Target Branch: {self.options.target_branch}")
             self._check_cancel()
             
             # Resize all inputs to match target resolution
