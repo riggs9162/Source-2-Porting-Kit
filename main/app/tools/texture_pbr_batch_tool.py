@@ -42,6 +42,7 @@ from .base_tool import BaseTool
 from .fake_pbr_tool import FakePBRProcessor, ProcessingOptions, PBRInputs
 from .exo_pbr_tool import ExoPBRProcessor, ExoPBROptions, ExoPBRInputs
 from ..utils.image_processing import load_image, to_uint8
+from ..utils.helpers import get_config_dir
 
 
 @dataclass
