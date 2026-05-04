@@ -1167,12 +1167,15 @@ class BatchRunner(QThread):
                                 self.progress.emit(idx, total, f"{model_set.name}: Skipping physics SMD generation (disabled)")
 
 
+            # Detect surfaceprop
+            surfaceprop = self.static_surfaceprop
+            if self.auto_surfaceprop:
+                surfaceprop = SurfacepropDetector.detect(model_set.name)
+
             # Calculate mass
             mass = None
             if physics_mesh and self.auto_mass:
-                mass = MeshProcessor.calculate_mass(physics_mesh, 1.0)
-                if mass:
-                    mass *= self.mass_modifier
+                mass = MeshProcessor.calculate_surface_mass(physics_mesh, surfaceprop, self.mass_modifier)
             elif not self.auto_mass:
                 mass = self.static_mass
 
@@ -1180,11 +1183,6 @@ class BatchRunner(QThread):
             phys_props = None
             if physics_mesh and mass:
                 phys_props = MeshProcessor.calculate_physics_properties(physics_mesh, mass)
-
-            # Detect surfaceprop
-            surfaceprop = self.static_surfaceprop
-            if self.auto_surfaceprop:
-                surfaceprop = SurfacepropDetector.detect(model_set.name)
 
             # Write QC
             if self.generate_qc:
@@ -1613,17 +1611,18 @@ class GltfSmdBatchTool(BaseTool):
             else:
                 load_status = "Ok"
 
-            # Mass
-            if self.auto_mass_radio.isChecked():
-                mass = 10.0 * self.mass_modifier_spin.value()  # Placeholder
-            else:
-                mass = self.static_mass_spin.value()
-
             # Surfaceprop
             if self.auto_surf_radio.isChecked():
                 surfaceprop = SurfacepropDetector.detect(model_set.name)
             else:
                 surfaceprop = self.static_surf_edit.text().strip()
+
+            # Mass
+            if self.auto_mass_radio.isChecked():
+                density = MeshProcessor.get_surfaceprop_density(surfaceprop)
+                mass = 10.0 * density * self.mass_modifier_spin.value()  # Preview estimate
+            else:
+                mass = self.static_mass_spin.value()
 
             # Check existing
             render_smd = out_dir / f"{model_set.name}.smd"
