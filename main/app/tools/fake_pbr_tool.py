@@ -56,11 +56,17 @@ class PBRInputs:
 @dataclass
 class ProcessingOptions:
     """Options for PBR processing"""
-    ao_strength: float = 0.5
-    gloss_gamma: float = 2.2
+    ao_strength: float = 0.7
+    gloss_gamma: float = 2.0
     generate_vtf: bool = True
     generate_vmt: bool = True
     generate_mipmaps: bool = True
+    target_branch: str = "gmod"
+    shader: str = "VertexLitGeneric"
+    envmap: str = "env_cubemap"
+    metal_diffuse_suppression: float = 0.85
+    envmask_gamma: float = 1.5
+    invert_green: bool = False
 
 
 class FakePBRProcessor:
