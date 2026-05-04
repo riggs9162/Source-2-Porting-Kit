@@ -176,13 +176,18 @@ class FakePBRProcessor:
             metallic_data = resize_to_match(metallic_data, height, width, "metallic")
             self._check_cancel()
             
+            stats = compute_fakepbr_material_stats(roughness_data, metallic_data, height, width)
+
             # Process base texture
             self.log(f"[FakePBR] Processing base texture...")
-            self.log(f"  → Converting color to linear space")
-            self.log(f"  → Applying AO (strength: {self.options.ao_strength:.2f})")
-            self.log(f"  → Adding metallic mask to alpha channel")
-            base_texture = process_base_texture(
-                color_data, ao_data, metallic_data, self.options.ao_strength
+            self.log(f"  → Baking AO with power curve (strength: {self.options.ao_strength:.2f})")
+            self.log(f"  → Darkening metallic diffuse regions")
+            base_texture = process_fakepbr_base_texture(
+                color_data,
+                ao_data,
+                metallic_data,
+                self.options.ao_strength,
+                self.options.metal_diffuse_suppression
             )
             self.log(f"  ✓ Base texture processed")
             self._check_cancel()
