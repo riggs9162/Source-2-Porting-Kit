@@ -404,11 +404,29 @@ class TexturePBRBatchTool(BaseTool):
         super().__init__("Texture PBR Batch")
         self.thread: Optional[BatchRunner] = None
         self.scanned_groups: List[AssetGroup] = []
+        self.history: List[dict] = []
+        try:
+            self._history_file = get_config_dir() / "texture_pbr_batch_history.json"
+        except Exception:
+            self._history_file = Path(__file__).parent.parent / "config" / "texture_pbr_batch_history.json"
+        self._load_history()
         self.setup_content()
 
     def setup_content(self):
         layout = QVBoxLayout()
         self.content_layout.addLayout(layout)
+
+        # Previous runs
+        history_group = QGroupBox("Previous Runs")
+        history_form = QFormLayout()
+        self.history_dropdown = QComboBox()
+        self.history_dropdown.addItem("-- Recent runs --")
+        self.history_dropdown.currentIndexChanged.connect(self.on_history_selected)
+        history_form.addRow("Select Run:", self.history_dropdown)
+        history_group.setLayout(history_form)
+        layout.addWidget(history_group)
+
+        self._refresh_history_dropdown()
 
         # Input/Output
         io_group = QGroupBox("Folders")
