@@ -15,6 +15,10 @@ except ImportError:
     )
 
 
+VTF_FLAG_NORMAL = vtfpp.VTF.Flags.V0_NORMAL.value
+VTF_FLAG_SRGB = 0x00000040  # Internal sentinel; applied with VTF.set_srgb().
+
+
 class VTFEncoderError(Exception):
     """Custom exception for VTF encoding errors"""
     pass
