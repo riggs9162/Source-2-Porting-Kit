@@ -372,6 +372,18 @@ class GltfMeshLoader:
 class MeshProcessor:
     """Apply transformations and cleanup to meshes."""
 
+    SURFACEPROP_DENSITIES = {
+        'default': 1.0,
+        'metal': 2.7,
+        'wood': 0.65,
+        'glass': 1.15,
+        'concrete': 2.25,
+        'plastic': 0.55,
+        'foliage': 0.2,
+        'dirt': 1.35,
+        'tile': 1.8,
+    }
+
     @staticmethod
     def apply_scale(mesh: trimesh.Trimesh, scale: float):
         """Apply uniform scale (bakes into vertices)."""
@@ -471,6 +483,24 @@ class MeshProcessor:
             return None
 
         return max(0.001, volume * density)
+
+    @classmethod
+    def get_surfaceprop_density(cls, surfaceprop: Optional[str]) -> float:
+        """Get mass density multiplier for a Source surfaceprop."""
+        if not surfaceprop:
+            return cls.SURFACEPROP_DENSITIES['default']
+
+        return cls.SURFACEPROP_DENSITIES.get(surfaceprop.lower(), cls.SURFACEPROP_DENSITIES['default'])
+
+    @classmethod
+    def calculate_surface_mass(cls, mesh: trimesh.Trimesh, surfaceprop: Optional[str], mass_modifier: float) -> Optional[float]:
+        """Calculate mesh mass using density tuned for the detected surface type."""
+        density = cls.get_surfaceprop_density(surfaceprop)
+        mass = cls.calculate_mass(mesh, density)
+        if mass is None:
+            return None
+
+        return mass * mass_modifier
 
     @staticmethod
     def calculate_physics_properties(mesh: trimesh.Trimesh, mass: float) -> Dict[str, float]:
