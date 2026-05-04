@@ -259,7 +259,16 @@ class FakePBRProcessor:
             if self.options.generate_vmt:
                 self._check_cancel()
                 self.log(f"[FakePBR] Generating VMT...")
-                generate_pbr_vmt(vmt_path, material_name, material_path)
+                generate_fakepbr_vmt(
+                    vmt_path,
+                    material_name,
+                    material_path,
+                    shader=self.options.shader,
+                    target_branch=self.options.target_branch,
+                    envmap=self.options.envmap,
+                    stats=stats,
+                    has_envmap_mask=True
+                )
                 self.log(f"  ✓ Generated {material_name}.vmt")
             else:
                 self.log(f"[FakePBR] Skipping VMT generation (option disabled)")
