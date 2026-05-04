@@ -321,28 +321,8 @@ class GltfMeshLoader:
             if mesh is None or not hasattr(mesh, 'faces') or len(mesh.faces) == 0:
                 return (None, "Mesh has no faces after loading")
 
-            # CRITICAL: Validate and normalize UVs immediately after loading
-            # Some glTF exporters scale UVs incorrectly or apply transforms
-            if hasattr(mesh.visual, 'uv') and mesh.visual.uv is not None:
-                uvs = mesh.visual.uv
-                
-                # Check for obviously wrong UV scales (common in Source 2 exports)
-                uv_min = np.min(uvs, axis=0)
-                uv_max = np.max(uvs, axis=0)
-                uv_range = uv_max - uv_min
-                
-                # If UVs span more than 10 units in either direction, they're likely scaled wrong
-                # Source 2 sometimes exports UVs in texture pixel space instead of 0-1 space
-                if np.any(uv_range > 10.0):
-                    if verbose:
-                        print(f"WARNING: {path.name} has large UV range {uv_range}, likely needs scaling")
-                    # Normalize to 0-1 range as these are probably in pixel space
-                    if uv_range[0] > 1e-6 and uv_range[1] > 1e-6:
-                        uvs = (uvs - uv_min) / uv_range
-                        mesh.visual.uv = uvs
-                        if not hasattr(mesh, 'metadata'):
-                            mesh.metadata = {}
-                        mesh.metadata['uv_was_normalized'] = True
+            # Preserve glTF texture coordinates exactly as loaded. Do not auto-normalize,
+            # wrap, clamp, or otherwise "fix" UVs here; SMD export controls UV handling.
 
             # Store material names from glTF data if available (fallback)
             if gltf_data and 'materials' in gltf_data and (not hasattr(mesh, 'metadata') or 'gltf_material_names' not in mesh.metadata):
@@ -649,7 +629,7 @@ class SmdWriter:
         
         Args:
             uv_mode: How to handle UV coordinates:
-                'preserve' - Keep original UVs as-is (with auto-fix for extreme values)
+                'preserve' - Keep original UVs as-is
                 'wrap' - Apply modulo 1.0 to wrap UVs into 0-1 range (for tiling)
                 'clamp' - Clamp UVs to 0-1 range
                 'normalize' - Normalize UVs to 0-1 based on min/max
@@ -702,14 +682,10 @@ class SmdWriter:
 
         # Get UVs with robust handling
         uvs = None
-        uv_was_auto_fixed = False
         if not force_uv_zero:
             try:
                 raw_uvs = mesh.visual.uv
                 if raw_uvs is not None and len(raw_uvs) == len(vertices):
-                    # Check if UVs were already normalized during load
-                    was_normalized = hasattr(mesh, 'metadata') and mesh.metadata.get('uv_was_normalized', False)
-                    
                     # Gather UV statistics
                     uv_min = np.min(raw_uvs, axis=0)
                     uv_max = np.max(raw_uvs, axis=0)
@@ -730,15 +706,6 @@ class SmdWriter:
                             uvs = raw_uvs
                     else:  # 'preserve'
                         uvs = raw_uvs
-                        
-                        # Safety check: if UVs are wildly out of range even in preserve mode,
-                        # they're probably wrong. This catches texture-space coordinates.
-                        if not was_normalized and np.any(np.abs(uv_range) > 100.0):
-                            # Auto-normalize extremely large UVs
-                            if uv_range[0] > 1e-6 and uv_range[1] > 1e-6:
-                                uvs = (raw_uvs - uv_min) / uv_range
-                                uv_was_auto_fixed = True
-                                warning_msg = f"UVs auto-normalized (range was {uv_range[0]:.1f}x{uv_range[1]:.1f})"
             except Exception:
                 uvs = None
         
