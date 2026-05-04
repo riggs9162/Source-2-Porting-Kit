@@ -247,6 +247,9 @@ class FakePBRProcessor:
                 self._check_cancel()
                 self.encoder.encode_phong_map(phong_texture, phong_path, generate_mipmaps=self.options.generate_mipmaps)
                 self.log(f"  ✓ Encoded {material_name}_phong.vtf")
+                self._check_cancel()
+                self.encoder.encode_envmap_mask(envmask_texture, envmask_path, generate_mipmaps=self.options.generate_mipmaps)
+                self.log(f"  ✓ Encoded {material_name}_envmask.vtf")
                 vtf_generated = True
             else:
                 self.log(f"[FakePBR] Skipping VTF generation (option disabled)")
