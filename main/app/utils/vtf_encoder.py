@@ -123,7 +123,9 @@ class VTFEncoder:
             options = vtfpp.VTF.CreationOptions()
             options.version = 4  # VTF 7.4
             options.output_format = image_format
-            options.flags = flags
+            b_srgb = bool(flags & VTF_FLAG_SRGB)
+            sourcepp_flags = flags & ~VTF_FLAG_SRGB
+            options.flags = sourcepp_flags
             # sourcepp can have issues with automatic computations; allow user control over mipmaps
             options.compute_mips = bool(generate_mipmaps)
             options.compute_thumbnail = False
