@@ -265,6 +265,7 @@ class Converter:
                 output_dir / f"{name}_color.vtf",
                 output_dir / f"{name}_normal.vtf",
                 output_dir / f"{name}_phong.vtf",
+                output_dir / f"{name}_envmask.vtf",
                 output_dir / f"{name}.vmt",
             ]
         outputs = [
