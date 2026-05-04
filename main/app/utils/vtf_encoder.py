@@ -97,7 +97,7 @@ class VTFEncoder:
                     f"range=[{actual_min}, {actual_max}]")
         
         # Check each channel individually for normal maps
-        if flags & 0x00000002:  # NORMAL_FLAG
+        if flags & VTF_FLAG_NORMAL:
             r_max = int(pixel_data[:,:,0].max())
             g_max = int(pixel_data[:,:,1].max())
             b_max = int(pixel_data[:,:,2].max())
