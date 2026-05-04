@@ -688,6 +688,8 @@ class TexturePBRBatchTool(BaseTool):
             self.log("No assets selected", "WARNING")
             return
 
+        self._save_current_run_to_history()
+
         self.convert_btn.setEnabled(False)
         self.cancel_btn.setEnabled(True)
         self.progress.setVisible(True)
