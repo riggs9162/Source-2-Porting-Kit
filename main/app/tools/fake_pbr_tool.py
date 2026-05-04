@@ -237,6 +237,7 @@ class FakePBRProcessor:
                 base_path = os.path.join(output_folder, f"{material_name}_color.vtf")
                 normal_path = os.path.join(output_folder, f"{material_name}_normal.vtf")
                 phong_path = os.path.join(output_folder, f"{material_name}_phong.vtf")
+                envmask_path = os.path.join(output_folder, f"{material_name}_envmask.vtf")
                 self._check_cancel()
                 self.encoder.encode_base_texture(base_texture, base_path, generate_mipmaps=self.options.generate_mipmaps)
                 self.log(f"  ✓ Encoded {material_name}_color.vtf")
