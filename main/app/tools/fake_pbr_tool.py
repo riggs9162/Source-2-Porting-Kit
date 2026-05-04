@@ -195,21 +195,38 @@ class FakePBRProcessor:
             # Process normal map
             self.log(f"[FakePBR] Packing normal map...")
             self.log(f"  → Preserving RGB normal channels")
-            self.log(f"  → Computing envmap mask: metal × (1-roughness) × ao")
-            normal_texture = pack_normal_with_envmap(
-                normal_data, ao_data, metallic_data, roughness_data
+            self.log(f"  → Computing bump alpha Phong mask")
+            normal_texture = pack_normal_with_phong_mask(
+                normal_data,
+                ao_data,
+                metallic_data,
+                roughness_data,
+                self.options.invert_green
             )
-            self.log(f"  ✓ Normal map packed with envmap mask in alpha")
+            self.log(f"  ✓ Normal map packed with Phong mask in alpha")
             self._check_cancel()
             
             # Process phong/gloss map
-            self.log(f"[FakePBR] Computing gloss map...")
+            self.log(f"[FakePBR] Computing phong exponent texture...")
             self.log(f"  → Converting roughness to gloss: (1-r)^{self.options.gloss_gamma:.2f}")
-            self.log(f"  → Computing rimlight mask: gloss × AO")
-            phong_texture = create_phong_texture(
-                roughness_data, ao_data, self.options.gloss_gamma, height, width
+            self.log(f"  → Packing R=exponent, G=metallic, A=rim")
+            phong_texture = create_phong_exponent_texture(
+                roughness_data, metallic_data, ao_data, self.options.gloss_gamma, height, width
             )
-            self.log(f"  ✓ Gloss map computed with rimlight mask")
+            self.log(f"  ✓ Phong exponent texture computed")
+            self._check_cancel()
+
+            # Process colored envmap mask
+            self.log(f"[FakePBR] Computing colored envmap mask...")
+            self.log(f"  → Packing RGB colored metal tint / roughness intensity")
+            envmask_texture = create_colored_envmap_mask(
+                color_data,
+                ao_data,
+                metallic_data,
+                roughness_data,
+                self.options.envmask_gamma
+            )
+            self.log(f"  ✓ Colored envmap mask computed")
             self._check_cancel()
             
             # Conditionally encode to VTF
