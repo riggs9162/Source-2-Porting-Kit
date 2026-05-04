@@ -5,8 +5,78 @@ Core algorithms for converting PBR (Physically Based Rendering) textures
 from Source 2 format to Source 1 format with proper material properties.
 """
 
-from typing import Optional
+from dataclasses import dataclass
+from typing import Optional, Tuple
 import numpy as np
+
+
+@dataclass
+class FakePBRMaterialStats:
+    """Summary values used for Fake PBR VMT parameter selection."""
+
+    avg_roughness: float
+    avg_metallic: float
+    avg_smoothness: float
+    b_has_metal: bool
+    b_has_reflective: bool
+    b_is_rough_dielectric: bool
+
+
+def _extract_scalar_map(
+    data: Optional[np.ndarray],
+    height: int,
+    width: int,
+    default: float
+) -> np.ndarray:
+    """Return a clamped 2D scalar map, creating a constant default when missing."""
+    if data is None:
+        return np.full((height, width), default, dtype=np.float32)
+
+    scalar = data[:, :, 0] if data.ndim > 2 else data
+    scalar = np.asarray(scalar, dtype=np.float32)
+    return np.clip(scalar, 0.0, 1.0)
+
+
+def _match_scalar_inputs(
+    height: int,
+    width: int,
+    ao: Optional[np.ndarray],
+    roughness: Optional[np.ndarray],
+    metallic: Optional[np.ndarray]
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Build canonical AO/roughness/metallic scalar maps for Fake PBR baking."""
+    ao_value = _extract_scalar_map(ao, height, width, 1.0)
+    roughness_value = _extract_scalar_map(roughness, height, width, 0.5)
+    metallic_value = _extract_scalar_map(metallic, height, width, 0.0)
+    return ao_value, roughness_value, metallic_value
+
+
+def compute_fakepbr_material_stats(
+    roughness: Optional[np.ndarray],
+    metallic: Optional[np.ndarray],
+    height: int,
+    width: int
+) -> FakePBRMaterialStats:
+    """Compute average material properties for VMT heuristic selection."""
+    roughness_value = _extract_scalar_map(roughness, height, width, 0.5)
+    metallic_value = _extract_scalar_map(metallic, height, width, 0.0)
+
+    avg_roughness = float(np.mean(roughness_value))
+    avg_metallic = float(np.mean(metallic_value))
+    avg_smoothness = float(1.0 - avg_roughness)
+
+    b_has_metal = bool(np.max(metallic_value) > 0.05)
+    b_has_reflective = bool(np.max((1.0 - roughness_value) * (0.04 + 0.96 * metallic_value)) > 0.04)
+    b_is_rough_dielectric = bool(avg_metallic < 0.05 and avg_roughness > 0.75)
+
+    return FakePBRMaterialStats(
+        avg_roughness=avg_roughness,
+        avg_metallic=avg_metallic,
+        avg_smoothness=avg_smoothness,
+        b_has_metal=b_has_metal,
+        b_has_reflective=b_has_reflective,
+        b_is_rough_dielectric=b_is_rough_dielectric
+    )
 
 
 def apply_ao_to_color(
