@@ -144,6 +144,11 @@ class VTFEncoder:
                 options
             )
 
+            # NOTE: sourcepp exposes VTF.set_srgb(), but rewriting a freshly
+            # baked DXT texture through create_from_file() -> bake_to_file()
+            # currently truncates some outputs to tiny invalid files. Keep the
+            # encode path stable and avoid post-bake rewrites here.
+
             # Verify file was created
             if not os.path.exists(output_path):
                 raise VTFEncoderError(f"Failed to create VTF file: {output_path}")
