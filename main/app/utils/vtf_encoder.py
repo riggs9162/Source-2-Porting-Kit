@@ -179,7 +179,7 @@ class VTFEncoder:
             pixel_data,
             output_path,
             image_format=vtfpp.ImageFormat.DXT5,
-            flags=0,
+            flags=VTF_FLAG_SRGB,
             invert_green=False,
             generate_mipmaps=generate_mipmaps
         )
