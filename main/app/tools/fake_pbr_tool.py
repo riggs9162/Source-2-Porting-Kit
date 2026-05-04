@@ -278,7 +278,12 @@ class FakePBRProcessor:
             if self.options.generate_vmt:
                 files.append(f" - {material_name}.vmt")
             if vtf_generated:
-                files.extend([f" - {material_name}_color.vtf", f" - {material_name}_normal.vtf", f" - {material_name}_phong.vtf"])
+                files.extend([
+                    f" - {material_name}_color.vtf",
+                    f" - {material_name}_normal.vtf",
+                    f" - {material_name}_phong.vtf",
+                    f" - {material_name}_envmask.vtf"
+                ])
             success_msg = "[SUCCESS] Created files:\n" + "\n".join(files)
             
             return True, success_msg
