@@ -217,8 +217,24 @@ class VTFEncoder:
             pixel_data,
             output_path,
             image_format=vtfpp.ImageFormat.DXT5,
-            flags=0,
+            flags=VTF_FLAG_NORMAL,
             invert_green=False,  # Normal maps already in correct orientation
+            generate_mipmaps=generate_mipmaps
+        )
+
+    def encode_envmap_mask(
+        self,
+        pixel_data: np.ndarray,
+        output_path: str,
+        generate_mipmaps: bool = True
+    ) -> bool:
+        """Encode a linear colored $envmapmask texture."""
+        return self.encode_to_vtf(
+            pixel_data,
+            output_path,
+            image_format=vtfpp.ImageFormat.DXT5,
+            flags=0,
+            invert_green=False,
             generate_mipmaps=generate_mipmaps
         )
 
