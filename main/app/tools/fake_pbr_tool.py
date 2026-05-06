@@ -21,8 +21,24 @@ from PySide6.QtWidgets import (
     QSpinBox
 )
 from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtGui import QColor, QBrush
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Event
+
+
+_ROW_OK_BRUSH = QBrush(QColor(76, 175, 80, 90))
+_ROW_FAIL_BRUSH = QBrush(QColor(244, 67, 54, 90))
+
+
+def _paint_table_row(table, row: int, success: bool) -> None:
+    """Tint every QTableWidgetItem in `row` to indicate completion status."""
+    if row < 0 or row >= table.rowCount():
+        return
+    brush = _ROW_OK_BRUSH if success else _ROW_FAIL_BRUSH
+    for col in range(table.columnCount()):
+        item = table.item(row, col)
+        if item is not None:
+            item.setBackground(brush)
 
 from .base_tool import BaseTool
 from ..utils.vtf_encoder import VTFEncoder, VTFEncoderError
@@ -419,11 +435,15 @@ class AutomationThread(QThread):
 
     progress = Signal(str)
     finished = Signal(bool, str)
+    row_finished = Signal(int, bool)
 
     def __init__(self, processor_factory, tasks, max_workers: int = 2):
         super().__init__()
         self.processor_factory = processor_factory  # function to create a FakePBRProcessor
-        self.tasks = tasks  # list of dicts with inputs, output_folder, material_name, material_path
+        # Each task is a dict that may include a 'row' key carrying the
+        # originating QTableWidget row index so the UI can paint per-row
+        # completion status without depending on submission order.
+        self.tasks = tasks
         self.max_workers = max(1, int(max_workers))
 
     def run(self):
@@ -433,7 +453,7 @@ class AutomationThread(QThread):
 
         def worker(idx: int, task: dict):
             if self.isInterruptionRequested():
-                return (idx, task['material_name'], False, 'Cancelled')
+                return (idx, task['material_name'], False, 'Cancelled', task.get('row', -1))
             proc = self.processor_factory()
             # Prefix all logs from this task with its index/total
             proc.log_callback = lambda m, i=idx, t=total: self.progress.emit(f"[{i}/{t}] {m}")
@@ -453,7 +473,7 @@ class AutomationThread(QThread):
                     proc.shutdown()
                 except Exception:
                     pass
-            return (idx, task['material_name'], success, msg)
+            return (idx, task['material_name'], success, msg, task.get('row', -1))
 
         # Submit tasks to a thread pool with a bounded number of workers
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
@@ -462,7 +482,7 @@ class AutomationThread(QThread):
                 if self.isInterruptionRequested():
                     cancelled = True
                     break
-                futures[executor.submit(worker, idx, task)] = (idx, task['material_name'])
+                futures[executor.submit(worker, idx, task)] = (idx, task['material_name'], task.get('row', -1))
 
             # Process completions as they finish
             for future in as_completed(futures):
@@ -470,9 +490,9 @@ class AutomationThread(QThread):
                     cancelled = True
                     break
                 try:
-                    idx, name, success, msg = future.result()
+                    idx, name, success, msg, row = future.result()
                 except Exception as e:
-                    idx, name = futures[future]
+                    idx, name, row = futures[future]
                     success = False
                     msg = f"Processing Error: {e}"
                 if success:
@@ -483,6 +503,8 @@ class AutomationThread(QThread):
                     if isinstance(msg, str) and msg.lower().startswith("cancelled"):
                         cancelled = True
                     self.progress.emit(f"[{idx}/{total}] ✗ {name} failed: {msg}")
+                if row >= 0:
+                    self.row_finished.emit(row, success)
 
         if cancelled or self.isInterruptionRequested():
             self.finished.emit(False, f"Cancelled after {ok_count}/{total} materials")
@@ -1744,8 +1766,48 @@ class FakePBRTool(BaseTool):
 
         self.automation_thread = AutomationThread(make_processor, tasks, max_workers=self.auto_max_parallel.value())
         self.automation_thread.progress.connect(lambda m: self.log(m, "INFO"))
+        self.automation_thread.row_finished.connect(self._on_scan_row_finished)
         self.automation_thread.finished.connect(self.on_automation_finished)
         self.automation_thread.start()
+
+    def _on_scan_row_finished(self, row: int, success: bool):
+        """Tint the corresponding scan_table row green/red as each task completes."""
+        _paint_table_row(self.scan_table, row, success)
+
+    def _required_types(self) -> List[str]:
+        """Texture types currently required for a material to be eligible."""
+        if not hasattr(self, "req_checkboxes"):
+            return []
+        return [key for key, cb in self.req_checkboxes.items() if cb.isChecked()]
+
+    def _apply_requirements_filter(self) -> int:
+        """Auto-uncheck rows whose underlying data is missing any required type.
+
+        Returns the count of rows that ended up unchecked because they failed
+        the current requirement set. Re-checking a row manually is still
+        allowed; the filter only fires on requirement-toggle and post-scan.
+        """
+        if not hasattr(self, "scan_table") or not getattr(self, "_scan_matches", None):
+            return 0
+        required = self._required_types()
+        if not required:
+            return 0
+        excluded = 0
+        for row in range(self.scan_table.rowCount()):
+            name_item = self.scan_table.item(row, 1)
+            include_item = self.scan_table.item(row, 0)
+            if name_item is None or include_item is None:
+                continue
+            data = self._scan_matches.get(name_item.text(), {})
+            missing = [t for t in required if not data.get(t)]
+            if missing:
+                if include_item.checkState() == Qt.Checked:
+                    include_item.setCheckState(Qt.Unchecked)
+                include_item.setToolTip("Missing required: " + ", ".join(missing))
+                excluded += 1
+            else:
+                include_item.setToolTip("")
+        return excluded
 
     def on_automation_finished(self, success: bool, message: str):
         self.log(message, "SUCCESS" if success else "WARNING")
