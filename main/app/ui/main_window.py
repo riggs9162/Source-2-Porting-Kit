@@ -22,6 +22,7 @@ from app.tools.ogg_converter_tool import OggConverterTool
 from app.tools.alpha_mask_tool import AlphaMaskTool
 from app.tools.folder_search_replace_tool import FolderSearchReplaceTool
 from app.tools.texture_pbr_batch_tool import TexturePBRBatchTool
+from app.tools.fake_pbr_reverse_tool import FakePBRReverseTool
 from app.tools.vmat_pbr_tool import VmatPBRTool
 from app.tools.vtf_clamp_tool import VtfClampTool
 from app.tools.gltf_smd_batch_tool import GltfSmdBatchTool
@@ -123,10 +124,13 @@ class MainWindow(QMainWindow):
             "Materials": [
                 ("Alpha Mask", AlphaMaskTool),
                 ("Hotspot Editor", HotspotEditorTool),
-                ("PBR Tool", PBRTool),
-                ("Texture PBR Batch", TexturePBRBatchTool),
-                ("VMAT PBR", VmatPBRTool),
                 ("VTF Clamp", VtfClampTool),
+            ],
+            "Materials / PBR": [
+                ("Fake PBR Reverse", FakePBRReverseTool),
+                ("Manual PBR Converter", PBRTool),
+                ("Texture Folder PBR Batch", TexturePBRBatchTool),
+                ("VMAT PBR Batch Converter", VmatPBRTool),
             ],
             "Sounds": [
                 ("Loop Point Converter", LoopPointTool),
