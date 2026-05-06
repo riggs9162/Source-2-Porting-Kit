@@ -42,7 +42,30 @@ from PySide6.QtGui import QColor
 
 from .base_tool import BaseTool
 from .smd_export import SmdExporter
+from .smd_animation_export import (
+    CoordinateMode, SmdAnimationExporter, SmdSkeletalExporter,
+    compute_root_bind_pyr, derive_definebone_lines, is_loop_clip,
+    sanitize_clip_filename,
+)
+from .gltf_animation import (
+    GltfClip, GltfSkin, load_buffer_bytes, parse_clips, parse_skin,
+    parse_skin_vertex_data, peek_animations, sample_clip,
+)
 from ..utils.helpers import get_config_dir
+
+
+# ============================================================================
+# Animation result metadata
+# ============================================================================
+
+@dataclass
+class AnimMeta:
+    """Resolved info for one animation clip in the QC."""
+    clip_name: str           # canonical sequence name
+    smd_filename: str        # SMD filename relative to QC
+    num_frames: int
+    fps: float
+    loop: bool
 
 
 # ============================================================================
@@ -77,6 +100,7 @@ class PreviewModel:
     warnings: List[str] = field(default_factory=list)
     load_status: str = "Unknown"  # Ok, Failed, Pending
     failure_reason: str = ""
+    anim_summary: str = "static"  # "static" or "<n> clip(s)"
 
 
 # ============================================================================
@@ -84,27 +108,43 @@ class PreviewModel:
 # ============================================================================
 
 class ModelSetScanner:
-    """Recursively scan filesystem for glTF/GLB model sets."""
+    """Scan a folder for glTF/GLB model sets, optionally recursing into subfolders."""
 
     PHYSICS_PATTERNS = [
         re.compile(r'.*_physics\.(gltf|glb)$', re.IGNORECASE),
         re.compile(r'.*physics\.(gltf|glb)$', re.IGNORECASE),
     ]
 
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, recursive: bool = True):
         self.root = Path(root)
+        self.recursive = recursive
 
     @classmethod
     def is_physics_file(cls, filename: str) -> bool:
         """Check if filename indicates a physics mesh."""
         return any(p.match(filename) for p in cls.PHYSICS_PATTERNS)
 
+    def _iter_dirs(self):
+        """Yield (base, files) tuples — only the root when recursive=False."""
+        if self.recursive:
+            for base, _, files in os.walk(self.root):
+                yield base, files
+        else:
+            try:
+                files = [
+                    e.name for e in os.scandir(self.root)
+                    if e.is_file()
+                ]
+            except (FileNotFoundError, NotADirectoryError, PermissionError):
+                files = []
+            yield str(self.root), files
+
     def find_sets(self) -> List[ModelSet]:
         """Scan for model sets."""
         sets: List[ModelSet] = []
         seen_keys: set = set()
 
-        for base, _, files in os.walk(self.root):
+        for base, files in self._iter_dirs():
             base_path = Path(base)
             gltf_files = [f for f in files if f.lower().endswith(('.gltf', '.glb'))]
             
@@ -390,6 +430,12 @@ class GltfMeshLoader:
             # vmdl-space inches, which is what SMD wants.
             if is_s2v:
                 mesh.metadata['source2_native_units'] = True
+
+            # Surface parsed JSON + base dir so the animation pipeline can
+            # decode the .bin buffer without reparsing the file.
+            if gltf_data is not None:
+                mesh.metadata['gltf_data'] = gltf_data
+                mesh.metadata['gltf_base_dir'] = path.parent
 
             return (mesh, "")
 
@@ -694,21 +740,53 @@ class QcWriter:
         volume: Optional[float] = None,
         inertia: Optional[float] = None,
         damping: Optional[float] = None,
-        rotdamping: Optional[float] = None
+        rotdamping: Optional[float] = None,
+        is_animated: bool = False,
+        skin: Optional[GltfSkin] = None,
+        coord: Optional[CoordinateMode] = None,
+        animations: Optional[List[AnimMeta]] = None,
     ):
-        """Write QC file with physics properties."""
+        """Write QC file with optional skeletal-animation block."""
         lines = []
         lines.append(f'$modelname "{QcWriter._normalize_path(modelname)}"')
-        
+
         if cdmaterials:
             lines.append(f'$cdmaterials "{QcWriter._normalize_path(cdmaterials)}"')
-        
+
         if surfaceprop:
             lines.append(f'$surfaceprop "{surfaceprop}"')
-        
-        lines.append('$staticprop')
-        lines.append(f'$body "body" "{name}.smd"')
-        lines.append(f'$sequence "idle" "{name}.smd" fps 1')
+
+        if is_animated and skin is not None and coord is not None:
+            # Skinned model with animations — drop $staticprop, declare bones
+            # explicitly so studiomdl preserves the full hierarchy, and emit
+            # an $animation/$sequence pair per clip.
+            lines.append(f'$body "body" "{name}.smd"')
+            lines.append('')
+            lines.extend(derive_definebone_lines(skin, coord))
+            lines.append('')
+            root_name = skin.joints[skin.root_joint_idx].name
+            lines.append(f'$root "{root_name}"')
+            lines.append('')
+
+            for am in (animations or []):
+                lines.append(
+                    f'$animation "a_{am.clip_name}" "{am.smd_filename}" fps {am.fps:g}'
+                )
+            lines.append('')
+
+            for am in (animations or []):
+                opts = [f'fps {am.fps:g}']
+                if am.loop:
+                    opts.append('loop')
+                opts_str = ' '.join(opts)
+                lines.append(
+                    f'$sequence "{am.clip_name}" {{ "a_{am.clip_name}" {opts_str} }}'
+                )
+            lines.append('')
+        else:
+            lines.append('$staticprop')
+            lines.append(f'$body "body" "{name}.smd"')
+            lines.append(f'$sequence "idle" "{name}.smd" fps 1')
 
         if has_physics:
             lines.append(f'$collisionmodel "{name}_physics.smd" {{')
@@ -768,7 +846,10 @@ class BatchRunner(QThread):
         dry_run: bool,
         verbose: bool = False,
         axis_conversion: bool = True,
-        uv_mode: str = 'preserve'
+        uv_mode: str = 'preserve',
+        export_animations: bool = True,
+        animation_fps: float = 30.0,
+        auto_loop_detect: bool = True,
     ):
         super().__init__()
         self.model_sets = model_sets
@@ -794,6 +875,9 @@ class BatchRunner(QThread):
         self.verbose = verbose
         self.axis_conversion = axis_conversion
         self.uv_mode = uv_mode
+        self.export_animations = export_animations
+        self.animation_fps = animation_fps
+        self.auto_loop_detect = auto_loop_detect
 
     def _get_output_dir(self, model_set: ModelSet) -> Path:
         """Calculate output directory for model."""
@@ -910,20 +994,95 @@ class BatchRunner(QThread):
             render_scale = 1.0 if native_units else self.scale
             if render_scale != self.scale:
                 self.progress.emit(idx, total, f"{model_set.name}: Source-units glTF detected, using scale=1.0")
+
+            # Detect skin + animations. The buffer is loaded lazily — only when
+            # both export_animations is on and the file actually carries skin
+            # data — to keep the static-prop path's I/O cost unchanged.
+            skin: Optional[GltfSkin] = None
+            clips: List[GltfClip] = []
+            vertex_joints = None
+            vertex_weights = None
+            gltf_data = render_mesh.metadata.get('gltf_data')
+            gltf_base_dir = render_mesh.metadata.get('gltf_base_dir')
+            if (self.export_animations and gltf_data is not None
+                    and gltf_base_dir is not None
+                    and gltf_data.get('skins') and gltf_data.get('animations')):
+                buf = load_buffer_bytes(gltf_data, gltf_base_dir)
+                if buf is not None:
+                    skin = parse_skin(gltf_data, buf)
+                    if skin is not None:
+                        clips = parse_clips(gltf_data, buf, skin)
+                        vertex_joints, vertex_weights = parse_skin_vertex_data(gltf_data, buf)
+
+            is_animated = bool(
+                skin and clips and vertex_joints is not None and vertex_weights is not None
+            )
+
             MeshProcessor.apply_scale(render_mesh, render_scale)
-            if self.axis_conversion and not native_units:
+            apply_swap = self.axis_conversion and not native_units
+            if apply_swap:
                 MeshProcessor.apply_axis_conversion(render_mesh)
-            MeshProcessor.sanitize(render_mesh)
+            # Skip sanitize() in the animated path — it calls
+            # remove_unreferenced_vertices() which reorders the vertex array
+            # and would silently desynchronise JOINTS_0 / WEIGHTS_0.
+            if not is_animated:
+                MeshProcessor.sanitize(render_mesh)
+
+            coord = CoordinateMode(scale=render_scale, swap_axes=apply_swap)
+            animations: List[AnimMeta] = []
 
             # Write render SMD
             render_smd = out_dir / f"{model_set.name}.smd"
             if self.generate_smd:
-                success, uv_warning = SmdExporter.write_static(render_mesh, render_smd, model_set.name, self.flip_v, False, uv_mode=self.uv_mode)
-                if not success:
-                    errors.append(f"{model_set.name}: Failed to write render SMD")
-                    continue
-                elif uv_warning and self.verbose:
-                    self.progress.emit(idx, total, f"{model_set.name}: {uv_warning}")
+                if is_animated:
+                    assert skin is not None and vertex_joints is not None and vertex_weights is not None
+                    success, uv_warning = SmdSkeletalExporter.write_skinned(
+                        render_mesh, skin, vertex_joints, vertex_weights,
+                        render_smd, model_set.name, coord,
+                        flip_v=self.flip_v, uv_mode=self.uv_mode,
+                    )
+                    if not success:
+                        errors.append(f"{model_set.name}: Failed to write skinned SMD: {uv_warning}")
+                        continue
+                    elif uv_warning and self.verbose:
+                        self.progress.emit(idx, total, f"{model_set.name}: {uv_warning}")
+                    self.progress.emit(
+                        idx, total,
+                        f"{model_set.name}: skinned ref SMD ({len(skin.joints)} bones)"
+                    )
+
+                    # Per-clip animation SMDs
+                    for clip in clips:
+                        safe = sanitize_clip_filename(clip.name)
+                        anim_smd = out_dir / f"{model_set.name}_anim_{safe}.smd"
+                        frames, num_frames = sample_clip(clip, skin, fps=self.animation_fps)
+                        ok, anim_err = SmdAnimationExporter.write_animation(
+                            skin, frames, anim_smd, coord,
+                        )
+                        if not ok:
+                            errors.append(
+                                f"{model_set.name}: Failed to write anim {clip.name!r}: {anim_err}"
+                            )
+                            continue
+                        loop = is_loop_clip(clip.name) if self.auto_loop_detect else False
+                        animations.append(AnimMeta(
+                            clip_name=safe,
+                            smd_filename=anim_smd.name,
+                            num_frames=num_frames,
+                            fps=self.animation_fps,
+                            loop=loop,
+                        ))
+                    self.progress.emit(
+                        idx, total,
+                        f"{model_set.name}: wrote {len(animations)} animation SMD(s)"
+                    )
+                else:
+                    success, uv_warning = SmdExporter.write_static(render_mesh, render_smd, model_set.name, self.flip_v, False, uv_mode=self.uv_mode)
+                    if not success:
+                        errors.append(f"{model_set.name}: Failed to write render SMD")
+                        continue
+                    elif uv_warning and self.verbose:
+                        self.progress.emit(idx, total, f"{model_set.name}: {uv_warning}")
             else:
                 if self.verbose:
                     self.progress.emit(idx, total, f"{model_set.name}: Skipping SMD generation (disabled)")
@@ -1055,9 +1214,22 @@ class BatchRunner(QThread):
                         physics_smd = out_dir / f"{model_set.name}_physics.smd"
                         # Use proper material name for physics meshes
                         physics_material = "physics_group_prop.wood_crate_material"
+                        # When the main skeleton's root bone has a non-identity
+                        # bind (e.g. S2V skinned exports bake a Y-up swap into
+                        # root.rest_rotation → ~(0, 90, 90) PYR), the physics
+                        # SMD's "root" must mirror that bind so studiomdl's
+                        # inv(phys_root)*main_root cancels at runtime instead of
+                        # rotating the collision hull off-axis.
+                        physics_root_bind = (
+                            compute_root_bind_pyr(skin, coord) if is_animated and skin else None
+                        )
                         # Pass smooth normals explicitly to ensure they're written to SMD
                         if self.generate_smd:
-                            success, uv_warning = SmdExporter.write_static(physics_mesh, physics_smd, physics_material, self.flip_v, False, smooth_normals, uv_mode=self.uv_mode)
+                            success, uv_warning = SmdExporter.write_static(
+                                physics_mesh, physics_smd, physics_material,
+                                self.flip_v, False, smooth_normals,
+                                uv_mode=self.uv_mode, root_bind=physics_root_bind,
+                            )
                             if not success:
                                 physics_mesh = None
                                 errors.append(f"{model_set.name}: Failed to write physics SMD")
@@ -1101,7 +1273,11 @@ class BatchRunner(QThread):
                     volume=abs(float(physics_mesh.volume)) if physics_mesh else None,
                     inertia=phys_props['inertia'] if phys_props else None,
                     damping=phys_props['damping'] if phys_props else None,
-                    rotdamping=phys_props['rotdamping'] if phys_props else None
+                    rotdamping=phys_props['rotdamping'] if phys_props else None,
+                    is_animated=is_animated,
+                    skin=skin if is_animated else None,
+                    coord=coord if is_animated else None,
+                    animations=animations if is_animated else None,
                 )
 
             converted += 1
@@ -1216,6 +1392,31 @@ class GltfSmdBatchTool(BaseTool):
         self.generate_qc_check.setChecked(True)
         self.generate_qc_check.toggled.connect(self.update_preview)
         output_layout.addRow("", self.generate_qc_check)
+
+        self.export_animations_check = QCheckBox("Export animations")
+        self.export_animations_check.setChecked(True)
+        self.export_animations_check.setToolTip(
+            "When the glTF has skin + animation data, write a skinned reference "
+            "SMD plus per-clip animation SMDs and emit $definebone / $animation / "
+            "$sequence in the QC. Files without animations stay on the static path."
+        )
+        self.export_animations_check.toggled.connect(self.update_preview)
+        output_layout.addRow("", self.export_animations_check)
+
+        self.animation_fps_spin = QDoubleSpinBox()
+        self.animation_fps_spin.setRange(1.0, 120.0)
+        self.animation_fps_spin.setValue(30.0)
+        self.animation_fps_spin.setDecimals(1)
+        self.animation_fps_spin.setToolTip("Sampling rate for animation SMDs. 30 matches Source's default.")
+        output_layout.addRow("Animation FPS:", self.animation_fps_spin)
+
+        self.auto_loop_check = QCheckBox("Auto-detect looping clips")
+        self.auto_loop_check.setChecked(True)
+        self.auto_loop_check.setToolTip(
+            "Mark $sequences as 'loop' when the clip name contains idle / loop / "
+            "walk / run / breathe / cycle."
+        )
+        output_layout.addRow("", self.auto_loop_check)
 
         output_group.setLayout(output_layout)
         left_layout.addWidget(output_group)
@@ -1348,9 +1549,17 @@ class GltfSmdBatchTool(BaseTool):
         scan_layout = QHBoxLayout()
         self.rescan_btn = QPushButton("Rescan")
         self.rescan_btn.clicked.connect(self.scan_models)
+        self.recursive_scan_check = QCheckBox("Recursive")
+        self.recursive_scan_check.setChecked(True)
+        self.recursive_scan_check.setToolTip(
+            "When on, scan all subfolders of the input. When off, scan only "
+            "the input folder itself."
+        )
+        self.recursive_scan_check.toggled.connect(self.scan_models)
         self.auto_rescan_check = QCheckBox("Auto-rescan")
         self.auto_rescan_check.toggled.connect(self.toggle_auto_rescan)
         scan_layout.addWidget(self.rescan_btn)
+        scan_layout.addWidget(self.recursive_scan_check)
         scan_layout.addWidget(self.auto_rescan_check)
         scan_layout.addStretch()
         left_layout.addLayout(scan_layout)
@@ -1368,9 +1577,9 @@ class GltfSmdBatchTool(BaseTool):
         right_layout.addWidget(preview_label)
 
         self.preview_table = QTableWidget()
-        self.preview_table.setColumnCount(8)
+        self.preview_table.setColumnCount(9)
         self.preview_table.setHorizontalHeaderLabels([
-            "Name", "Physics", "Load", "Modelname", "Mass", "Surfaceprop", "Status", "Warnings"
+            "Name", "Physics", "Anim", "Load", "Modelname", "Mass", "Surfaceprop", "Status", "Warnings"
         ])
         self.preview_table.horizontalHeader().setStretchLastSection(True)
         self.preview_table.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -1451,8 +1660,9 @@ class GltfSmdBatchTool(BaseTool):
             self.log(f"Input folder not found: {input_path}", "ERROR")
             return
 
-        self.log("Scanning...", "INFO")
-        scanner = ModelSetScanner(input_root)
+        recursive = self.recursive_scan_check.isChecked()
+        self.log(f"Scanning ({'recursive' if recursive else 'top-level only'})...", "INFO")
+        scanner = ModelSetScanner(input_root, recursive=recursive)
         self.model_sets = scanner.find_sets()
         self.log(f"Found {len(self.model_sets)} model sets", "SUCCESS")
         self.update_preview()
@@ -1512,6 +1722,16 @@ class GltfSmdBatchTool(BaseTool):
             else:
                 load_status = "Ok"
 
+            # Animation summary (cheap JSON-only peek; no buffer load)
+            if self.export_animations_check.isChecked():
+                skin_count, anim_count = peek_animations(model_set.render_path)
+                if skin_count > 0 and anim_count > 0:
+                    anim_summary = f"{anim_count} clip(s)"
+                else:
+                    anim_summary = "static"
+            else:
+                anim_summary = "static"
+
             # Surfaceprop
             if self.auto_surf_radio.isChecked():
                 surfaceprop = SurfacepropDetector.detect(model_set.name)
@@ -1559,7 +1779,8 @@ class GltfSmdBatchTool(BaseTool):
                 will_skip=will_skip,
                 warnings=model_set.warnings,
                 load_status=load_status,
-                failure_reason=failure_reason
+                failure_reason=failure_reason,
+                anim_summary=anim_summary,
             )
             self.preview_models.append(preview)
 
@@ -1576,7 +1797,13 @@ class GltfSmdBatchTool(BaseTool):
             if pm.physics_smd_path:
                 phys_item.setToolTip(str(pm.physics_smd_path))
             self.preview_table.setItem(row, 1, phys_item)
-            
+
+            # Anim
+            anim_item = QTableWidgetItem(pm.anim_summary)
+            if pm.anim_summary != "static":
+                anim_item.setForeground(QColor("blue"))
+            self.preview_table.setItem(row, 2, anim_item)
+
             # Load status
             load_item = QTableWidgetItem(pm.load_status)
             if pm.load_status == "Failed":
@@ -1584,17 +1811,17 @@ class GltfSmdBatchTool(BaseTool):
                 load_item.setToolTip(pm.failure_reason)
             elif pm.load_status == "Ok":
                 load_item.setForeground(QColor("green"))
-            self.preview_table.setItem(row, 2, load_item)
-            
+            self.preview_table.setItem(row, 3, load_item)
+
             # Modelname
-            self.preview_table.setItem(row, 3, QTableWidgetItem(pm.modelname))
-            
+            self.preview_table.setItem(row, 4, QTableWidgetItem(pm.modelname))
+
             # Mass
-            self.preview_table.setItem(row, 4, QTableWidgetItem(f"{pm.mass:.2f}"))
-            
+            self.preview_table.setItem(row, 5, QTableWidgetItem(f"{pm.mass:.2f}"))
+
             # Surfaceprop
-            self.preview_table.setItem(row, 5, QTableWidgetItem(pm.surfaceprop))
-            
+            self.preview_table.setItem(row, 6, QTableWidgetItem(pm.surfaceprop))
+
             # Status (Overwrite/Skip/New)
             status = "Overwrite" if pm.will_overwrite else ("Skip" if pm.will_skip else "New")
             status_item = QTableWidgetItem(status)
@@ -1602,8 +1829,8 @@ class GltfSmdBatchTool(BaseTool):
                 status_item.setForeground(QColor("orange"))
             elif pm.will_overwrite:
                 status_item.setForeground(QColor("red"))
-            self.preview_table.setItem(row, 6, status_item)
-            
+            self.preview_table.setItem(row, 7, status_item)
+
             # Warnings
             warnings_text = ""
             if pm.failure_reason:
@@ -1613,7 +1840,7 @@ class GltfSmdBatchTool(BaseTool):
             warnings_item = QTableWidgetItem(warnings_text)
             if warnings_text:
                 warnings_item.setForeground(QColor("orange"))
-            self.preview_table.setItem(row, 7, warnings_item)
+            self.preview_table.setItem(row, 8, warnings_item)
 
         self.preview_table.resizeColumnsToContents()
 
@@ -1674,7 +1901,10 @@ class GltfSmdBatchTool(BaseTool):
             dry_run=self.dry_run_check.isChecked(),
             verbose=self.verbose_check.isChecked(),
             axis_conversion=self.axis_conversion_check.isChecked(),
-            uv_mode=uv_mode
+            uv_mode=uv_mode,
+            export_animations=self.export_animations_check.isChecked(),
+            animation_fps=self.animation_fps_spin.value(),
+            auto_loop_detect=self.auto_loop_check.isChecked(),
         )
         self.thread.progress.connect(self.on_progress)
         self.thread.finished.connect(self.on_finished)
@@ -1752,7 +1982,13 @@ class GltfSmdBatchTool(BaseTool):
             'axis_conversion': self.axis_conversion_check.isChecked(),
             'export_physics': self.export_physics_check.isChecked(),
             'preserve_folders': self.preserve_folders_check.isChecked(),
-            'replace_existing': self.replace_existing_check.isChecked()
+            'replace_existing': self.replace_existing_check.isChecked(),
+            # Animation options
+            'export_animations': self.export_animations_check.isChecked(),
+            'animation_fps': self.animation_fps_spin.value(),
+            'auto_loop_detect': self.auto_loop_check.isChecked(),
+            # Scan options
+            'recursive_scan': self.recursive_scan_check.isChecked(),
         }
         
         # Remove duplicates (same input/output combo)
@@ -1844,7 +2080,15 @@ class GltfSmdBatchTool(BaseTool):
                 self.preserve_folders_check.setChecked(run['preserve_folders'])
             if 'replace_existing' in run:
                 self.replace_existing_check.setChecked(run['replace_existing'])
-            
+            if 'export_animations' in run:
+                self.export_animations_check.setChecked(run['export_animations'])
+            if 'animation_fps' in run:
+                self.animation_fps_spin.setValue(run['animation_fps'])
+            if 'auto_loop_detect' in run:
+                self.auto_loop_check.setChecked(run['auto_loop_detect'])
+            if 'recursive_scan' in run:
+                self.recursive_scan_check.setChecked(run['recursive_scan'])
+
             # Trigger rescan
             self.scan_models()
             self.log(f"Loaded recent run: {Path(input_path).name} → {Path(output_path).name}", "INFO")
