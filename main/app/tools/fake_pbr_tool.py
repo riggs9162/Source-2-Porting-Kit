@@ -80,6 +80,16 @@ class ProcessingOptions:
     # Scales the phong mask (bump alpha) and phong exponent map.
     # 0.5 halves the prior unscaled output, which read too hot in-engine.
     phong_strength: float = 0.5
+    # How the phong mask compensates for $phongalbedotint at runtime.
+    # "off"        — original behaviour, no compensation.
+    # "selective"  — colored-metal pixels are boosted via divide-by-luminance,
+    #                dielectric pixels are suppressed (envmap handles their spec).
+    # "blanket"    — divide-by-luminance everywhere.
+    phong_tint_mode: str = "selective"
+    # Per-pixel relief on metal_diffuse_suppression for chromatic metals
+    # (gold/copper/brass) so they retain saturation in the basetexture and
+    # provide a brighter source for $phongalbedotint to multiply.
+    colored_metal_relief: float = 0.5
     # Transparency mode. translucent → $translucent 1; alphatest → $alphatest 1
     # with $alphatestreference. Mutually exclusive (translucent wins if both).
     translucent: bool = False
@@ -215,6 +225,17 @@ class FakePBRProcessor:
             self.log(f"  → Darkening metallic diffuse regions")
             if translucency_data is not None:
                 self.log(f"  → Baking opacity into base texture alpha")
+            # Determine whether the target VMT will emit $phongalbedotint, in
+            # which case we run the matching tint-aware mask compensation.
+            from ..utils.vmt_generator import SOURCE1_TARGET_CAPABILITIES as _S1_CAPS
+            target_caps = _S1_CAPS.get(self.options.target_branch, _S1_CAPS.get("hl2", {}))
+            tint_mode_active = self.options.phong_tint_mode if target_caps.get("phong_albedo_tint", False) else "off"
+            if self.options.phong_tint_mode != "off" and tint_mode_active == "off":
+                self.log(
+                    f"  ℹ Target '{self.options.target_branch}' lacks $phongalbedotint; "
+                    f"phong tint mode forced off."
+                )
+
             base_texture = process_fakepbr_base_texture(
                 color_data,
                 ao_data,
@@ -222,25 +243,30 @@ class FakePBRProcessor:
                 self.options.ao_strength,
                 self.options.metal_diffuse_suppression,
                 translucency=translucency_data,
+                colored_metal_relief=self.options.colored_metal_relief if tint_mode_active != "off" else 0.0,
             )
             self.log(f"  ✓ Base texture processed")
             self._check_cancel()
-            
+
             # Process normal map
             self.log(f"[FakePBR] Packing normal map...")
             self.log(f"  → Preserving RGB normal channels")
-            self.log(f"  → Computing bump alpha Phong mask")
+            self.log(f"  → Computing bump alpha Phong mask (tint mode: {tint_mode_active})")
             normal_texture = pack_normal_with_phong_mask(
                 normal_data,
                 ao_data,
                 metallic_data,
                 roughness_data,
                 self.options.invert_green,
-                phong_strength=self.options.phong_strength
+                phong_strength=self.options.phong_strength,
+                color=color_data if tint_mode_active != "off" else None,
+                tint_mode=tint_mode_active,
+                metal_diffuse_suppression=self.options.metal_diffuse_suppression,
+                colored_metal_relief=self.options.colored_metal_relief if tint_mode_active != "off" else 0.0,
             )
             self.log(f"  ✓ Normal map packed with Phong mask in alpha")
             self._check_cancel()
-            
+
             # Process phong/gloss map
             self.log(f"[FakePBR] Computing phong exponent texture...")
             self.log(f"  → Converting roughness to gloss: (1-r)^{self.options.gloss_gamma:.2f}")
@@ -318,6 +344,7 @@ class FakePBRProcessor:
                     stats=stats,
                     has_envmap_mask=True,
                     custom_params=custom_params or None,
+                    tint_mode_used=tint_mode_active,
                 )
                 self.log(f"  ✓ Generated {material_name}.vmt")
             else:

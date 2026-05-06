@@ -102,7 +102,8 @@ def generate_fakepbr_vmt(
     envmap: str = "env_cubemap",
     stats: Optional[Any] = None,
     has_envmap_mask: bool = True,
-    custom_params: Optional[Dict[str, Any]] = None
+    custom_params: Optional[Dict[str, Any]] = None,
+    tint_mode_used: str = "off"
 ) -> bool:
     """Generate a stock-shader Fake PBR VMT using Phong + envmap fakery."""
     caps = _capabilities_for(target_branch)
@@ -192,6 +193,7 @@ def generate_fakepbr_vmt(
         f"// Material: {material_path}/{material_name}",
         f"// Target: {target_branch}; Shader: {shader}",
         f"// Fake-PBR approximation: metallic={avg_metallic:.3f}; roughness={avg_roughness:.3f}; not energy-conserving",
+        f"// Phong tint mode: {tint_mode_used}",
         f"// Date: {datetime.utcnow().isoformat(timespec='seconds')}Z",
         "",
         f'"{shader}"',
