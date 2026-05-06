@@ -39,7 +39,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QThread, Signal
 
 from .base_tool import BaseTool
-from .fake_pbr_tool import FakePBRProcessor, ProcessingOptions, PBRInputs
+from .fake_pbr_tool import FakePBRProcessor, ProcessingOptions, PBRInputs, _paint_table_row
 from .exo_pbr_tool import ExoPBRProcessor, ExoPBROptions, ExoPBRInputs
 from ..utils.image_processing import load_image, to_uint8
 from ..utils.helpers import get_config_dir
@@ -243,7 +243,9 @@ class Converter:
         material_path: str,
         generate_mipmaps: bool,
         metal_diffuse_suppression: float = 0.7,
-        phong_strength: float = 0.5
+        phong_strength: float = 0.5,
+        phong_tint_mode: str = "selective",
+        colored_metal_relief: float = 0.5,
     ):
         self.mode = mode
         self.include_emissive = include_emissive
@@ -252,6 +254,8 @@ class Converter:
         self.generate_mipmaps = generate_mipmaps
         self.metal_diffuse_suppression = metal_diffuse_suppression
         self.phong_strength = phong_strength
+        self.phong_tint_mode = phong_tint_mode
+        self.colored_metal_relief = colored_metal_relief
 
     @staticmethod
     def _save_channel(channel: np.ndarray, out_path: Path) -> None:
@@ -336,7 +340,9 @@ class Converter:
                 options = ProcessingOptions(
                     generate_mipmaps=self.generate_mipmaps,
                     metal_diffuse_suppression=self.metal_diffuse_suppression,
-                    phong_strength=self.phong_strength
+                    phong_strength=self.phong_strength,
+                    phong_tint_mode=self.phong_tint_mode,
+                    colored_metal_relief=self.colored_metal_relief,
                 )
                 processor = FakePBRProcessor(options)
                 inputs = PBRInputs(
@@ -375,6 +381,7 @@ class Converter:
 class BatchRunner(QThread):
     progress = Signal(int, int, str)
     finished = Signal(bool, str)
+    row_finished = Signal(int, bool)
 
     def __init__(
         self,
@@ -388,7 +395,10 @@ class BatchRunner(QThread):
         material_path: str,
         generate_mipmaps: bool,
         metal_diffuse_suppression: float = 0.7,
-        phong_strength: float = 0.5
+        phong_strength: float = 0.5,
+        phong_tint_mode: str = "selective",
+        colored_metal_relief: float = 0.5,
+        row_indices: Optional[List[int]] = None,
     ):
         super().__init__()
         self.groups = groups
@@ -402,6 +412,11 @@ class BatchRunner(QThread):
         self.generate_mipmaps = generate_mipmaps
         self.metal_diffuse_suppression = metal_diffuse_suppression
         self.phong_strength = phong_strength
+        self.phong_tint_mode = phong_tint_mode
+        self.colored_metal_relief = colored_metal_relief
+        # Parallel list of QTableWidget row indices, one per group, used to
+        # report per-row completion back to the UI. -1 means "no row".
+        self.row_indices = list(row_indices) if row_indices else [-1] * len(groups)
 
     def _output_dir_for(self, group: AssetGroup) -> Path:
         if self.preserve_folders:
@@ -422,7 +437,9 @@ class BatchRunner(QThread):
             self.material_path,
             self.generate_mipmaps,
             self.metal_diffuse_suppression,
-            self.phong_strength
+            self.phong_strength,
+            self.phong_tint_mode,
+            self.colored_metal_relief,
         )
         ok_count = 0
         for idx, group in enumerate(self.groups, start=1):
@@ -437,6 +454,9 @@ class BatchRunner(QThread):
                 self.progress.emit(idx, total, f"✓ {name} done")
             else:
                 self.progress.emit(idx, total, f"✗ {name}: {msg}")
+            row = self.row_indices[idx - 1] if idx - 1 < len(self.row_indices) else -1
+            if row >= 0:
+                self.row_finished.emit(row, success)
         self.finished.emit(True, f"Processed {ok_count}/{total} assets")
 
 
@@ -563,6 +583,38 @@ class TexturePBRBatchTool(BaseTool):
         phong_row.setContentsMargins(0, 0, 0, 0)
         opt_form.addRow("Phong Strength:", phong_widget)
 
+        self.phong_tint_mode_combo = QComboBox()
+        self.phong_tint_mode_combo.addItem("Off", "off")
+        self.phong_tint_mode_combo.addItem("Selective (recommended)", "selective")
+        self.phong_tint_mode_combo.addItem("Blanket", "blanket")
+        self.phong_tint_mode_combo.setCurrentIndex(1)
+        self.phong_tint_mode_combo.setToolTip(
+            "Fake PBR only. Compensates the phong mask for $phongalbedotint runtime tinting. "
+            "Selective: colored metals are boosted, dielectric phong is suppressed (envmap handles spec). "
+            "Blanket: divide-by-luminance compensation everywhere. "
+            "No effect on targets without $phongalbedotint."
+        )
+        opt_form.addRow("Phong Tint Mode:", self.phong_tint_mode_combo)
+
+        relief_row = QHBoxLayout()
+        self.colored_metal_relief_slider = QSlider(Qt.Horizontal)
+        self.colored_metal_relief_slider.setRange(0, 100)
+        self.colored_metal_relief_slider.setValue(50)
+        self.colored_metal_relief_slider.setToolTip(
+            "Fake PBR only. Per-pixel relief on Metal Diffuse Suppression for chromatic metals. "
+            "Only applied when Phong Tint Mode is not Off."
+        )
+        self.colored_metal_relief_value = QLabel("0.50")
+        self.colored_metal_relief_slider.valueChanged.connect(
+            lambda v: self.colored_metal_relief_value.setText(f"{v/100:.2f}")
+        )
+        relief_row.addWidget(self.colored_metal_relief_slider)
+        relief_row.addWidget(self.colored_metal_relief_value)
+        relief_widget = QWidget()
+        relief_widget.setLayout(relief_row)
+        relief_row.setContentsMargins(0, 0, 0, 0)
+        opt_form.addRow("Colored Metal Relief:", relief_widget)
+
         self.material_path = QLineEdit()
         self.material_path.setText("models/ports")
         self.material_path.setPlaceholderText("models/ports (Fake) or exopbr (Exo)")
@@ -570,6 +622,34 @@ class TexturePBRBatchTool(BaseTool):
 
         opt_group.setLayout(opt_form)
         layout.addWidget(opt_group)
+
+        # Requirements: which texture roles must be present for an asset to
+        # be processed. Color/Normal default on (matching today's hardcoded
+        # validation); ORM/Emissive default off so existing scans behave as
+        # before. Toggling re-applies live to the table — rows missing a
+        # required role get auto-unchecked.
+        req_group = QGroupBox("Requirements")
+        req_layout = QHBoxLayout()
+        req_layout.setContentsMargins(8, 6, 8, 6)
+        self.req_checkboxes: Dict[str, QCheckBox] = {}
+        for label, key, default in (
+            ("Color", "color", True),
+            ("Normal", "normal", True),
+            ("ORM", "orm", False),
+            ("Emissive", "emissive", False),
+        ):
+            cb = QCheckBox(label)
+            cb.setChecked(default)
+            cb.setToolTip(
+                f"Require a {label.lower()} map for an asset to be processed. "
+                f"Rows missing this role will be auto-unchecked in the table."
+            )
+            cb.stateChanged.connect(self._apply_requirements_filter)
+            req_layout.addWidget(cb)
+            self.req_checkboxes[key] = cb
+        req_layout.addStretch()
+        req_group.setLayout(req_layout)
+        layout.addWidget(req_group)
 
         # Results table
         self.results_table = QTableWidget(0, 8)
@@ -651,7 +731,10 @@ class TexturePBRBatchTool(BaseTool):
             "generate_mipmaps": self.generate_mipmaps.isChecked(),
             "metal_diffuse_suppression": self.metal_suppression_slider.value() / 100.0,
             "phong_strength": self.phong_strength_slider.value() / 100.0,
+            "phong_tint_mode": self.phong_tint_mode_combo.currentData() or "selective",
+            "colored_metal_relief": self.colored_metal_relief_slider.value() / 100.0,
             "material_path": self.material_path.text().strip(),
+            "requirements": {key: cb.isChecked() for key, cb in self.req_checkboxes.items()},
         }
 
     def _save_current_run_to_history(self):
@@ -663,7 +746,8 @@ class TexturePBRBatchTool(BaseTool):
             keys = [
                 "input_root", "output_root", "mode", "recursive", "preserve_structure",
                 "overwrite", "include_emissive", "generate_mipmaps",
-                "metal_diffuse_suppression", "phong_strength", "material_path"
+                "metal_diffuse_suppression", "phong_strength", "phong_tint_mode",
+                "colored_metal_relief", "material_path", "requirements"
             ]
             return all(a.get(k) == b.get(k) for k in keys)
 
@@ -704,7 +788,20 @@ class TexturePBRBatchTool(BaseTool):
         except (TypeError, ValueError):
             phong_val = 0.5
         self.phong_strength_slider.setValue(int(phong_val * 100))
+        try:
+            relief_val = float(entry.get("colored_metal_relief", 0.5))
+        except (TypeError, ValueError):
+            relief_val = 0.5
+        self.colored_metal_relief_slider.setValue(int(relief_val * 100))
+        tint_mode_val = str(entry.get("phong_tint_mode", "selective"))
+        tint_idx = self.phong_tint_mode_combo.findData(tint_mode_val)
+        if tint_idx >= 0:
+            self.phong_tint_mode_combo.setCurrentIndex(tint_idx)
         self.material_path.setText(entry.get("material_path") or "models/ports")
+        reqs = entry.get("requirements") or {}
+        for key, cb in self.req_checkboxes.items():
+            if key in reqs:
+                cb.setChecked(bool(reqs[key]))
 
     def _row(self, line_edit: QLineEdit, button: QPushButton) -> QWidget:
         w = QWidget()
@@ -744,7 +841,11 @@ class TexturePBRBatchTool(BaseTool):
         self._populate_table(resolved_groups)
         self.scanned_groups = resolved_groups
         self.convert_btn.setEnabled(len(resolved_groups) > 0)
-        self.log(f"Scan complete: {len(resolved_groups)} assets detected", "INFO")
+        excluded = self._apply_requirements_filter()
+        msg = f"Scan complete: {len(resolved_groups)} assets detected"
+        if excluded:
+            msg += f" ({excluded} excluded by requirements)"
+        self.log(msg, "INFO")
 
     def _populate_table(self, groups: List[AssetGroup]):
         self.results_table.setRowCount(0)
@@ -792,12 +893,13 @@ class TexturePBRBatchTool(BaseTool):
             warn_item = QTableWidgetItem(warn_text)
             self.results_table.setItem(row, 7, warn_item)
 
-    def _selected_groups(self) -> List[AssetGroup]:
+    def _selected_groups(self) -> Tuple[List[AssetGroup], List[int]]:
         sorted_groups = sorted(
             self.scanned_groups,
             key=lambda g: (str(g.base_dir), g.pretty_name)
         )
-        selected = []
+        selected: List[AssetGroup] = []
+        rows: List[int] = []
         for row in range(self.results_table.rowCount()):
             if self.results_table.item(row, 0).checkState() != Qt.Checked:
                 continue
@@ -809,7 +911,8 @@ class TexturePBRBatchTool(BaseTool):
             else:
                 group.force_metal_mode = "off"
             selected.append(group)
-        return selected
+            rows.append(row)
+        return selected, rows
 
     def convert(self):
         root = self.input_root.text().strip()
@@ -818,7 +921,7 @@ class TexturePBRBatchTool(BaseTool):
             self.log("Input/Output roots are required", "ERROR")
             return
 
-        groups = self._selected_groups()
+        groups, row_indices = self._selected_groups()
         if not groups:
             self.log("No assets selected", "WARNING")
             return
@@ -846,11 +949,61 @@ class TexturePBRBatchTool(BaseTool):
             material_path=material_path,
             generate_mipmaps=self.generate_mipmaps.isChecked(),
             metal_diffuse_suppression=self.metal_suppression_slider.value() / 100.0,
-            phong_strength=self.phong_strength_slider.value() / 100.0
+            phong_strength=self.phong_strength_slider.value() / 100.0,
+            phong_tint_mode=self.phong_tint_mode_combo.currentData() or "selective",
+            colored_metal_relief=self.colored_metal_relief_slider.value() / 100.0,
+            row_indices=row_indices,
         )
         self.thread.progress.connect(self.on_progress)
+        self.thread.row_finished.connect(self._on_row_finished)
         self.thread.finished.connect(self.on_finished)
         self.thread.start()
+
+    def _on_row_finished(self, row: int, success: bool):
+        """Tint the corresponding results_table row green/red as each task completes."""
+        _paint_table_row(self.results_table, row, success)
+
+    def _required_roles(self) -> List[str]:
+        """Texture roles currently required for an asset to be eligible."""
+        if not hasattr(self, "req_checkboxes"):
+            return []
+        return [key for key, cb in self.req_checkboxes.items() if cb.isChecked()]
+
+    def _apply_requirements_filter(self) -> int:
+        """Auto-uncheck rows whose underlying group is missing any required role.
+
+        Returns the count of rows that ended up unchecked because they failed
+        the current requirement set. Re-checking a row manually is still
+        allowed; the filter only fires on requirement-toggle and post-scan.
+        """
+        if not hasattr(self, "results_table") or not self.scanned_groups:
+            return 0
+        required = self._required_roles()
+        if not required:
+            for row in range(self.results_table.rowCount()):
+                include_item = self.results_table.item(row, 0)
+                if include_item is not None:
+                    include_item.setToolTip("")
+            return 0
+        sorted_groups = sorted(
+            self.scanned_groups,
+            key=lambda g: (str(g.base_dir), g.pretty_name)
+        )
+        excluded = 0
+        for row in range(self.results_table.rowCount()):
+            include_item = self.results_table.item(row, 0)
+            if include_item is None or row >= len(sorted_groups):
+                continue
+            group = sorted_groups[row]
+            missing = [r for r in required if group.resolved.get(r) is None]
+            if missing:
+                if include_item.checkState() == Qt.Checked:
+                    include_item.setCheckState(Qt.Unchecked)
+                include_item.setToolTip("Missing required: " + ", ".join(missing))
+                excluded += 1
+            else:
+                include_item.setToolTip("")
+        return excluded
 
     def on_progress(self, idx: int, total: int, message: str):
         self.progress.setMaximum(total)
