@@ -32,7 +32,7 @@ from PIL import Image
 
 from PySide6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFileDialog,
-    QLineEdit, QGroupBox, QDoubleSpinBox, QCheckBox,
+    QLineEdit, QGroupBox, QDoubleSpinBox, QCheckBox, QSlider,
     QProgressBar, QFormLayout, QWidget, QComboBox, QTableWidget,
     QTableWidgetItem, QHeaderView, QAbstractItemView
 )
@@ -70,6 +70,7 @@ class AssetGroup:
     files: List[TextureFile] = field(default_factory=list)
     resolved: Dict[str, Optional[TextureFile]] = field(default_factory=dict)
     warnings: List[str] = field(default_factory=list)
+    force_metal_mode: str = "off"
 
 
 class TextureScanner:
@@ -86,8 +87,9 @@ class TextureScanner:
 
     EXTRA_TOKENS = {"psd", "tga", "png", "jpg", "jpeg", "tif", "tiff"}
 
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, recursive: bool = True):
         self.root = Path(root)
+        self.recursive = recursive
 
     @staticmethod
     def _tokenize(stem: str) -> Tuple[List[str], List[str]]:
@@ -108,9 +110,18 @@ class TextureScanner:
             return stem.lower(), stem
         return "_".join(filtered), "_".join(filtered_original)
 
+    def _iter_dirs(self):
+        if self.recursive:
+            yield from os.walk(self.root)
+            return
+        if not self.root.is_dir():
+            return
+        files = [p.name for p in self.root.iterdir() if p.is_file()]
+        yield str(self.root), [], files
+
     def scan(self) -> Dict[Tuple[Path, str], AssetGroup]:
         groups: Dict[Tuple[Path, str], AssetGroup] = {}
-        for base, _, files in os.walk(self.root):
+        for base, _, files in self._iter_dirs():
             base_path = Path(base)
             for fn in files:
                 ext = Path(fn).suffix.lower()
@@ -230,19 +241,36 @@ class Converter:
         include_emissive: bool,
         overwrite: bool,
         material_path: str,
-        generate_mipmaps: bool
+        generate_mipmaps: bool,
+        metal_diffuse_suppression: float = 0.7,
+        phong_strength: float = 0.5
     ):
         self.mode = mode
         self.include_emissive = include_emissive
         self.overwrite = overwrite
         self.material_path = material_path
         self.generate_mipmaps = generate_mipmaps
+        self.metal_diffuse_suppression = metal_diffuse_suppression
+        self.phong_strength = phong_strength
 
     @staticmethod
     def _save_channel(channel: np.ndarray, out_path: Path) -> None:
         img = Image.fromarray((channel * 255.0).astype(np.uint8), mode="L")
         out_path.parent.mkdir(parents=True, exist_ok=True)
         img.save(out_path)
+
+    @staticmethod
+    def _build_force_metal_channel(color_path: Path, mode: str) -> np.ndarray:
+        with Image.open(color_path) as color_img:
+            w, h = color_img.size
+            if mode == "full":
+                return np.ones((h, w), dtype=np.float32)
+            channel_index = {"albedo_r": 0, "albedo_g": 1, "albedo_b": 2}.get(mode)
+            if channel_index is None:
+                return np.ones((h, w), dtype=np.float32)
+            rgb = color_img.convert("RGB")
+            arr = np.asarray(rgb, dtype=np.float32) / 255.0
+        return np.clip(arr[:, :, channel_index], 0.0, 1.0)
 
     def _split_orm(self, orm_path: Path, temp_dir: Path) -> Tuple[Optional[Path], Optional[Path], Optional[Path]]:
         data = load_image(str(orm_path))
@@ -298,9 +326,18 @@ class Converter:
         ao_path = rough_path = metal_path = None
         if orm is not None:
             ao_path, rough_path, metal_path = self._split_orm(orm.path, temp_dir)
+        if group.force_metal_mode != "off":
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            metal_path = temp_dir / f"{name}_force_metal.png"
+            channel = self._build_force_metal_channel(color.path, group.force_metal_mode)
+            self._save_channel(channel, metal_path)
         try:
             if self.mode == "Fake PBR":
-                options = ProcessingOptions(generate_mipmaps=self.generate_mipmaps)
+                options = ProcessingOptions(
+                    generate_mipmaps=self.generate_mipmaps,
+                    metal_diffuse_suppression=self.metal_diffuse_suppression,
+                    phong_strength=self.phong_strength
+                )
                 processor = FakePBRProcessor(options)
                 inputs = PBRInputs(
                     color=str(color.path),
@@ -349,7 +386,9 @@ class BatchRunner(QThread):
         include_emissive: bool,
         overwrite: bool,
         material_path: str,
-        generate_mipmaps: bool
+        generate_mipmaps: bool,
+        metal_diffuse_suppression: float = 0.7,
+        phong_strength: float = 0.5
     ):
         super().__init__()
         self.groups = groups
@@ -361,6 +400,8 @@ class BatchRunner(QThread):
         self.overwrite = overwrite
         self.material_path = material_path
         self.generate_mipmaps = generate_mipmaps
+        self.metal_diffuse_suppression = metal_diffuse_suppression
+        self.phong_strength = phong_strength
 
     def _output_dir_for(self, group: AssetGroup) -> Path:
         if self.preserve_folders:
@@ -379,7 +420,9 @@ class BatchRunner(QThread):
             self.include_emissive,
             self.overwrite,
             self.material_path,
-            self.generate_mipmaps
+            self.generate_mipmaps,
+            self.metal_diffuse_suppression,
+            self.phong_strength
         )
         ok_count = 0
         for idx, group in enumerate(self.groups, start=1):
@@ -399,6 +442,14 @@ class BatchRunner(QThread):
 
 class TexturePBRBatchTool(BaseTool):
     """GUI tool for batch converting texture folders into Fake/Exo PBR outputs."""
+
+    METAL_OVERRIDE_OPTIONS = [
+        ("Off", "off"),
+        ("Fully Metal", "full"),
+        ("Albedo Red", "albedo_r"),
+        ("Albedo Green", "albedo_g"),
+        ("Albedo Blue", "albedo_b"),
+    ]
 
     def __init__(self):
         super().__init__("Texture PBR Batch")
@@ -453,6 +504,11 @@ class TexturePBRBatchTool(BaseTool):
         self.mode_combo.addItems(["Fake PBR", "Exo PBR"])
         opt_form.addRow("Mode:", self.mode_combo)
 
+        self.recursive_scan = QCheckBox("Scan recursively")
+        self.recursive_scan.setChecked(True)
+        self.recursive_scan.setToolTip("Include subfolders when scanning the input root.")
+        opt_form.addRow("", self.recursive_scan)
+
         self.preserve_structure = QCheckBox("Preserve folder structure")
         self.preserve_structure.setChecked(True)
         opt_form.addRow("", self.preserve_structure)
@@ -469,6 +525,44 @@ class TexturePBRBatchTool(BaseTool):
         self.generate_mipmaps.setChecked(True)
         opt_form.addRow("", self.generate_mipmaps)
 
+        metal_supp_row = QHBoxLayout()
+        self.metal_suppression_slider = QSlider(Qt.Horizontal)
+        self.metal_suppression_slider.setRange(0, 100)
+        self.metal_suppression_slider.setValue(70)
+        self.metal_suppression_slider.setToolTip(
+            "Fake PBR only. How much to darken albedo on metal pixels. "
+            "0.00 = no darkening, 1.00 = fully darkened (metal becomes black diffuse)."
+        )
+        self.metal_suppression_value = QLabel("0.70")
+        self.metal_suppression_slider.valueChanged.connect(
+            lambda v: self.metal_suppression_value.setText(f"{v/100:.2f}")
+        )
+        metal_supp_row.addWidget(self.metal_suppression_slider)
+        metal_supp_row.addWidget(self.metal_suppression_value)
+        metal_supp_widget = QWidget()
+        metal_supp_widget.setLayout(metal_supp_row)
+        metal_supp_row.setContentsMargins(0, 0, 0, 0)
+        opt_form.addRow("Metal Diffuse Suppression:", metal_supp_widget)
+
+        phong_row = QHBoxLayout()
+        self.phong_strength_slider = QSlider(Qt.Horizontal)
+        self.phong_strength_slider.setRange(0, 200)
+        self.phong_strength_slider.setValue(50)
+        self.phong_strength_slider.setToolTip(
+            "Fake PBR only. Scales the phong mask and phong exponent map. "
+            "0.00 = no phong, 0.50 = halved (default), 1.00 = original strength."
+        )
+        self.phong_strength_value = QLabel("0.50")
+        self.phong_strength_slider.valueChanged.connect(
+            lambda v: self.phong_strength_value.setText(f"{v/100:.2f}")
+        )
+        phong_row.addWidget(self.phong_strength_slider)
+        phong_row.addWidget(self.phong_strength_value)
+        phong_widget = QWidget()
+        phong_widget.setLayout(phong_row)
+        phong_row.setContentsMargins(0, 0, 0, 0)
+        opt_form.addRow("Phong Strength:", phong_widget)
+
         self.material_path = QLineEdit()
         self.material_path.setText("models/ports")
         self.material_path.setPlaceholderText("models/ports (Fake) or exopbr (Exo)")
@@ -478,9 +572,9 @@ class TexturePBRBatchTool(BaseTool):
         layout.addWidget(opt_group)
 
         # Results table
-        self.results_table = QTableWidget(0, 7)
+        self.results_table = QTableWidget(0, 8)
         self.results_table.setHorizontalHeaderLabels([
-            "Include", "Asset", "Color", "Normal", "ORM", "Emissive", "Warnings"
+            "Include", "Asset", "Color", "Normal", "ORM", "Emissive", "Metal Override", "Warnings"
         ])
         header = self.results_table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.Stretch)
@@ -550,10 +644,13 @@ class TexturePBRBatchTool(BaseTool):
             "input_root": input_root,
             "output_root": output_root,
             "mode": self.mode_combo.currentText(),
+            "recursive": self.recursive_scan.isChecked(),
             "preserve_structure": self.preserve_structure.isChecked(),
             "overwrite": self.overwrite.isChecked(),
             "include_emissive": self.include_emissive.isChecked(),
             "generate_mipmaps": self.generate_mipmaps.isChecked(),
+            "metal_diffuse_suppression": self.metal_suppression_slider.value() / 100.0,
+            "phong_strength": self.phong_strength_slider.value() / 100.0,
             "material_path": self.material_path.text().strip(),
         }
 
@@ -564,8 +661,9 @@ class TexturePBRBatchTool(BaseTool):
 
         def _same(a: dict, b: dict) -> bool:
             keys = [
-                "input_root", "output_root", "mode", "preserve_structure",
-                "overwrite", "include_emissive", "generate_mipmaps", "material_path"
+                "input_root", "output_root", "mode", "recursive", "preserve_structure",
+                "overwrite", "include_emissive", "generate_mipmaps",
+                "metal_diffuse_suppression", "phong_strength", "material_path"
             ]
             return all(a.get(k) == b.get(k) for k in keys)
 
@@ -591,10 +689,21 @@ class TexturePBRBatchTool(BaseTool):
         mode_index = self.mode_combo.findText(mode)
         if mode_index >= 0:
             self.mode_combo.setCurrentIndex(mode_index)
+        self.recursive_scan.setChecked(bool(entry.get("recursive", True)))
         self.preserve_structure.setChecked(bool(entry.get("preserve_structure", True)))
         self.overwrite.setChecked(bool(entry.get("overwrite", False)))
         self.include_emissive.setChecked(bool(entry.get("include_emissive", True)))
         self.generate_mipmaps.setChecked(bool(entry.get("generate_mipmaps", True)))
+        try:
+            metal_supp_val = float(entry.get("metal_diffuse_suppression", 0.7))
+        except (TypeError, ValueError):
+            metal_supp_val = 0.7
+        self.metal_suppression_slider.setValue(int(metal_supp_val * 100))
+        try:
+            phong_val = float(entry.get("phong_strength", 0.5))
+        except (TypeError, ValueError):
+            phong_val = 0.5
+        self.phong_strength_slider.setValue(int(phong_val * 100))
         self.material_path.setText(entry.get("material_path") or "models/ports")
 
     def _row(self, line_edit: QLineEdit, button: QPushButton) -> QWidget:
@@ -623,7 +732,7 @@ class TexturePBRBatchTool(BaseTool):
         self.clear_log()
         self.log("Scanning for textures...", "INFO")
 
-        scanner = TextureScanner(Path(root))
+        scanner = TextureScanner(Path(root), recursive=self.recursive_scan.isChecked())
         groups = scanner.scan()
 
         resolver = RoleResolver()
@@ -664,16 +773,42 @@ class TexturePBRBatchTool(BaseTool):
             _set_cell(4, "orm")
             _set_cell(5, "emissive")
 
+            force_combo = QComboBox()
+            for label, value in self.METAL_OVERRIDE_OPTIONS:
+                force_combo.addItem(label, value)
+            current_idx = next(
+                (i for i, (_, v) in enumerate(self.METAL_OVERRIDE_OPTIONS)
+                 if v == group.force_metal_mode),
+                0
+            )
+            force_combo.setCurrentIndex(current_idx)
+            force_combo.setToolTip(
+                "Override the metalness mask. Use when the material has no metal map "
+                "but is fully metal, or when a single albedo channel encodes metalness."
+            )
+            self.results_table.setCellWidget(row, 6, force_combo)
+
             warn_text = "; ".join(group.warnings)
             warn_item = QTableWidgetItem(warn_text)
-            self.results_table.setItem(row, 6, warn_item)
+            self.results_table.setItem(row, 7, warn_item)
 
     def _selected_groups(self) -> List[AssetGroup]:
+        sorted_groups = sorted(
+            self.scanned_groups,
+            key=lambda g: (str(g.base_dir), g.pretty_name)
+        )
         selected = []
         for row in range(self.results_table.rowCount()):
             if self.results_table.item(row, 0).checkState() != Qt.Checked:
                 continue
-            selected.append(self.scanned_groups[row])
+            group = sorted_groups[row]
+            force_widget = self.results_table.cellWidget(row, 6)
+            if isinstance(force_widget, QComboBox):
+                mode = force_widget.currentData()
+                group.force_metal_mode = mode if isinstance(mode, str) else "off"
+            else:
+                group.force_metal_mode = "off"
+            selected.append(group)
         return selected
 
     def convert(self):
@@ -709,7 +844,9 @@ class TexturePBRBatchTool(BaseTool):
             include_emissive=self.include_emissive.isChecked(),
             overwrite=self.overwrite.isChecked(),
             material_path=material_path,
-            generate_mipmaps=self.generate_mipmaps.isChecked()
+            generate_mipmaps=self.generate_mipmaps.isChecked(),
+            metal_diffuse_suppression=self.metal_suppression_slider.value() / 100.0,
+            phong_strength=self.phong_strength_slider.value() / 100.0
         )
         self.thread.progress.connect(self.on_progress)
         self.thread.finished.connect(self.on_finished)
