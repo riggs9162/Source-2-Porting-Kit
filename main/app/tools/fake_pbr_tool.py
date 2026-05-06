@@ -661,6 +661,41 @@ class FakePBRTool(BaseTool):
         phong_layout.addWidget(self.phong_strength_value)
         options_layout.addRow("Phong Strength:", phong_layout)
 
+        # Phong Tint Mode
+        self.phong_tint_mode_combo = QComboBox()
+        self.phong_tint_mode_combo.addItem("Off", "off")
+        self.phong_tint_mode_combo.addItem("Selective (recommended)", "selective")
+        self.phong_tint_mode_combo.addItem("Blanket", "blanket")
+        self.phong_tint_mode_combo.setCurrentIndex(1)
+        self.phong_tint_mode_combo.setToolTip(
+            "Compensates the phong mask for $phongalbedotint runtime tinting. "
+            "Off: original behaviour. Selective: only colored metals are boosted, "
+            "dielectric phong is suppressed (envmap handles their spec). "
+            "Blanket: divide-by-luminance compensation everywhere. "
+            "Has no effect on targets that don't support $phongalbedotint (hl2, source2013_sp)."
+        )
+        options_layout.addRow("Phong Tint Mode:", self.phong_tint_mode_combo)
+
+        # Colored Metal Relief
+        relief_layout = QHBoxLayout()
+        self.colored_metal_relief_slider = QSlider(Qt.Horizontal)
+        self.colored_metal_relief_slider.setRange(0, 100)
+        self.colored_metal_relief_slider.setValue(50)
+        self.colored_metal_relief_slider.setToolTip(
+            "Per-pixel relief on Metal Diffuse Suppression for chromatic metals. "
+            "0.00 = uniform suppression (current behaviour). "
+            "1.00 = fully-saturated metals receive no diffuse darkening, so colors "
+            "like gold/copper/brass stay bright for $phongalbedotint to multiply. "
+            "Only applied when Phong Tint Mode is not Off."
+        )
+        self.colored_metal_relief_value = QLabel("0.50")
+        self.colored_metal_relief_slider.valueChanged.connect(
+            lambda v: self.colored_metal_relief_value.setText(f"{v/100:.2f}")
+        )
+        relief_layout.addWidget(self.colored_metal_relief_slider)
+        relief_layout.addWidget(self.colored_metal_relief_value)
+        options_layout.addRow("Colored Metal Relief:", relief_layout)
+
         # Generate VTF checkbox
         self.generate_vtf_checkbox = QCheckBox("Generate VTF")
         self.generate_vtf_checkbox.setChecked(True)
@@ -851,6 +886,35 @@ class FakePBRTool(BaseTool):
         auto_phong_row.addWidget(self.auto_phong_strength_value)
         auto_opt_form.addRow("Phong Strength:", self._row_widget(auto_phong_row))
 
+        # Phong Tint Mode (auto)
+        self.auto_phong_tint_mode_combo = QComboBox()
+        self.auto_phong_tint_mode_combo.addItem("Off", "off")
+        self.auto_phong_tint_mode_combo.addItem("Selective (recommended)", "selective")
+        self.auto_phong_tint_mode_combo.addItem("Blanket", "blanket")
+        self.auto_phong_tint_mode_combo.setCurrentIndex(1)
+        self.auto_phong_tint_mode_combo.setToolTip(
+            "Compensates the phong mask for $phongalbedotint runtime tinting. "
+            "Selective is recommended for mixed metal/dielectric materials."
+        )
+        auto_opt_form.addRow("Phong Tint Mode:", self.auto_phong_tint_mode_combo)
+
+        # Colored Metal Relief (auto)
+        auto_relief_row = QHBoxLayout()
+        self.auto_colored_metal_relief_slider = QSlider(Qt.Horizontal)
+        self.auto_colored_metal_relief_slider.setRange(0, 100)
+        self.auto_colored_metal_relief_slider.setValue(50)
+        self.auto_colored_metal_relief_slider.setToolTip(
+            "Per-pixel relief on Metal Diffuse Suppression for chromatic metals. "
+            "Only applied when Phong Tint Mode is not Off."
+        )
+        self.auto_colored_metal_relief_value = QLabel("0.50")
+        self.auto_colored_metal_relief_slider.valueChanged.connect(
+            lambda v: self.auto_colored_metal_relief_value.setText(f"{v/100:.2f}")
+        )
+        auto_relief_row.addWidget(self.auto_colored_metal_relief_slider)
+        auto_relief_row.addWidget(self.auto_colored_metal_relief_value)
+        auto_opt_form.addRow("Colored Metal Relief:", self._row_widget(auto_relief_row))
+
         # Generate VTF
         self.auto_generate_vtf = QCheckBox("Generate VTF")
         self.auto_generate_vtf.setChecked(True)
@@ -884,6 +948,35 @@ class FakePBRTool(BaseTool):
 
         auto_options.setLayout(auto_opt_form)
         automate_layout.addWidget(auto_options)
+
+        # Requirements: which texture types must be present for a row to be
+        # processed. Color/Normal default on (matching today's hardcoded
+        # validation); AO/Roughness/Metallic default off so existing scans
+        # behave as before. Toggling any checkbox re-applies live to the
+        # results table — rows missing a required type get auto-unchecked.
+        req_group = QGroupBox("Requirements")
+        req_layout = QHBoxLayout()
+        req_layout.setContentsMargins(8, 6, 8, 6)
+        self.req_checkboxes: Dict[str, QCheckBox] = {}
+        for label, key, default in (
+            ("Color", "color", True),
+            ("Normal", "normal", True),
+            ("AO", "ao", False),
+            ("Roughness", "roughness", False),
+            ("Metallic", "metallic", False),
+        ):
+            cb = QCheckBox(label)
+            cb.setChecked(default)
+            cb.setToolTip(
+                f"Require a {label.lower()} map for a material to be processed. "
+                f"Rows missing this map will be auto-unchecked in the table."
+            )
+            cb.stateChanged.connect(self._apply_requirements_filter)
+            req_layout.addWidget(cb)
+            self.req_checkboxes[key] = cb
+        req_layout.addStretch()
+        req_group.setLayout(req_layout)
+        automate_layout.addWidget(req_group)
 
         # Results table
         self.scan_table = QTableWidget(0, 7)
@@ -1063,12 +1156,22 @@ class FakePBRTool(BaseTool):
             ao_val = float(opts.get('ao_strength', 0.5))
             gamma_val = float(opts.get('gloss_gamma', 2.2))
             metal_supp_val = float(opts.get('metal_diffuse_suppression', 0.7))
+            relief_val = float(opts.get('colored_metal_relief', 0.5))
             self.auto_ao_slider.setValue(int(ao_val * 100))
             self.auto_gamma_slider.setValue(int(gamma_val * 10))
             self.auto_metal_suppression_slider.setValue(int(metal_supp_val * 100))
+            self.auto_colored_metal_relief_slider.setValue(int(relief_val * 100))
+            tint_mode_val = str(opts.get('phong_tint_mode', 'selective'))
+            tint_idx = self.auto_phong_tint_mode_combo.findData(tint_mode_val)
+            if tint_idx >= 0:
+                self.auto_phong_tint_mode_combo.setCurrentIndex(tint_idx)
             self.auto_generate_vtf.setChecked(bool(opts.get('generate_vtf', True)))
             self.auto_generate_vmt.setChecked(bool(opts.get('generate_vmt', True)))
             self.auto_generate_mipmaps.setChecked(bool(opts.get('generate_mipmaps', True)))
+            reqs = opts.get('requirements') or {}
+            for key, cb in self.req_checkboxes.items():
+                if key in reqs:
+                    cb.setChecked(bool(reqs[key]))
         except Exception:
             pass
 
@@ -1102,9 +1205,15 @@ class FakePBRTool(BaseTool):
             ao_val = float(options.get('ao_strength', 0.5))
             gamma_val = float(options.get('gloss_gamma', 2.2))
             metal_supp_val = float(options.get('metal_diffuse_suppression', 0.7))
+            relief_val = float(options.get('colored_metal_relief', 0.5))
             self.ao_strength_slider.setValue(int(ao_val * 100))
             self.gloss_gamma_slider.setValue(int(gamma_val * 10))
             self.metal_suppression_slider.setValue(int(metal_supp_val * 100))
+            self.colored_metal_relief_slider.setValue(int(relief_val * 100))
+            tint_mode_val = str(options.get('phong_tint_mode', 'selective'))
+            tint_idx = self.phong_tint_mode_combo.findData(tint_mode_val)
+            if tint_idx >= 0:
+                self.phong_tint_mode_combo.setCurrentIndex(tint_idx)
             self.generate_vtf_checkbox.setChecked(bool(options.get('generate_vtf', True)))
             self.generate_mipmaps_checkbox.setChecked(bool(options.get('generate_mipmaps', True)))
             self.generate_vmt_checkbox.setChecked(bool(options.get('generate_vmt', True)))
@@ -1139,6 +1248,8 @@ class FakePBRTool(BaseTool):
                 'ao_strength': options.ao_strength,
                 'gloss_gamma': options.gloss_gamma,
                 'metal_diffuse_suppression': options.metal_diffuse_suppression,
+                'phong_tint_mode': options.phong_tint_mode,
+                'colored_metal_relief': options.colored_metal_relief,
                 'generate_vtf': options.generate_vtf,
                 'generate_vmt': options.generate_vmt,
                 'generate_mipmaps': options.generate_mipmaps
@@ -1178,9 +1289,12 @@ class FakePBRTool(BaseTool):
             'ao_strength': self.auto_ao_slider.value() / 100.0,
             'gloss_gamma': self.auto_gamma_slider.value() / 10.0,
             'metal_diffuse_suppression': self.auto_metal_suppression_slider.value() / 100.0,
+            'phong_tint_mode': self.auto_phong_tint_mode_combo.currentData() or 'selective',
+            'colored_metal_relief': self.auto_colored_metal_relief_slider.value() / 100.0,
             'generate_vtf': self.auto_generate_vtf.isChecked(),
             'generate_vmt': self.auto_generate_vmt.isChecked(),
             'generate_mipmaps': self.auto_generate_mipmaps.isChecked(),
+            'requirements': {key: cb.isChecked() for key, cb in self.req_checkboxes.items()},
         }
         label = self.auto_input_folder.text() or self.auto_output_folder.text() or ''
         return {
@@ -1246,6 +1360,8 @@ class FakePBRTool(BaseTool):
             gloss_gamma=self.gloss_gamma_slider.value() / 10.0,
             metal_diffuse_suppression=self.metal_suppression_slider.value() / 100.0,
             phong_strength=self.phong_strength_slider.value() / 100.0,
+            phong_tint_mode=self.phong_tint_mode_combo.currentData() or "selective",
+            colored_metal_relief=self.colored_metal_relief_slider.value() / 100.0,
             generate_vtf=self.generate_vtf_checkbox.isChecked(),
             generate_vmt=self.generate_vmt_checkbox.isChecked(),
             generate_mipmaps=self.generate_mipmaps_checkbox.isChecked()
@@ -1469,8 +1585,12 @@ class FakePBRTool(BaseTool):
                         break
         # Populate table
         self._populate_scan_table(matches)
+        excluded = self._apply_requirements_filter()
         self.process_all_button.setEnabled(self.scan_table.rowCount() > 0)
-        self.log(f"Scan complete: {len(matches)} material sets detected from {count_files} files", "INFO")
+        msg = f"Scan complete: {len(matches)} material sets detected from {count_files} files"
+        if excluded:
+            msg += f" ({excluded} excluded by requirements)"
+        self.log(msg, "INFO")
 
     def _populate_scan_table(self, matches: dict):
         self.scan_table.setRowCount(0)
@@ -1538,6 +1658,8 @@ class FakePBRTool(BaseTool):
         gloss_gamma = self.auto_gamma_slider.value() / 10.0
         metal_suppression = self.auto_metal_suppression_slider.value() / 100.0
         phong_strength = self.auto_phong_strength_slider.value() / 100.0
+        phong_tint_mode = self.auto_phong_tint_mode_combo.currentData() or "selective"
+        colored_metal_relief = self.auto_colored_metal_relief_slider.value() / 100.0
         gen_vmt = self.auto_generate_vmt.isChecked()
 
         gen_vtf = self.auto_generate_vtf.isChecked()
@@ -1574,11 +1696,14 @@ class FakePBRTool(BaseTool):
                 'output_folder': out_dir,
                 'material_name': material_name,
                 'material_path': mat_path,
+                'row': row,
                 'options': ProcessingOptions(
                     ao_strength=ao_strength,
                     gloss_gamma=gloss_gamma,
                     metal_diffuse_suppression=metal_suppression,
                     phong_strength=phong_strength,
+                    phong_tint_mode=phong_tint_mode,
+                    colored_metal_relief=colored_metal_relief,
                     generate_vtf=gen_vtf,
                     generate_vmt=gen_vmt,
                     generate_mipmaps=self.auto_generate_mipmaps.isChecked()
@@ -1609,6 +1734,8 @@ class FakePBRTool(BaseTool):
                 gloss_gamma=gloss_gamma,
                 metal_diffuse_suppression=metal_suppression,
                 phong_strength=phong_strength,
+                phong_tint_mode=phong_tint_mode,
+                colored_metal_relief=colored_metal_relief,
                 generate_vtf=gen_vtf,
                 generate_vmt=gen_vmt,
                 generate_mipmaps=self.auto_generate_mipmaps.isChecked()
