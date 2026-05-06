@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QThread, Signal
 
 from .base_tool import BaseTool
-from .fake_pbr_tool import FakePBRProcessor, ProcessingOptions, PBRInputs
+from .fake_pbr_tool import FakePBRProcessor, ProcessingOptions, PBRInputs, _paint_table_row
 from .exo_pbr_tool import ExoPBRProcessor, ExoPBROptions, ExoPBRInputs
 from ..utils.helpers import get_config_dir
 
@@ -366,6 +366,7 @@ class VmatParser:
 class VmatBatchRunner(QThread):
     progress = Signal(int, int, str)
     finished = Signal(bool, str)
+    row_finished = Signal(int, bool)
 
     def __init__(
         self,
@@ -382,12 +383,15 @@ class VmatBatchRunner(QThread):
         fake_gloss_gamma: float,
         fake_metal_diffuse_suppression: float,
         fake_phong_strength: float,
+        fake_phong_tint_mode: str,
+        fake_colored_metal_relief: float,
         exo_emission: float,
         exo_parallax: float,
         exo_alphablend: bool,
         generate_vtf: bool,
         generate_vmt: bool,
-        generate_mipmaps: bool
+        generate_mipmaps: bool,
+        row_indices: Optional[List[int]] = None,
     ):
         super().__init__()
         self.entries = entries
@@ -403,12 +407,17 @@ class VmatBatchRunner(QThread):
         self.fake_gloss_gamma = fake_gloss_gamma
         self.fake_metal_diffuse_suppression = fake_metal_diffuse_suppression
         self.fake_phong_strength = fake_phong_strength
+        self.fake_phong_tint_mode = fake_phong_tint_mode
+        self.fake_colored_metal_relief = fake_colored_metal_relief
         self.exo_emission = exo_emission
         self.exo_parallax = exo_parallax
         self.exo_alphablend = exo_alphablend
         self.generate_vtf = generate_vtf
         self.generate_vmt = generate_vmt
         self.generate_mipmaps = generate_mipmaps
+        # Parallel list of QTableWidget row indices (-1 = no row), used to
+        # report per-row completion back to the UI.
+        self.row_indices = list(row_indices) if row_indices else [-1] * len(entries)
 
     def _output_dir_for(self, entry: VmatEntry) -> Path:
         if self.preserve_structure and entry.rel_dir is not None:
@@ -435,9 +444,12 @@ class VmatBatchRunner(QThread):
                 self.finished.emit(False, f"Cancelled after {ok_count}/{total}")
                 return
 
+            row = self.row_indices[idx - 1] if idx - 1 < len(self.row_indices) else -1
             tex = entry.textures
             if tex.color is None or tex.normal is None:
                 self.progress.emit(idx, total, f"✗ {entry.name}: missing color or normal")
+                if row >= 0:
+                    self.row_finished.emit(row, False)
                 continue
 
             output_dir = self._output_dir_for(entry)
@@ -455,6 +467,8 @@ class VmatBatchRunner(QThread):
                         generate_mipmaps=self.generate_mipmaps,
                         metal_diffuse_suppression=self.fake_metal_diffuse_suppression,
                         phong_strength=self.fake_phong_strength,
+                        phong_tint_mode=self.fake_phong_tint_mode,
+                        colored_metal_relief=self.fake_colored_metal_relief,
                         translucent=entry.translucent,
                         alphatest=entry.alphatest,
                     )
@@ -503,6 +517,8 @@ class VmatBatchRunner(QThread):
                         processor.shutdown()
             except Exception as exc:
                 self.progress.emit(idx, total, f"✗ {entry.name}: {exc}")
+                if row >= 0:
+                    self.row_finished.emit(row, False)
                 continue
 
             if success:
@@ -510,6 +526,8 @@ class VmatBatchRunner(QThread):
                 self.progress.emit(idx, total, f"✓ {entry.name} done")
             else:
                 self.progress.emit(idx, total, f"✗ {entry.name}: {msg}")
+            if row >= 0:
+                self.row_finished.emit(row, success)
 
         self.finished.emit(True, f"Processed {ok_count}/{total} materials")
 
@@ -673,6 +691,35 @@ class VmatPBRTool(BaseTool):
         fake_phong_row.addWidget(self.fake_phong_strength_value)
         fake_form.addRow("Phong Strength:", self._row_widget(fake_phong_row))
 
+        self.fake_phong_tint_mode_combo = QComboBox()
+        self.fake_phong_tint_mode_combo.addItem("Off", "off")
+        self.fake_phong_tint_mode_combo.addItem("Selective (recommended)", "selective")
+        self.fake_phong_tint_mode_combo.addItem("Blanket", "blanket")
+        self.fake_phong_tint_mode_combo.setCurrentIndex(1)
+        self.fake_phong_tint_mode_combo.setToolTip(
+            "Compensates the phong mask for $phongalbedotint runtime tinting. "
+            "Selective: colored metals are boosted, dielectric phong is suppressed. "
+            "Blanket: divide-by-luminance compensation everywhere. "
+            "No effect on targets without $phongalbedotint."
+        )
+        fake_form.addRow("Phong Tint Mode:", self.fake_phong_tint_mode_combo)
+
+        fake_relief_row = QHBoxLayout()
+        self.fake_colored_metal_relief_slider = QSlider(Qt.Horizontal)
+        self.fake_colored_metal_relief_slider.setRange(0, 100)
+        self.fake_colored_metal_relief_slider.setValue(50)
+        self.fake_colored_metal_relief_slider.setToolTip(
+            "Per-pixel relief on Metal Diffuse Suppression for chromatic metals. "
+            "Only applied when Phong Tint Mode is not Off."
+        )
+        self.fake_colored_metal_relief_value = QLabel("0.50")
+        self.fake_colored_metal_relief_slider.valueChanged.connect(
+            lambda v: self.fake_colored_metal_relief_value.setText(f"{v/100:.2f}")
+        )
+        fake_relief_row.addWidget(self.fake_colored_metal_relief_slider)
+        fake_relief_row.addWidget(self.fake_colored_metal_relief_value)
+        fake_form.addRow("Colored Metal Relief:", self._row_widget(fake_relief_row))
+
         # Exo PBR settings
         exo_widget = QWidget()
         exo_form = QFormLayout(exo_widget)
@@ -701,6 +748,39 @@ class VmatPBRTool(BaseTool):
         mode_layout.addWidget(self.mode_stack)
         mode_group.setLayout(mode_layout)
         layout.addWidget(mode_group)
+
+        # Requirements: which texture roles must be present for a VMAT to
+        # be processed. Color/Normal default on (matching today's hardcoded
+        # validation); the rest default off so existing scans behave as
+        # before. Metallic/Roughness count as "present" when the VMAT
+        # provides a g_flMetalness / g_flRoughness scalar even without a
+        # texture — those cases produce a synthesised uniform map at
+        # processing time.
+        req_group = QGroupBox("Requirements")
+        req_layout = QHBoxLayout()
+        req_layout.setContentsMargins(8, 6, 8, 6)
+        self.req_checkboxes: Dict[str, QCheckBox] = {}
+        for label, key, default in (
+            ("Color", "color", True),
+            ("Normal", "normal", True),
+            ("AO", "ao", False),
+            ("Roughness", "roughness", False),
+            ("Metallic", "metallic", False),
+            ("Emissive", "emissive", False),
+            ("Translucency", "translucency", False),
+        ):
+            cb = QCheckBox(label)
+            cb.setChecked(default)
+            cb.setToolTip(
+                f"Require a {label.lower()} map for a VMAT to be processed. "
+                f"Rows missing this role will be auto-unchecked in the table."
+            )
+            cb.stateChanged.connect(self._apply_requirements_filter)
+            req_layout.addWidget(cb)
+            self.req_checkboxes[key] = cb
+        req_layout.addStretch()
+        req_group.setLayout(req_layout)
+        layout.addWidget(req_group)
 
         # Results table
         self.results_table = QTableWidget(0, 10)
@@ -788,9 +868,12 @@ class VmatPBRTool(BaseTool):
             "fake_gloss_gamma": self.fake_gamma_slider.value() / 10.0,
             "fake_metal_diffuse_suppression": self.fake_metal_suppression_slider.value() / 100.0,
             "fake_phong_strength": self.fake_phong_strength_slider.value() / 100.0,
+            "fake_phong_tint_mode": self.fake_phong_tint_mode_combo.currentData() or "selective",
+            "fake_colored_metal_relief": self.fake_colored_metal_relief_slider.value() / 100.0,
             "exo_emission": float(self.exo_emission.value()),
             "exo_parallax": float(self.exo_parallax.value()),
             "exo_alphablend": self.exo_alphablend.isChecked(),
+            "requirements": {key: cb.isChecked() for key, cb in self.req_checkboxes.items()},
         }
 
     def _save_current_run_to_history(self):
@@ -803,8 +886,9 @@ class VmatPBRTool(BaseTool):
             "append_material_subfolders", "preserve_structure", "prefix", "suffix",
             "generate_vtf", "generate_vmt", "generate_mipmaps", "fake_ao_strength",
             "fake_gloss_gamma", "fake_metal_diffuse_suppression", "fake_phong_strength",
+            "fake_phong_tint_mode", "fake_colored_metal_relief",
             "exo_emission",
-            "exo_parallax", "exo_alphablend"
+            "exo_parallax", "exo_alphablend", "requirements"
         ]
 
         def _same(a: dict, b: dict) -> bool:
@@ -849,9 +933,20 @@ class VmatPBRTool(BaseTool):
         self.fake_phong_strength_slider.setValue(
             int(float(entry.get("fake_phong_strength", 0.5)) * 100)
         )
+        self.fake_colored_metal_relief_slider.setValue(
+            int(float(entry.get("fake_colored_metal_relief", 0.5)) * 100)
+        )
+        tint_mode_val = str(entry.get("fake_phong_tint_mode", "selective"))
+        tint_idx = self.fake_phong_tint_mode_combo.findData(tint_mode_val)
+        if tint_idx >= 0:
+            self.fake_phong_tint_mode_combo.setCurrentIndex(tint_idx)
         self.exo_emission.setValue(float(entry.get("exo_emission", 0.0)))
         self.exo_parallax.setValue(float(entry.get("exo_parallax", 0.0)))
         self.exo_alphablend.setChecked(bool(entry.get("exo_alphablend", False)))
+        reqs = entry.get("requirements") or {}
+        for key, cb in self.req_checkboxes.items():
+            if key in reqs:
+                cb.setChecked(bool(reqs[key]))
 
     def _row(self, line_edit: QLineEdit, button: QPushButton) -> QWidget:
         w = QWidget()
@@ -921,7 +1016,11 @@ class VmatPBRTool(BaseTool):
         self.entries = entries
         self._populate_table(entries)
         self.convert_btn.setEnabled(len(entries) > 0)
-        self.log(f"Scan complete: {len(entries)} VMAT files detected", "INFO")
+        excluded = self._apply_requirements_filter()
+        msg = f"Scan complete: {len(entries)} VMAT files detected"
+        if excluded:
+            msg += f" ({excluded} excluded by requirements)"
+        self.log(msg, "INFO")
 
     def _populate_table(self, entries: List[VmatEntry]):
         self.results_table.setRowCount(0)
@@ -973,14 +1072,16 @@ class VmatPBRTool(BaseTool):
             warn_item = QTableWidgetItem(warn_text)
             self.results_table.setItem(row, 9, warn_item)
 
-    def _selected_entries(self) -> List[VmatEntry]:
-        selected = []
+    def _selected_entries(self) -> Tuple[List[VmatEntry], List[int]]:
+        selected: List[VmatEntry] = []
+        rows: List[int] = []
         entries = self.sorted_entries or self.entries
         for row in range(self.results_table.rowCount()):
             if self.results_table.item(row, 0).checkState() != Qt.Checked:
                 continue
             selected.append(entries[row])
-        return selected
+            rows.append(row)
+        return selected, rows
 
     def convert(self):
         vmat_root = self.vmat_root.text().strip()
@@ -989,7 +1090,7 @@ class VmatPBRTool(BaseTool):
             self.log("VMAT root and output root are required", "ERROR")
             return
 
-        entries = self._selected_entries()
+        entries, row_indices = self._selected_entries()
         if not entries:
             self.log("No VMATs selected", "WARNING")
             return
@@ -1020,16 +1121,83 @@ class VmatPBRTool(BaseTool):
             fake_gloss_gamma=self.fake_gamma_slider.value() / 10.0,
             fake_metal_diffuse_suppression=self.fake_metal_suppression_slider.value() / 100.0,
             fake_phong_strength=self.fake_phong_strength_slider.value() / 100.0,
+            fake_phong_tint_mode=self.fake_phong_tint_mode_combo.currentData() or "selective",
+            fake_colored_metal_relief=self.fake_colored_metal_relief_slider.value() / 100.0,
             exo_emission=float(self.exo_emission.value()),
             exo_parallax=float(self.exo_parallax.value()),
             exo_alphablend=self.exo_alphablend.isChecked(),
             generate_vtf=self.generate_vtf.isChecked(),
             generate_vmt=self.generate_vmt.isChecked(),
-            generate_mipmaps=self.generate_mipmaps.isChecked()
+            generate_mipmaps=self.generate_mipmaps.isChecked(),
+            row_indices=row_indices,
         )
         self.thread.progress.connect(self.on_progress)
+        self.thread.row_finished.connect(self._on_row_finished)
         self.thread.finished.connect(self.on_finished)
         self.thread.start()
+
+    def _on_row_finished(self, row: int, success: bool):
+        """Tint the corresponding results_table row green/red as each task completes."""
+        _paint_table_row(self.results_table, row, success)
+
+    def _required_roles(self) -> List[str]:
+        """Texture roles currently required for a VMAT to be eligible."""
+        if not hasattr(self, "req_checkboxes"):
+            return []
+        return [key for key, cb in self.req_checkboxes.items() if cb.isChecked()]
+
+    @staticmethod
+    def _entry_has_role(entry: VmatEntry, role: str) -> bool:
+        """Whether `entry` satisfies a given role requirement.
+
+        Metallic/Roughness count as present when the VMAT carries a uniform
+        scalar (g_flMetalness / g_flRoughness) since the processor synthesises
+        a flat map for those at runtime.
+        """
+        tex = entry.textures
+        path = getattr(tex, role, None)
+        if path is not None:
+            return True
+        if role == "metallic" and entry.metallic_constant is not None:
+            return True
+        if role == "roughness" and entry.roughness_constant is not None:
+            return True
+        return False
+
+    def _apply_requirements_filter(self) -> int:
+        """Auto-uncheck rows whose underlying entry is missing any required role.
+
+        Returns the count of rows that ended up unchecked because they failed
+        the current requirement set. Re-checking a row manually is still
+        allowed; the filter only fires on requirement-toggle and post-scan.
+        """
+        if not hasattr(self, "results_table"):
+            return 0
+        entries = self.sorted_entries or self.entries
+        if not entries:
+            return 0
+        required = self._required_roles()
+        if not required:
+            for row in range(self.results_table.rowCount()):
+                include_item = self.results_table.item(row, 0)
+                if include_item is not None:
+                    include_item.setToolTip("")
+            return 0
+        excluded = 0
+        for row in range(self.results_table.rowCount()):
+            include_item = self.results_table.item(row, 0)
+            if include_item is None or row >= len(entries):
+                continue
+            entry = entries[row]
+            missing = [r for r in required if not self._entry_has_role(entry, r)]
+            if missing:
+                if include_item.checkState() == Qt.Checked:
+                    include_item.setCheckState(Qt.Unchecked)
+                include_item.setToolTip("Missing required: " + ", ".join(missing))
+                excluded += 1
+            else:
+                include_item.setToolTip("")
+        return excluded
 
     def on_progress(self, idx: int, total: int, message: str):
         self.progress.setMaximum(total)
