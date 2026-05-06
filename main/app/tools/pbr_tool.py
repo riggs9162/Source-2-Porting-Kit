@@ -2,7 +2,7 @@
 Combined PBR Tool - switch between Exo PBR and Fake PBR processing
 
 This tool centralizes Exo PBR and Fake PBR into a single UI with a simple
-dropdown to choose the processing mode. Default mode is Exo PBR.
+dropdown to choose the processing mode. Default mode is Fake PBR.
 """
 
 from PySide6.QtWidgets import (
@@ -29,8 +29,8 @@ class PBRTool(BaseTool):
 
         label = QLabel("PBR Mode:")
         self.mode_combo = QComboBox()
-        self.mode_combo.addItem("Exo PBR")
         self.mode_combo.addItem("Fake PBR")
+        self.mode_combo.addItem("Exo PBR")
         self.mode_combo.setCurrentIndex(0)
 
         header_layout.addWidget(label)
@@ -40,10 +40,10 @@ class PBRTool(BaseTool):
         self.content_layout.addWidget(header)
 
         self.stack = QStackedWidget()
-        self.exo_tool = ExoPBRTool()
         self.fake_tool = FakePBRTool()
-        self.stack.addWidget(self.exo_tool)
+        self.exo_tool = ExoPBRTool()
         self.stack.addWidget(self.fake_tool)
+        self.stack.addWidget(self.exo_tool)
 
         self.content_layout.addWidget(self.stack)
 
@@ -53,7 +53,7 @@ class PBRTool(BaseTool):
         self.exo_tool.status_message.connect(self.status_message.emit)
         self.fake_tool.status_message.connect(self.status_message.emit)
 
-        # Default to Exo PBR
+        # Default to Fake PBR
         self._on_mode_changed(0)
 
     def _hide_base_log(self):
@@ -70,5 +70,5 @@ class PBRTool(BaseTool):
 
     def _on_mode_changed(self, index: int):
         self.stack.setCurrentIndex(index)
-        mode_name = "Exo PBR" if index == 0 else "Fake PBR"
+        mode_name = "Fake PBR" if index == 0 else "Exo PBR"
         self.emit_status(f"{mode_name} mode selected")
