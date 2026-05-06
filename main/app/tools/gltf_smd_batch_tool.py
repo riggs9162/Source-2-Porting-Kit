@@ -152,6 +152,38 @@ class ModelSetScanner:
         return sets
 
 
+def _is_source2_viewer_export(gltf_data: dict) -> bool:
+    """Return True if this glTF was produced by Source 2 Viewer (valveresourceformat).
+
+    S2V exports store mesh POSITION values in **vmdl/Source convention** (X-forward,
+    Y-left, Z-up, inches) and attach a 0.0254-scale + cyclic-axis-swap matrix on a
+    root node to convert into glTF spec convention (Y-up meters). Trimesh applies
+    that matrix during scene-dump for static models but skips it for skinned models
+    where the mesh nodes are scene-root siblings of the skeleton — producing two
+    different orientations from the same exporter. The right answer is to ignore the
+    matrix entirely and use the raw POSITION values, which are already in the SMD
+    target convention.
+
+    Detection: generator string identifies the typical case; the 0.0254-magnitude
+    matrix on any node is a backup signal for stripped/edited files.
+    """
+    asset = gltf_data.get('asset') or {}
+    generator = asset.get('generator', '') or ''
+    if 'Source 2 Viewer' in generator:
+        return True
+
+    for n in gltf_data.get('nodes') or []:
+        m = n.get('matrix')
+        if not m:
+            continue
+        # Basis-vector lengths from a column-major 4x4
+        for sx_components in ((m[0], m[1], m[2]), (m[4], m[5], m[6]), (m[8], m[9], m[10])):
+            mag = (sx_components[0]**2 + sx_components[1]**2 + sx_components[2]**2) ** 0.5
+            if 0.020 < mag < 0.030:
+                return True
+    return False
+
+
 class GltfMeshLoader:
     """Load glTF/GLB and flatten to single Trimesh with baked transforms."""
 
@@ -251,9 +283,18 @@ class GltfMeshLoader:
                 resolver=resolver
             )
 
+            # For Source 2 Viewer exports, bypass Scene.dump()'s transform baking so
+            # we work with raw POSITION values (vmdl-space, inches). Otherwise dump
+            # as usual so legitimate node placement transforms (Blender exports etc.)
+            # are still applied.
+            is_s2v = bool(gltf_data) and _is_source2_viewer_export(gltf_data)
+
             mesh = None
             if isinstance(loaded, trimesh.Scene):
-                submeshes = loaded.dump(concatenate=False)
+                if is_s2v:
+                    submeshes = list(loaded.geometry.values())
+                else:
+                    submeshes = loaded.dump(concatenate=False)
                 if not submeshes:
                     return (None, "Mesh has no faces after loading")
 
@@ -343,6 +384,12 @@ class GltfMeshLoader:
                 mesh.metadata['gltf_material_names'] = [
                     mat.get('name', f'material_{i}') for i, mat in enumerate(gltf_data['materials'])
                 ]
+
+            # Mark S2V exports so the worker skips both scale and axis_conversion:
+            # raw POSITION values (used by the loader path above) are already in
+            # vmdl-space inches, which is what SMD wants.
+            if is_s2v:
+                mesh.metadata['source2_native_units'] = True
 
             return (mesh, "")
 
@@ -853,9 +900,18 @@ class BatchRunner(QThread):
                     self.progress.emit(idx, total, f"{model_set.name}: Failed to load render mesh")
                 continue
 
-            # Process render
-            MeshProcessor.apply_scale(render_mesh, self.scale)
-            if self.axis_conversion:
+            # Process render. Source 2 Viewer's root matrix simultaneously converts
+            # inches->meters AND swaps vmdl's Z-up basis to glTF's Y-up basis. When the
+            # matrix reaches the geometry (static models, source2_native_units=False) we
+            # need both ×40 and the +90°X back-rotation. When it's orphaned (skinned
+            # models, source2_native_units=True) the geometry is already in vmdl Z-up
+            # inches and needs neither.
+            native_units = bool(render_mesh.metadata.get('source2_native_units'))
+            render_scale = 1.0 if native_units else self.scale
+            if render_scale != self.scale:
+                self.progress.emit(idx, total, f"{model_set.name}: Source-units glTF detected, using scale=1.0")
+            MeshProcessor.apply_scale(render_mesh, render_scale)
+            if self.axis_conversion and not native_units:
                 MeshProcessor.apply_axis_conversion(render_mesh)
             MeshProcessor.sanitize(render_mesh)
 
@@ -873,27 +929,46 @@ class BatchRunner(QThread):
                     self.progress.emit(idx, total, f"{model_set.name}: Skipping SMD generation (disabled)")
 
 
-            # Physics processing
+            # Physics processing. If the source physics glTF is missing, has unmet
+            # preflight deps, or loads empty (Source 2 Viewer emits stub physics glTFs
+            # for vmdls that have no collision data), fall back to using the already-
+            # processed render mesh so the prop still gets a real $collisionmodel
+            # instead of studiomdl's default-sphere fallback.
             physics_mesh = None
-            if has_physics and self.export_physics:
-                preflight_ok, missing = GltfMeshLoader.preflight_check(model_set.physics_path)
-                if not preflight_ok:
-                    error_detail = f"{model_set.name}: Physics missing dependencies - {', '.join(missing)}"
-                    errors.append(error_detail)
-                    self.progress.emit(idx, total, error_detail)
-                else:
-                    physics_mesh, load_error = GltfMeshLoader.load_mesh(model_set.physics_path, self.verbose)
-                    if physics_mesh is None:
-                        error_detail = f"{model_set.name}: Failed to load physics mesh: {load_error}"
-                        errors.append(error_detail)
-                        if self.verbose:
-                            self.progress.emit(idx, total, error_detail)
+            if self.export_physics:
+                loaded_physics = None
+                load_failure = None
+
+                physics_path = model_set.physics_path
+                if has_physics and physics_path is not None:
+                    preflight_ok, missing = GltfMeshLoader.preflight_check(physics_path)
+                    if not preflight_ok:
+                        load_failure = f"missing dependencies - {', '.join(missing)}"
                     else:
-                        MeshProcessor.apply_scale(physics_mesh, self.scale)
-                        if self.axis_conversion:
-                            MeshProcessor.apply_axis_conversion(physics_mesh)
-                        
-                        # CRITICAL: Source uses vertex normals to detect convex decomposition
+                        loaded_physics, load_error = GltfMeshLoader.load_mesh(physics_path, self.verbose)
+                        if loaded_physics is None:
+                            load_failure = load_error or "empty physics glTF"
+
+                if loaded_physics is not None:
+                    physics_mesh = loaded_physics
+                    physics_native = bool(physics_mesh.metadata.get('source2_native_units'))
+                    physics_scale = 1.0 if physics_native else self.scale
+                    MeshProcessor.apply_scale(physics_mesh, physics_scale)
+                    if self.axis_conversion and not physics_native:
+                        MeshProcessor.apply_axis_conversion(physics_mesh)
+                else:
+                    physics_mesh = render_mesh.copy()
+                    # Per-face render materials must not leak into physics SMD; the
+                    # exporter would otherwise emit triangles under render material
+                    # names instead of the single physics material.
+                    if hasattr(physics_mesh, 'metadata') and physics_mesh.metadata:
+                        physics_mesh.metadata.pop('gltf_face_materials', None)
+                        physics_mesh.metadata.pop('gltf_material_names', None)
+                    reason = load_failure if has_physics else "no physics glTF in source"
+                    self.progress.emit(idx, total, f"{model_set.name}: {reason}; using render mesh as physics fallback")
+
+                if physics_mesh is not None:
+                    # CRITICAL: Source uses vertex normals to detect convex decomposition
                         # Must have smooth shading (averaged vertex normals) for proper physics
                         # Physics meshes are often pre-split into convex pieces with hard edges
                         # We need to FORCE smooth normals across the entire mesh
