@@ -51,6 +51,26 @@ def _match_scalar_inputs(
     return ao_value, roughness_value, metallic_value
 
 
+def _albedo_chroma(color_linear: np.ndarray) -> np.ndarray:
+    """Per-pixel chroma in [0,1] from a linear-space RGB image: max - min channel."""
+    rgb = color_linear[:, :, :3]
+    return np.clip(np.max(rgb, axis=2) - np.min(rgb, axis=2), 0.0, 1.0).astype(np.float32)
+
+
+def _albedo_luminance(color_linear: np.ndarray) -> np.ndarray:
+    """Rec.709 luminance of a linear RGB image, used for $phongalbedotint compensation."""
+    rgb = color_linear[:, :, :3]
+    return np.clip(
+        0.2126 * rgb[:, :, 0] + 0.7152 * rgb[:, :, 1] + 0.0722 * rgb[:, :, 2],
+        0.0, 1.0
+    ).astype(np.float32)
+
+
+# Floor used when dividing by linearised albedo luminance so dark/black pixels
+# don't blow the mask up. 0.04 matches the dielectric F0 baseline.
+_TINT_DIVIDE_FLOOR = 0.04
+
+
 def compute_fakepbr_material_stats(
     roughness: Optional[np.ndarray],
     metallic: Optional[np.ndarray],
@@ -326,6 +346,7 @@ def process_fakepbr_base_texture(
     ao_strength: float = 0.7,
     metal_diffuse_suppression: float = 0.7,
     translucency: Optional[np.ndarray] = None,
+    colored_metal_relief: float = 0.0,
 ) -> np.ndarray:
     """Bake Source 1 stock-compatible Fake PBR albedo.
 
@@ -333,6 +354,12 @@ def process_fakepbr_base_texture(
     metallic energy split. Alpha is normally opaque; when a translucency map
     is supplied (Source 2 ``TextureTranslucency``) we bake it into the alpha
     channel so $translucent / $alphatest VMTs see the right opacity.
+
+    ``colored_metal_relief`` (0..1) reduces the metal diffuse suppression on
+    chromatic pixels so colored metals (gold, copper, brass) keep more of
+    their albedo. 1.0 means fully-saturated metals receive no suppression at
+    all; grayscale metals always retain the full ``metal_diffuse_suppression``
+    factor so steel-like surfaces stay energy-conservative.
     """
     from .image_processing import srgb_to_linear, linear_to_srgb, to_uint8
 
@@ -342,7 +369,14 @@ def process_fakepbr_base_texture(
 
     rgb_linear = srgb_to_linear(rgb)
     rgb_linear *= np.power(ao_value[:, :, np.newaxis], ao_strength)
-    rgb_linear *= (1.0 - metal_diffuse_suppression * metallic_value[:, :, np.newaxis])
+
+    relief = float(np.clip(colored_metal_relief, 0.0, 1.0))
+    if relief > 0.0:
+        chroma = _albedo_chroma(rgb_linear)
+        suppression = metal_diffuse_suppression * (1.0 - relief * chroma)
+    else:
+        suppression = np.full((height, width), float(metal_diffuse_suppression), dtype=np.float32)
+    rgb_linear *= (1.0 - suppression[:, :, np.newaxis] * metallic_value[:, :, np.newaxis])
     rgb_srgb = np.clip(linear_to_srgb(rgb_linear), 0.0, 1.0)
 
     if translucency is not None:
@@ -366,19 +400,78 @@ def build_phong_mask(
     ao: Optional[np.ndarray],
     height: int,
     width: int,
-    strength: float = 0.5
+    strength: float = 0.5,
+    color: Optional[np.ndarray] = None,
+    tint_mode: str = "off",
+    metal_diffuse_suppression: float = 0.7,
+    colored_metal_relief: float = 0.0,
 ) -> np.ndarray:
     """Build the bumpmap alpha Phong mask recommended by the Fake PBR guide.
 
     `strength` scales the final mask amplitude (default 0.5 — historical
     output has been halved because the unscaled mask reads as too hot
     in-engine). 0.0 disables phong entirely; 1.0 is the original formula.
+
+    `tint_mode` adjusts the mask for VMTs that emit ``$phongalbedotint 1``,
+    where the engine multiplies the phong output by the basetexture color at
+    runtime:
+
+      * ``"off"``  — original behaviour, no compensation.
+      * ``"selective"`` — only colored metallic pixels (metallic × chroma)
+        receive divide-by-luminance compensation; dielectric pixels are
+        suppressed close to zero so the unwanted albedo cast on dielectric
+        spec disappears (envmap path is expected to provide their reflection).
+      * ``"blanket"`` — divide-by-luminance compensation everywhere.
+
+    When tint compensation is active, ``color`` (sRGB albedo) MUST be supplied
+    and ``metal_diffuse_suppression`` / ``colored_metal_relief`` should match
+    the values used by ``process_fakepbr_base_texture`` so the math reflects
+    what the engine will actually sample as the basetexture.
     """
     ao_value, roughness_value, metallic_value = _match_scalar_inputs(height, width, ao, roughness, metallic)
-    phong_mask = (
+
+    base_mask = (
         (1.0 - roughness_value) * (0.04 + 0.96 * metallic_value) +
         0.04 * (1.0 - metallic_value)
     )
+
+    mode = (tint_mode or "off").lower()
+    if mode != "off" and color is not None:
+        from .image_processing import srgb_to_linear
+
+        # Reproduce the same darkening that process_fakepbr_base_texture bakes
+        # into the basetexture, so we divide by what the engine actually samples.
+        rgb_linear = srgb_to_linear(np.clip(color[:, :, :3], 0.0, 1.0))
+        relief = float(np.clip(colored_metal_relief, 0.0, 1.0))
+        if relief > 0.0:
+            chroma = _albedo_chroma(rgb_linear)
+            suppression = metal_diffuse_suppression * (1.0 - relief * chroma)
+        else:
+            chroma = _albedo_chroma(rgb_linear) if mode == "selective" else None
+            suppression = np.full((height, width), float(metal_diffuse_suppression), dtype=np.float32)
+        baked_linear = rgb_linear * (1.0 - suppression[:, :, np.newaxis] * metallic_value[:, :, np.newaxis])
+        luma = np.maximum(_albedo_luminance(baked_linear), _TINT_DIVIDE_FLOOR)
+
+        compensated = base_mask / luma
+
+        if mode == "selective":
+            if chroma is None:
+                chroma = _albedo_chroma(rgb_linear)
+            colored_metal_weight = np.clip(metallic_value * chroma, 0.0, 1.0)
+            # Dielectric region: drop the 0.04 floor so phong doesn't tint
+            # neutral surfaces; specular for those comes via $envmap.
+            dielectric_mask = (1.0 - roughness_value) * (0.04 + 0.96 * metallic_value) * metallic_value
+            phong_mask = (
+                dielectric_mask * (1.0 - colored_metal_weight) +
+                compensated * colored_metal_weight
+            )
+        elif mode == "blanket":
+            phong_mask = compensated
+        else:
+            phong_mask = base_mask
+    else:
+        phong_mask = base_mask
+
     phong_mask *= ao_value
     phong_mask *= max(0.0, float(strength))
     return np.clip(phong_mask, 0.0, 1.0)
@@ -390,7 +483,11 @@ def pack_normal_with_phong_mask(
     metallic: Optional[np.ndarray],
     roughness: Optional[np.ndarray],
     invert_green: bool = False,
-    phong_strength: float = 0.5
+    phong_strength: float = 0.5,
+    color: Optional[np.ndarray] = None,
+    tint_mode: str = "off",
+    metal_diffuse_suppression: float = 0.7,
+    colored_metal_relief: float = 0.0,
 ) -> np.ndarray:
     """Pack a Source bumpmap: RGB tangent normal, alpha Phong mask."""
     from .image_processing import to_uint8
@@ -400,7 +497,14 @@ def pack_normal_with_phong_mask(
         normal_rgb[:, :, 1] = 1.0 - normal_rgb[:, :, 1]
 
     height, width = normal_rgb.shape[:2]
-    phong_mask = build_phong_mask(roughness, metallic, ao, height, width, strength=phong_strength)
+    phong_mask = build_phong_mask(
+        roughness, metallic, ao, height, width,
+        strength=phong_strength,
+        color=color,
+        tint_mode=tint_mode,
+        metal_diffuse_suppression=metal_diffuse_suppression,
+        colored_metal_relief=colored_metal_relief,
+    )
     return to_uint8(np.dstack([normal_rgb, phong_mask]), clip=True)
 
 
