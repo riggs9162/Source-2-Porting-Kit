@@ -6,7 +6,7 @@ material set with proper Phong, envmap masking, and VTF encoding.
 """
 
 import os
-from typing import Optional, Dict, Tuple, Callable, Any
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from dataclasses import dataclass
 import numpy as np
 from pathlib import Path
