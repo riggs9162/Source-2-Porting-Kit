@@ -6,7 +6,7 @@ material set with proper Phong, envmap masking, and VTF encoding.
 """
 
 import os
-from typing import Optional, Dict, Tuple, Callable
+from typing import Optional, Dict, Tuple, Callable, Any
 from dataclasses import dataclass
 import numpy as np
 from pathlib import Path
@@ -51,6 +51,16 @@ class PBRInputs:
     ao: Optional[str] = None
     roughness: Optional[str] = None
     metallic: Optional[str] = None
+    # Optional opacity / alpha map. When present, the alpha channel is
+    # baked into the basetexture so $translucent / $alphatest takes effect.
+    translucency: Optional[str] = None
+    # Uniform PBR scalars used as fallbacks when no metallic/roughness texture
+    # is provided. These come from Source 2 vmat fields (g_flMetalness /
+    # g_flRoughness) and apply to the entire material. When set, the processor
+    # synthesises a flat single-value array so downstream math behaves the same
+    # as if a uniform texture had been authored.
+    metallic_constant: Optional[float] = None
+    roughness_constant: Optional[float] = None
 
 
 @dataclass
@@ -64,9 +74,16 @@ class ProcessingOptions:
     target_branch: str = "gmod"
     shader: str = "VertexLitGeneric"
     envmap: str = "env_cubemap"
-    metal_diffuse_suppression: float = 0.85
+    metal_diffuse_suppression: float = 0.7
     envmask_gamma: float = 1.5
     invert_green: bool = False
+    # Scales the phong mask (bump alpha) and phong exponent map.
+    # 0.5 halves the prior unscaled output, which read too hot in-engine.
+    phong_strength: float = 0.5
+    # Transparency mode. translucent → $translucent 1; alphatest → $alphatest 1
+    # with $alphatestreference. Mutually exclusive (translucent wins if both).
+    translucent: bool = False
+    alphatest: bool = False
 
 
 class FakePBRProcessor:
@@ -137,27 +154,40 @@ class FakePBRProcessor:
             roughness_data = load_image(inputs.roughness)
             if roughness_data is not None:
                 self.log(f"  ✓ Loaded roughness map: {os.path.basename(inputs.roughness)}")
+            elif inputs.roughness_constant is not None:
+                value = float(np.clip(inputs.roughness_constant, 0.0, 1.0))
+                roughness_data = np.full((4, 4, 1), value, dtype=np.float32)
+                self.log(f"  ✓ Synthesised uniform roughness from g_flRoughness = {value:.3f}")
             else:
                 self.log("  ℹ No roughness map provided (will use default: 0.5)")
             self._check_cancel()
-            
+
             metallic_data = load_image(inputs.metallic)
             if metallic_data is not None:
                 self.log(f"  ✓ Loaded metallic map: {os.path.basename(inputs.metallic)}")
+            elif inputs.metallic_constant is not None:
+                value = float(np.clip(inputs.metallic_constant, 0.0, 1.0))
+                metallic_data = np.full((4, 4, 1), value, dtype=np.float32)
+                self.log(f"  ✓ Synthesised uniform metallic from g_flMetalness = {value:.3f}")
             else:
                 self.log("  ℹ No metallic map provided (will use dielectric)")
             self._check_cancel()
-            
+
+            translucency_data = load_image(inputs.translucency)
+            if translucency_data is not None:
+                self.log(f"  ✓ Loaded translucency map: {os.path.basename(inputs.translucency)}")
+            self._check_cancel()
+
             # Validate required inputs
             if color_data is None:
                 return False, "Color map is required"
-            
+
             if normal_data is None:
                 return False, "Normal map is required"
-            
+
             # Determine target resolution: use LARGEST dimension from all inputs
             # This prevents downsampling high-res textures
-            all_inputs = [color_data, normal_data, ao_data, roughness_data, metallic_data]
+            all_inputs = [color_data, normal_data, ao_data, roughness_data, metallic_data, translucency_data]
             max_height = max(img.shape[0] for img in all_inputs if img is not None)
             max_width = max(img.shape[1] for img in all_inputs if img is not None)
             height, width = max_height, max_width
@@ -174,20 +204,24 @@ class FakePBRProcessor:
             ao_data = resize_to_match(ao_data, height, width, "AO")
             roughness_data = resize_to_match(roughness_data, height, width, "roughness")
             metallic_data = resize_to_match(metallic_data, height, width, "metallic")
+            translucency_data = resize_to_match(translucency_data, height, width, "translucency")
             self._check_cancel()
-            
+
             stats = compute_fakepbr_material_stats(roughness_data, metallic_data, height, width)
 
             # Process base texture
             self.log(f"[FakePBR] Processing base texture...")
             self.log(f"  → Baking AO with power curve (strength: {self.options.ao_strength:.2f})")
             self.log(f"  → Darkening metallic diffuse regions")
+            if translucency_data is not None:
+                self.log(f"  → Baking opacity into base texture alpha")
             base_texture = process_fakepbr_base_texture(
                 color_data,
                 ao_data,
                 metallic_data,
                 self.options.ao_strength,
-                self.options.metal_diffuse_suppression
+                self.options.metal_diffuse_suppression,
+                translucency=translucency_data,
             )
             self.log(f"  ✓ Base texture processed")
             self._check_cancel()
@@ -201,7 +235,8 @@ class FakePBRProcessor:
                 ao_data,
                 metallic_data,
                 roughness_data,
-                self.options.invert_green
+                self.options.invert_green,
+                phong_strength=self.options.phong_strength
             )
             self.log(f"  ✓ Normal map packed with Phong mask in alpha")
             self._check_cancel()
@@ -211,7 +246,8 @@ class FakePBRProcessor:
             self.log(f"  → Converting roughness to gloss: (1-r)^{self.options.gloss_gamma:.2f}")
             self.log(f"  → Packing R=exponent, G=metallic, A=rim")
             phong_texture = create_phong_exponent_texture(
-                roughness_data, metallic_data, ao_data, self.options.gloss_gamma, height, width
+                roughness_data, metallic_data, ao_data, self.options.gloss_gamma, height, width,
+                phong_strength=self.options.phong_strength
             )
             self.log(f"  ✓ Phong exponent texture computed")
             self._check_cancel()
@@ -259,6 +295,19 @@ class FakePBRProcessor:
             if self.options.generate_vmt:
                 self._check_cancel()
                 self.log(f"[FakePBR] Generating VMT...")
+                # Transparency: $translucent and $alphatest both rely on the base
+                # texture's alpha channel, which we bake above when a translucency
+                # input is supplied. The VMT also needs to disable the
+                # $normalmapalphaenvmapmask path because that conflicts with the
+                # alpha-blended draw — Source 1 cannot use both at once.
+                custom_params: Dict[str, Any] = {}
+                if self.options.translucent:
+                    custom_params['"$translucent"'] = "1"
+                elif self.options.alphatest:
+                    custom_params['"$alphatest"'] = "1"
+                    custom_params['"$alphatestreference"'] = "0.5"
+                if self.options.translucent or self.options.alphatest:
+                    custom_params['"$nocull"'] = "1"
                 generate_fakepbr_vmt(
                     vmt_path,
                     material_name,
@@ -267,7 +316,8 @@ class FakePBRProcessor:
                     target_branch=self.options.target_branch,
                     envmap=self.options.envmap,
                     stats=stats,
-                    has_envmap_mask=True
+                    has_envmap_mask=True,
+                    custom_params=custom_params or None,
                 )
                 self.log(f"  ✓ Generated {material_name}.vmt")
             else:
@@ -548,6 +598,42 @@ class FakePBRTool(BaseTool):
         gamma_layout.addWidget(self.gloss_gamma_value)
         options_layout.addRow("Gloss Gamma:", gamma_layout)
 
+        # Metal Diffuse Suppression
+        metal_layout = QHBoxLayout()
+        self.metal_suppression_slider = QSlider(Qt.Horizontal)
+        self.metal_suppression_slider.setRange(0, 100)
+        self.metal_suppression_slider.setValue(70)
+        self.metal_suppression_slider.setToolTip(
+            "How much to darken albedo on metal pixels. "
+            "0.00 = no darkening (metal keeps full albedo), "
+            "1.00 = fully darkened (metal becomes black diffuse)."
+        )
+        self.metal_suppression_value = QLabel("0.70")
+        self.metal_suppression_slider.valueChanged.connect(
+            lambda v: self.metal_suppression_value.setText(f"{v/100:.2f}")
+        )
+        metal_layout.addWidget(self.metal_suppression_slider)
+        metal_layout.addWidget(self.metal_suppression_value)
+        options_layout.addRow("Metal Diffuse Suppression:", metal_layout)
+
+        # Phong Strength
+        phong_layout = QHBoxLayout()
+        self.phong_strength_slider = QSlider(Qt.Horizontal)
+        self.phong_strength_slider.setRange(0, 200)
+        self.phong_strength_slider.setValue(50)
+        self.phong_strength_slider.setToolTip(
+            "Scales the phong mask (bump alpha) and phong exponent map. "
+            "0.00 = no phong, 0.50 = halved (default), 1.00 = original strength, "
+            "up to 2.00 to push specular harder."
+        )
+        self.phong_strength_value = QLabel("0.50")
+        self.phong_strength_slider.valueChanged.connect(
+            lambda v: self.phong_strength_value.setText(f"{v/100:.2f}")
+        )
+        phong_layout.addWidget(self.phong_strength_slider)
+        phong_layout.addWidget(self.phong_strength_value)
+        options_layout.addRow("Phong Strength:", phong_layout)
+
         # Generate VTF checkbox
         self.generate_vtf_checkbox = QCheckBox("Generate VTF")
         self.generate_vtf_checkbox.setChecked(True)
@@ -665,6 +751,15 @@ class FakePBRTool(BaseTool):
         self.auto_suffix.setPlaceholderText("e.g., _arctic")
         scan_form.addRow("Material Suffix:", self.auto_suffix)
 
+        # Recursive scan toggle
+        self.auto_recursive = QCheckBox("Include subfolders")
+        self.auto_recursive.setChecked(True)
+        self.auto_recursive.setToolTip(
+            "When enabled, the scan walks all subfolders of the input root. "
+            "When disabled, only files directly in the input root are scanned."
+        )
+        scan_form.addRow("Scan Recursively:", self.auto_recursive)
+
         scan_group.setLayout(scan_form)
         automate_layout.addWidget(scan_group)
 
@@ -694,6 +789,41 @@ class FakePBRTool(BaseTool):
         auto_gamma_row.addWidget(self.auto_gamma_value)
         auto_opt_form.addRow("Gloss Gamma:", self._row_widget(auto_gamma_row))
 
+        # Metal Diffuse Suppression
+        auto_metal_row = QHBoxLayout()
+        self.auto_metal_suppression_slider = QSlider(Qt.Horizontal)
+        self.auto_metal_suppression_slider.setRange(0, 100)
+        self.auto_metal_suppression_slider.setValue(70)
+        self.auto_metal_suppression_slider.setToolTip(
+            "How much to darken albedo on metal pixels. "
+            "0.00 = no darkening (metal keeps full albedo), "
+            "1.00 = fully darkened (metal becomes black diffuse)."
+        )
+        self.auto_metal_suppression_value = QLabel("0.70")
+        self.auto_metal_suppression_slider.valueChanged.connect(
+            lambda v: self.auto_metal_suppression_value.setText(f"{v/100:.2f}")
+        )
+        auto_metal_row.addWidget(self.auto_metal_suppression_slider)
+        auto_metal_row.addWidget(self.auto_metal_suppression_value)
+        auto_opt_form.addRow("Metal Diffuse Suppression:", self._row_widget(auto_metal_row))
+
+        # Phong Strength
+        auto_phong_row = QHBoxLayout()
+        self.auto_phong_strength_slider = QSlider(Qt.Horizontal)
+        self.auto_phong_strength_slider.setRange(0, 200)
+        self.auto_phong_strength_slider.setValue(50)
+        self.auto_phong_strength_slider.setToolTip(
+            "Scales the phong mask (bump alpha) and phong exponent map. "
+            "0.00 = no phong, 0.50 = halved (default), 1.00 = original strength."
+        )
+        self.auto_phong_strength_value = QLabel("0.50")
+        self.auto_phong_strength_slider.valueChanged.connect(
+            lambda v: self.auto_phong_strength_value.setText(f"{v/100:.2f}")
+        )
+        auto_phong_row.addWidget(self.auto_phong_strength_slider)
+        auto_phong_row.addWidget(self.auto_phong_strength_value)
+        auto_opt_form.addRow("Phong Strength:", self._row_widget(auto_phong_row))
+
         # Generate VTF
         self.auto_generate_vtf = QCheckBox("Generate VTF")
         self.auto_generate_vtf.setChecked(True)
@@ -708,6 +838,15 @@ class FakePBRTool(BaseTool):
         self.auto_generate_vmt = QCheckBox("Generate VMT")
         self.auto_generate_vmt.setChecked(True)
         auto_opt_form.addRow("Generate VMT:", self.auto_generate_vmt)
+
+        # Skip already-processed materials
+        self.auto_skip_existing = QCheckBox("Skip if VMT/VTF outputs already exist")
+        self.auto_skip_existing.setChecked(False)
+        self.auto_skip_existing.setToolTip(
+            "When enabled, materials whose .vmt and enabled .vtf outputs already "
+            "exist in the output folder are skipped."
+        )
+        auto_opt_form.addRow("Skip Existing:", self.auto_skip_existing)
 
         # Max parallel workers
         max_cpu = os.cpu_count() or 4
@@ -896,8 +1035,10 @@ class FakePBRTool(BaseTool):
             opts = entry.get('options', {})
             ao_val = float(opts.get('ao_strength', 0.5))
             gamma_val = float(opts.get('gloss_gamma', 2.2))
+            metal_supp_val = float(opts.get('metal_diffuse_suppression', 0.7))
             self.auto_ao_slider.setValue(int(ao_val * 100))
             self.auto_gamma_slider.setValue(int(gamma_val * 10))
+            self.auto_metal_suppression_slider.setValue(int(metal_supp_val * 100))
             self.auto_generate_vtf.setChecked(bool(opts.get('generate_vtf', True)))
             self.auto_generate_vmt.setChecked(bool(opts.get('generate_vmt', True)))
             self.auto_generate_mipmaps.setChecked(bool(opts.get('generate_mipmaps', True)))
@@ -933,8 +1074,10 @@ class FakePBRTool(BaseTool):
         try:
             ao_val = float(options.get('ao_strength', 0.5))
             gamma_val = float(options.get('gloss_gamma', 2.2))
+            metal_supp_val = float(options.get('metal_diffuse_suppression', 0.7))
             self.ao_strength_slider.setValue(int(ao_val * 100))
             self.gloss_gamma_slider.setValue(int(gamma_val * 10))
+            self.metal_suppression_slider.setValue(int(metal_supp_val * 100))
             self.generate_vtf_checkbox.setChecked(bool(options.get('generate_vtf', True)))
             self.generate_mipmaps_checkbox.setChecked(bool(options.get('generate_mipmaps', True)))
             self.generate_vmt_checkbox.setChecked(bool(options.get('generate_vmt', True)))
@@ -968,6 +1111,7 @@ class FakePBRTool(BaseTool):
             'options': {
                 'ao_strength': options.ao_strength,
                 'gloss_gamma': options.gloss_gamma,
+                'metal_diffuse_suppression': options.metal_diffuse_suppression,
                 'generate_vtf': options.generate_vtf,
                 'generate_vmt': options.generate_vmt,
                 'generate_mipmaps': options.generate_mipmaps
@@ -1006,6 +1150,7 @@ class FakePBRTool(BaseTool):
         opts = {
             'ao_strength': self.auto_ao_slider.value() / 100.0,
             'gloss_gamma': self.auto_gamma_slider.value() / 10.0,
+            'metal_diffuse_suppression': self.auto_metal_suppression_slider.value() / 100.0,
             'generate_vtf': self.auto_generate_vtf.isChecked(),
             'generate_vmt': self.auto_generate_vmt.isChecked(),
             'generate_mipmaps': self.auto_generate_mipmaps.isChecked(),
@@ -1072,6 +1217,8 @@ class FakePBRTool(BaseTool):
         return ProcessingOptions(
             ao_strength=self.ao_strength_slider.value() / 100.0,
             gloss_gamma=self.gloss_gamma_slider.value() / 10.0,
+            metal_diffuse_suppression=self.metal_suppression_slider.value() / 100.0,
+            phong_strength=self.phong_strength_slider.value() / 100.0,
             generate_vtf=self.generate_vtf_checkbox.isChecked(),
             generate_vmt=self.generate_vmt_checkbox.isChecked(),
             generate_mipmaps=self.generate_mipmaps_checkbox.isChecked()
@@ -1228,7 +1375,17 @@ class FakePBRTool(BaseTool):
         # Raw file listing per folder (for heuristic rescan even when a file didn't match in first pass)
         folder_files: Dict[str, list] = {}
         count_files = 0
-        for base, _, files in os.walk(root):
+        recursive = self.auto_recursive.isChecked()
+        if recursive:
+            walker = os.walk(root)
+        else:
+            try:
+                top_files = [f for f in os.listdir(root) if os.path.isfile(os.path.join(root, f))]
+            except OSError as e:
+                self.log(f"Cannot read input folder: {e}", "ERROR")
+                return
+            walker = [(root, [], top_files)]
+        for base, _, files in walker:
             for fn in files:
                 ext = os.path.splitext(fn)[1].lower()
                 if ext not in self._image_exts:
@@ -1321,6 +1478,25 @@ class FakePBRTool(BaseTool):
             return None
         return None
 
+    def _fakepbr_outputs_exist(self, output_folder: str, material_name: str,
+                               gen_vmt: bool, gen_vtf: bool) -> bool:
+        """Return True if all enabled outputs for this material already exist."""
+        if not output_folder:
+            return False
+        paths = []
+        if gen_vmt:
+            paths.append(os.path.join(output_folder, f"{material_name}.vmt"))
+        if gen_vtf:
+            paths.extend([
+                os.path.join(output_folder, f"{material_name}_color.vtf"),
+                os.path.join(output_folder, f"{material_name}_normal.vtf"),
+                os.path.join(output_folder, f"{material_name}_phong.vtf"),
+                os.path.join(output_folder, f"{material_name}_envmask.vtf"),
+            ])
+        if not paths:
+            return False
+        return all(os.path.exists(p) for p in paths)
+
     def process_all_materials(self):
         if not hasattr(self, '_scan_matches') or not self._scan_matches:
             self.log("No materials to process. Run Scan first.", "ERROR")
@@ -1333,7 +1509,13 @@ class FakePBRTool(BaseTool):
         # Options
         ao_strength = self.auto_ao_slider.value() / 100.0
         gloss_gamma = self.auto_gamma_slider.value() / 10.0
+        metal_suppression = self.auto_metal_suppression_slider.value() / 100.0
+        phong_strength = self.auto_phong_strength_slider.value() / 100.0
         gen_vmt = self.auto_generate_vmt.isChecked()
+
+        gen_vtf = self.auto_generate_vtf.isChecked()
+        skip_existing = self.auto_skip_existing.isChecked()
+        skipped_existing = 0
 
         # Collect tasks from checked rows
         tasks = []
@@ -1348,6 +1530,11 @@ class FakePBRTool(BaseTool):
             if not color or not normal:
                 self.log(f"Skipping '{key}': missing color or normal", "WARNING")
                 continue
+            material_name = f"{prefix}{key}{suffix}"
+            if skip_existing and self._fakepbr_outputs_exist(out_dir, material_name, gen_vmt, gen_vtf):
+                skipped_existing += 1
+                self.log(f"Skipping '{material_name}': outputs already exist", "INFO")
+                continue
             inputs = PBRInputs(
                 color=color,
                 normal=normal,
@@ -1358,16 +1545,20 @@ class FakePBRTool(BaseTool):
             tasks.append({
                 'inputs': inputs,
                 'output_folder': out_dir,
-                'material_name': f"{prefix}{key}{suffix}",
+                'material_name': material_name,
                 'material_path': mat_path,
                 'options': ProcessingOptions(
                     ao_strength=ao_strength,
                     gloss_gamma=gloss_gamma,
-                    generate_vtf=self.auto_generate_vtf.isChecked(),
+                    metal_diffuse_suppression=metal_suppression,
+                    phong_strength=phong_strength,
+                    generate_vtf=gen_vtf,
                     generate_vmt=gen_vmt,
                     generate_mipmaps=self.auto_generate_mipmaps.isChecked()
                 )
             })
+        if skip_existing and skipped_existing:
+            self.log(f"Skipped {skipped_existing} material(s) with existing outputs.", "INFO")
         if not tasks:
             self.log("No valid tasks to process.", "ERROR")
             return
@@ -1389,7 +1580,9 @@ class FakePBRTool(BaseTool):
             proc = FakePBRProcessor(ProcessingOptions(
                 ao_strength=ao_strength,
                 gloss_gamma=gloss_gamma,
-                generate_vtf=self.auto_generate_vtf.isChecked(),
+                metal_diffuse_suppression=metal_suppression,
+                phong_strength=phong_strength,
+                generate_vtf=gen_vtf,
                 generate_vmt=gen_vmt,
                 generate_mipmaps=self.auto_generate_mipmaps.isChecked()
             ))
