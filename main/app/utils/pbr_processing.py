@@ -324,13 +324,15 @@ def process_fakepbr_base_texture(
     ao: Optional[np.ndarray],
     metallic: Optional[np.ndarray],
     ao_strength: float = 0.7,
-    metal_diffuse_suppression: float = 0.85
+    metal_diffuse_suppression: float = 0.7,
+    translucency: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """Bake Source 1 stock-compatible Fake PBR albedo.
 
     RGB is AO-baked and darkened where metallic because Source 1 has no
-    metallic energy split. Alpha is kept opaque by default so it remains free
-    from accidental tint/translucency side effects.
+    metallic energy split. Alpha is normally opaque; when a translucency map
+    is supplied (Source 2 ``TextureTranslucency``) we bake it into the alpha
+    channel so $translucent / $alphatest VMTs see the right opacity.
     """
     from .image_processing import srgb_to_linear, linear_to_srgb, to_uint8
 
@@ -343,7 +345,18 @@ def process_fakepbr_base_texture(
     rgb_linear *= (1.0 - metal_diffuse_suppression * metallic_value[:, :, np.newaxis])
     rgb_srgb = np.clip(linear_to_srgb(rgb_linear), 0.0, 1.0)
 
-    alpha = np.ones((height, width), dtype=np.float32)
+    if translucency is not None:
+        # Translucency maps use a single channel; collapse to grayscale if RGB.
+        if translucency.ndim == 3:
+            alpha = translucency[:, :, 0]
+        else:
+            alpha = translucency
+        alpha = np.clip(alpha.astype(np.float32), 0.0, 1.0)
+    elif color.shape[2] >= 4:
+        # Fall back to the color texture's own alpha channel.
+        alpha = np.clip(color[:, :, 3].astype(np.float32), 0.0, 1.0)
+    else:
+        alpha = np.ones((height, width), dtype=np.float32)
     return to_uint8(np.dstack([rgb_srgb, alpha]), clip=True)
 
 
@@ -352,15 +365,22 @@ def build_phong_mask(
     metallic: Optional[np.ndarray],
     ao: Optional[np.ndarray],
     height: int,
-    width: int
+    width: int,
+    strength: float = 0.5
 ) -> np.ndarray:
-    """Build the bumpmap alpha Phong mask recommended by the Fake PBR guide."""
+    """Build the bumpmap alpha Phong mask recommended by the Fake PBR guide.
+
+    `strength` scales the final mask amplitude (default 0.5 — historical
+    output has been halved because the unscaled mask reads as too hot
+    in-engine). 0.0 disables phong entirely; 1.0 is the original formula.
+    """
     ao_value, roughness_value, metallic_value = _match_scalar_inputs(height, width, ao, roughness, metallic)
     phong_mask = (
         (1.0 - roughness_value) * (0.04 + 0.96 * metallic_value) +
         0.04 * (1.0 - metallic_value)
     )
     phong_mask *= ao_value
+    phong_mask *= max(0.0, float(strength))
     return np.clip(phong_mask, 0.0, 1.0)
 
 
@@ -369,7 +389,8 @@ def pack_normal_with_phong_mask(
     ao: Optional[np.ndarray],
     metallic: Optional[np.ndarray],
     roughness: Optional[np.ndarray],
-    invert_green: bool = False
+    invert_green: bool = False,
+    phong_strength: float = 0.5
 ) -> np.ndarray:
     """Pack a Source bumpmap: RGB tangent normal, alpha Phong mask."""
     from .image_processing import to_uint8
@@ -379,7 +400,7 @@ def pack_normal_with_phong_mask(
         normal_rgb[:, :, 1] = 1.0 - normal_rgb[:, :, 1]
 
     height, width = normal_rgb.shape[:2]
-    phong_mask = build_phong_mask(roughness, metallic, ao, height, width)
+    phong_mask = build_phong_mask(roughness, metallic, ao, height, width, strength=phong_strength)
     return to_uint8(np.dstack([normal_rgb, phong_mask]), clip=True)
 
 
@@ -389,9 +410,14 @@ def create_phong_exponent_texture(
     ao: Optional[np.ndarray],
     gloss_gamma: float = 2.0,
     height: int = 512,
-    width: int = 512
+    width: int = 512,
+    phong_strength: float = 0.5
 ) -> np.ndarray:
-    """Create $phongexponenttexture: R=exponent, G=metallic, A=rim mask."""
+    """Create $phongexponenttexture: R=exponent, G=metallic, A=rim mask.
+
+    `phong_strength` scales the R (exponent) channel — lower values yield
+    a softer/weaker specular response (default 0.5 halves the prior output).
+    """
     from .image_processing import to_uint8
 
     if roughness is not None:
@@ -403,6 +429,7 @@ def create_phong_exponent_texture(
 
     _, roughness_value, metallic_value = _match_scalar_inputs(height, width, ao, roughness, metallic)
     exp_r = np.power(np.clip(1.0 - roughness_value, 0.0, 1.0), gloss_gamma)
+    exp_r = np.clip(exp_r * max(0.0, float(phong_strength)), 0.0, 1.0)
     exp_g = metallic_value
     exp_b = np.zeros((height, width), dtype=np.float32)
     exp_a = np.ones((height, width), dtype=np.float32)
