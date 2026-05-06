@@ -114,7 +114,7 @@ def generate_fakepbr_vmt(
     smoothness = _clamp(1.0 - avg_roughness, 0.0, 1.0)
     b_is_rough_dielectric = bool(getattr(stats, "b_is_rough_dielectric", False)) if stats else False
 
-    phong_boost = _clamp(8.0 * smoothness ** 2.0 + 0.25, 0.25, 12.0)
+    phong_boost = _clamp(96.0 * smoothness ** 2.0 + 2.0, 2.0, 128.0)
     envmaptint_scalar = _clamp(0.02 + 0.5 * smoothness ** 2.0, 0.02, 0.5)
 
     if avg_metallic > 0.5 and avg_roughness < 0.35:
@@ -169,7 +169,7 @@ def generate_fakepbr_vmt(
         params.update({
             "\"$rimlight\"": "1",
             "\"$rimlightexponent\"": "4",
-            "\"$rimlightboost\"": "1.5",
+            "\"$rimlightboost\"": "0.75",
             "\"$rimmask\"": "1",
             "\"$halflambert\"": "0",
             "\"$model\"": "1",
