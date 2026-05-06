@@ -48,6 +48,11 @@ class ExoPBRInputs:
     selfillum: Optional[str] = None
     height: Optional[str] = None
     transparency_mask: Optional[str] = None
+    # Uniform PBR scalars from Source 2 vmat fields (g_flMetalness /
+    # g_flRoughness). When set without a corresponding texture, the processor
+    # synthesises a flat single-value array.
+    metallic_constant: Optional[float] = None
+    roughness_constant: Optional[float] = None
 
 
 @dataclass
@@ -139,13 +144,21 @@ class ExoPBRProcessor:
             roughness_data = load_image(inputs.roughness)
             if roughness_data is not None:
                 self.log(f"  ✓ Loaded roughness map: {os.path.basename(inputs.roughness)}")
+            elif inputs.roughness_constant is not None:
+                value = float(np.clip(inputs.roughness_constant, 0.0, 1.0))
+                roughness_data = np.full((4, 4, 1), value, dtype=np.float32)
+                self.log(f"  ✓ Synthesised uniform roughness from g_flRoughness = {value:.3f}")
             else:
                 self.log("  ℹ No roughness map provided (will use default: 1.0)")
             self._check_cancel()
-            
+
             metallic_data = load_image(inputs.metallic)
             if metallic_data is not None:
                 self.log(f"  ✓ Loaded metallic map: {os.path.basename(inputs.metallic)}")
+            elif inputs.metallic_constant is not None:
+                value = float(np.clip(inputs.metallic_constant, 0.0, 1.0))
+                metallic_data = np.full((4, 4, 1), value, dtype=np.float32)
+                self.log(f"  ✓ Synthesised uniform metallic from g_flMetalness = {value:.3f}")
             else:
                 self.log("  ℹ No metallic map provided (will use dielectric: 0.0)")
             self._check_cancel()
@@ -781,6 +794,15 @@ class ExoPBRTool(BaseTool):
         self.auto_suffix.setPlaceholderText("e.g., _mat")
         scan_form.addRow("Material Suffix:", self.auto_suffix)
 
+        # Recursive scan toggle
+        self.auto_recursive = QCheckBox("Include subfolders")
+        self.auto_recursive.setChecked(True)
+        self.auto_recursive.setToolTip(
+            "When enabled, the scan walks all subfolders of the input root. "
+            "When disabled, only files directly in the input root are scanned."
+        )
+        scan_form.addRow("Scan Recursively:", self.auto_recursive)
+
         scan_group.setLayout(scan_form)
         automate_layout.addWidget(scan_group)
 
@@ -823,6 +845,15 @@ class ExoPBRTool(BaseTool):
         self.auto_generate_vmt = QCheckBox("Generate VMT")
         self.auto_generate_vmt.setChecked(True)
         auto_opt_form.addRow("Generate VMT:", self.auto_generate_vmt)
+
+        # Skip already-processed materials
+        self.auto_skip_existing = QCheckBox("Skip if VMT/VTF outputs already exist")
+        self.auto_skip_existing.setChecked(False)
+        self.auto_skip_existing.setToolTip(
+            "When enabled, materials whose .vmt and enabled .vtf outputs already "
+            "exist in the output folder are skipped."
+        )
+        auto_opt_form.addRow("Skip Existing:", self.auto_skip_existing)
 
         # Max parallel workers
         max_cpu = os.cpu_count() or 4
@@ -1330,7 +1361,17 @@ class ExoPBRTool(BaseTool):
         folder_index: Dict[str, Dict[str, Dict[str, str]]] = {}
         folder_files: Dict[str, list] = {}
         count_files = 0
-        for base, _, files in os.walk(root):
+        recursive = self.auto_recursive.isChecked()
+        if recursive:
+            walker = os.walk(root)
+        else:
+            try:
+                top_files = [f for f in os.listdir(root) if os.path.isfile(os.path.join(root, f))]
+            except OSError as e:
+                self.log(f"Cannot read input folder: {e}", "ERROR")
+                return
+            walker = [(root, [], top_files)]
+        for base, _, files in walker:
             for fn in files:
                 ext = os.path.splitext(fn)[1].lower()
                 if ext not in self._image_exts:
@@ -1403,6 +1444,26 @@ class ExoPBRTool(BaseTool):
                 self.scan_table.setItem(row, col, item)
         self._scan_matches = matches
 
+    def _exopbr_outputs_exist(self, output_folder: str, material_name: str,
+                              gen_vmt: bool, gen_vtf: bool, has_selfillum: bool) -> bool:
+        """Return True if all enabled outputs for this material already exist."""
+        if not output_folder:
+            return False
+        paths = []
+        if gen_vmt:
+            paths.append(os.path.join(output_folder, f"{material_name}.vmt"))
+        if gen_vtf:
+            paths.extend([
+                os.path.join(output_folder, f"{material_name}_base.vtf"),
+                os.path.join(output_folder, f"{material_name}_arm.vtf"),
+                os.path.join(output_folder, f"{material_name}_normal.vtf"),
+            ])
+            if has_selfillum:
+                paths.append(os.path.join(output_folder, f"{material_name}_emissive.vtf"))
+        if not paths:
+            return False
+        return all(os.path.exists(p) for p in paths)
+
     def process_all_materials(self):
         """Process all selected materials in automation tab"""
         if not hasattr(self, '_scan_matches') or not self._scan_matches:
@@ -1418,6 +1479,9 @@ class ExoPBRTool(BaseTool):
         parallax = float(self.auto_parallax_spin.value()) if hasattr(self, 'auto_parallax_spin') else 0.0
         alphablend = self.auto_alphablend.isChecked()
         gen_vmt = self.auto_generate_vmt.isChecked()
+        gen_vtf = self.auto_generate_vtf.isChecked()
+        skip_existing = self.auto_skip_existing.isChecked()
+        skipped_existing = 0
 
         # Collect tasks from checked rows
         tasks = []
@@ -1430,6 +1494,12 @@ class ExoPBRTool(BaseTool):
             normal = data.get('normal')
             if not color or not normal:
                 self.log(f"Skipping '{key}': missing color or normal", "WARNING")
+                continue
+            material_name = f"{prefix}{key}{suffix}"
+            has_selfillum = bool(data.get('selfillum'))
+            if skip_existing and self._exopbr_outputs_exist(out_dir, material_name, gen_vmt, gen_vtf, has_selfillum):
+                skipped_existing += 1
+                self.log(f"Skipping '{material_name}': outputs already exist", "INFO")
                 continue
             inputs = ExoPBRInputs(
                 color=color,
@@ -1444,10 +1514,10 @@ class ExoPBRTool(BaseTool):
             tasks.append({
                 'inputs': inputs,
                 'output_folder': out_dir,
-                'material_name': f"{prefix}{key}{suffix}",
+                'material_name': material_name,
                 'material_path': mat_path,
                 'options': ExoPBROptions(
-                    generate_vtf=self.auto_generate_vtf.isChecked(),
+                    generate_vtf=gen_vtf,
                     generate_vmt=gen_vmt,
                     generate_mipmaps=self.auto_generate_mipmaps.isChecked(),
                     emissionscale=emission,
@@ -1455,6 +1525,8 @@ class ExoPBRTool(BaseTool):
                     alphablend=alphablend
                 )
             })
+        if skip_existing and skipped_existing:
+            self.log(f"Skipped {skipped_existing} material(s) with existing outputs.", "INFO")
         if not tasks:
             self.log("No valid tasks to process.", "ERROR")
             return
