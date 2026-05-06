@@ -16,53 +16,14 @@ from typing import Optional, Tuple
 import numpy as np
 import trimesh
 
-from srctools.math import Vec
-from srctools.smd import Mesh, Triangle, Vertex
+from srctools.math import Angle, Vec
+from srctools.smd import BoneFrame, Mesh, Triangle, Vertex
 
-
-def _resolve_uvs(mesh: trimesh.Trimesh, uv_mode: str, force_uv_zero: bool) -> Optional[np.ndarray]:
-    if force_uv_zero:
-        return None
-    try:
-        raw_uvs = mesh.visual.uv
-    except Exception:
-        return None
-    if raw_uvs is None or len(raw_uvs) != len(mesh.vertices):
-        return None
-
-    if uv_mode == 'wrap':
-        return np.mod(raw_uvs, 1.0)
-    if uv_mode == 'clamp':
-        return np.clip(raw_uvs, 0.0, 1.0)
-    if uv_mode == 'normalize':
-        uv_min = np.min(raw_uvs, axis=0)
-        uv_range = np.max(raw_uvs, axis=0) - uv_min
-        if uv_range[0] > 1e-6 and uv_range[1] > 1e-6:
-            return (raw_uvs - uv_min) / uv_range
-        return raw_uvs
-    return raw_uvs  # 'preserve'
-
-
-def _resolve_face_materials(mesh: trimesh.Trimesh) -> Tuple[Optional[np.ndarray], Optional[list]]:
-    if not hasattr(mesh, 'metadata') or not mesh.metadata:
-        return (None, None)
-    names = mesh.metadata.get('gltf_material_names')
-    face_mat = mesh.metadata.get('gltf_face_materials')
-    if face_mat is None or names is None:
-        return (None, None)
-    return (np.asarray(face_mat), list(names))
-
-
-def _pick_material(face_idx: int, face_materials: Optional[np.ndarray],
-                   material_names: Optional[list], fallback: str) -> str:
-    if face_materials is None or material_names is None:
-        return fallback
-    if face_idx >= len(face_materials):
-        return fallback
-    mat_idx = int(face_materials[face_idx])
-    if 0 <= mat_idx < len(material_names):
-        return material_names[mat_idx]
-    return fallback
+from .smd_export_helpers import (
+    resolve_uvs as _resolve_uvs,
+    resolve_face_materials as _resolve_face_materials,
+    pick_material as _pick_material,
+)
 
 
 class SmdExporter:
@@ -77,11 +38,18 @@ class SmdExporter:
         force_uv_zero: bool = False,
         override_normals: Optional[np.ndarray] = None,
         uv_mode: str = 'preserve',
+        root_bind: Optional[Tuple[Tuple[float, float, float], Tuple[float, float, float]]] = None,
     ) -> Tuple[bool, str]:
         """Write static SMD with single root bone. Drop-in for the deleted SmdWriter.
 
         Args:
             uv_mode: 'preserve' | 'wrap' | 'clamp' | 'normalize'.
+            root_bind: Optional ``(pos_xyz, pyr_degrees)`` to author into the
+                root bone's frame-0 BoneFrame. Use this when the SMD will be
+                referenced as ``$collisionmodel`` for an animated model whose
+                main skeleton's root bone has a non-identity bind — the physics
+                root must match so studiomdl's ``inv(phys_root) * main_root``
+                cancels at runtime instead of double-rotating the physics mesh.
 
         Returns:
             (success, warning_message). warning_message empty on success.
@@ -131,6 +99,17 @@ class SmdExporter:
 
         smd = Mesh.blank("root")
         root_bone = smd.root_bone()
+        if root_bind is not None:
+            (rx, ry, rz), (rpit, ryaw, rrol) = root_bind
+            # SMD bone-rotation columns are (rot_x, rot_y, rot_z) = (roll,
+            # pitch, yaw). srctools' BoneFrame writes Angle(pitch, yaw, roll)
+            # verbatim into those columns, so we stuff (roll, pitch, yaw)
+            # into the (pitch, yaw, roll) slots to land in the right columns.
+            smd.animation[0] = [BoneFrame(
+                root_bone,
+                Vec(float(rx), float(ry), float(rz)),
+                Angle(float(rrol), float(rpit), float(ryaw)),
+            )]
         links = [(root_bone, 1.0)]
 
         default_normal = (0.0, 0.0, 1.0)
