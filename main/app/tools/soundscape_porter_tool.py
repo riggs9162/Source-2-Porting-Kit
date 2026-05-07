@@ -680,8 +680,8 @@ class SoundscapePorterTab(QWidget):
         
         layout.addWidget(options_group)
         
-        # Conversion button
-        self.convert_button = QPushButton("Convert to Source 1 Format")
+        # Conversion button — canonical label for batch/converter tools.
+        self.convert_button = QPushButton("Convert")
         self.convert_button.setStyleSheet("font-weight: bold;")
         self.convert_button.clicked.connect(self.convert_soundscape)
         layout.addWidget(self.convert_button)
