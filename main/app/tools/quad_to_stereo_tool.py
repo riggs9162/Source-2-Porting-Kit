@@ -258,33 +258,37 @@ class QuadToStereoTool(BaseTool):
         options_group = QGroupBox("Options")
         options_layout = QVBoxLayout()
 
-        self.overwrite_check = QCheckBox("Overwrite existing files")
+        self.overwrite_check = QCheckBox("Replace existing outputs")
         self.overwrite_check.setChecked(False)
+        self.overwrite_check.setToolTip(
+            "Overwrite outputs that already exist in the destination folder."
+        )
         options_layout.addWidget(self.overwrite_check)
 
-        self.delete_originals_check = QCheckBox("Delete original quad files after conversion")
+        self.delete_originals_check = QCheckBox("Delete originals after conversion")
         self.delete_originals_check.setChecked(False)
         options_layout.addWidget(self.delete_originals_check)
 
         options_group.setLayout(options_layout)
         self.content_layout.addWidget(options_group)
 
-        # Action buttons
+        # Action buttons — Scan on the left, Cancel + Process right-aligned.
         button_row = QHBoxLayout()
-        self.scan_btn = QPushButton("Scan for Quad Groups")
+        self.scan_btn = QPushButton("Scan")
         self.scan_btn.clicked.connect(self.scan_quad_groups)
         button_row.addWidget(self.scan_btn)
 
-        self.convert_btn = QPushButton("Convert to Stereo")
-        self.convert_btn.clicked.connect(self.start_conversion)
-        button_row.addWidget(self.convert_btn)
+        button_row.addStretch()
 
         self.cancel_btn = QPushButton("Cancel")
         self.cancel_btn.setEnabled(False)
         self.cancel_btn.clicked.connect(self.cancel_worker)
         button_row.addWidget(self.cancel_btn)
 
-        button_row.addStretch()
+        self.convert_btn = QPushButton("Process")
+        self.convert_btn.clicked.connect(self.start_conversion)
+        button_row.addWidget(self.convert_btn)
+
         self.content_layout.addLayout(button_row)
 
     def on_format_changed(self, format_str: str):
