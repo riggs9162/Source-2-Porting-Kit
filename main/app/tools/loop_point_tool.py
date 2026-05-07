@@ -225,19 +225,26 @@ class LoopPointTool(BaseTool):
         src_layout.addLayout(path_row)
 
         options_row = QHBoxLayout()
-        self.recursive_check = QCheckBox("Recurse subfolders")
+        self.recursive_check = QCheckBox("Recursive (include subfolders)")
         self.recursive_check.setChecked(True)
+        self.recursive_check.setToolTip(
+            "When on, scan all subfolders of the input. When off, scan only "
+            "the input folder itself."
+        )
         options_row.addWidget(self.recursive_check)
 
         self.process_wav_check = QCheckBox("Add loop chunk to existing WAV")
         self.process_wav_check.setChecked(True)
         options_row.addWidget(self.process_wav_check)
 
-        self.overwrite_check = QCheckBox("Overwrite existing WAV")
+        self.overwrite_check = QCheckBox("Replace existing outputs")
         self.overwrite_check.setChecked(True)
+        self.overwrite_check.setToolTip(
+            "Overwrite outputs that already exist in the destination folder."
+        )
         options_row.addWidget(self.overwrite_check)
 
-        self.delete_original_check = QCheckBox("Delete original after conversion")
+        self.delete_original_check = QCheckBox("Delete originals after conversion")
         self.delete_original_check.setChecked(True)
         options_row.addWidget(self.delete_original_check)
 
@@ -258,18 +265,20 @@ class LoopPointTool(BaseTool):
         detect_group.setLayout(detect_layout)
         self.content_layout.addWidget(detect_group)
 
-        # Action buttons
+        # Action buttons — Cancel + primary action right-aligned, like the
+        # other batch tools.
         action_row = QHBoxLayout()
-        self.run_btn = QPushButton("Convert && Add Loop Points")
-        self.run_btn.clicked.connect(self.start_conversion)
-        action_row.addWidget(self.run_btn)
+        action_row.addStretch()
 
         self.cancel_btn = QPushButton("Cancel")
         self.cancel_btn.setEnabled(False)
         self.cancel_btn.clicked.connect(self.cancel_worker)
         action_row.addWidget(self.cancel_btn)
 
-        action_row.addStretch()
+        self.run_btn = QPushButton("Process")
+        self.run_btn.clicked.connect(self.start_conversion)
+        action_row.addWidget(self.run_btn)
+
         self.content_layout.addLayout(action_row)
 
     def select_file(self):
