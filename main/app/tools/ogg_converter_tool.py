@@ -231,11 +231,14 @@ class OggConverterTool(BaseTool):
         settings_layout.addLayout(quality_row)
 
         # Options
-        self.overwrite_check = QCheckBox("Overwrite existing OGG files")
+        self.overwrite_check = QCheckBox("Replace existing outputs")
         self.overwrite_check.setChecked(False)
+        self.overwrite_check.setToolTip(
+            "Overwrite outputs that already exist in the destination folder."
+        )
         settings_layout.addWidget(self.overwrite_check)
 
-        self.delete_original_check = QCheckBox("Delete original files after conversion")
+        self.delete_original_check = QCheckBox("Delete originals after conversion")
         self.delete_original_check.setChecked(False)
         settings_layout.addWidget(self.delete_original_check)
 
@@ -251,19 +254,19 @@ class OggConverterTool(BaseTool):
         info_label.setWordWrap(True)
         self.content_layout.addWidget(info_label)
 
-        # Action buttons
+        # Action buttons — Cancel + primary action right-aligned, like the
+        # other batch tools.
         button_row = QHBoxLayout()
-        
-        self.convert_btn = QPushButton("Convert to OGG")
-        self.convert_btn.clicked.connect(self.start_conversion)
-        button_row.addWidget(self.convert_btn)
+        button_row.addStretch()
 
         self.cancel_btn = QPushButton("Cancel")
         self.cancel_btn.setEnabled(False)
         self.cancel_btn.clicked.connect(self.cancel_worker)
         button_row.addWidget(self.cancel_btn)
 
-        button_row.addStretch()
+        self.convert_btn = QPushButton("Process")
+        self.convert_btn.clicked.connect(self.start_conversion)
+        button_row.addWidget(self.convert_btn)
         self.content_layout.addLayout(button_row)
 
     def select_folder(self):
