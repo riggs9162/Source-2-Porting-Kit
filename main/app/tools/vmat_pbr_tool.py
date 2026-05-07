@@ -20,9 +20,10 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFileDialog,
     QLineEdit, QGroupBox, QDoubleSpinBox, QCheckBox,
     QProgressBar, QFormLayout, QWidget, QComboBox, QTableWidget,
-    QTableWidgetItem, QHeaderView, QAbstractItemView, QSlider, QStackedWidget
+    QTableWidgetItem, QHeaderView, QAbstractItemView, QSlider, QStackedWidget,
+    QSplitter, QScrollArea, QGridLayout, QSizePolicy,
 )
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt, QThread, Signal, QEvent
 
 from .base_tool import BaseTool
 from .fake_pbr_tool import FakePBRProcessor, ProcessingOptions, PBRInputs, _paint_table_row
@@ -62,6 +63,13 @@ class VmatEntry:
     # missing maps with synthesised uniform images at process time.
     metallic_constant: Optional[float] = None
     roughness_constant: Optional[float] = None
+    # Self-illumination from F_SELF_ILLUM + g_vSelfIllumTint + g_flSelfIllumBrightness.
+    # selfillum is the master toggle: when True, the FakePBR/ExoPBR processor
+    # emits $selfillum 1 with the resolved emissive texture as $selfillummask.
+    # Tint is folded with brightness into $selfillumtint at VMT-write time.
+    selfillum: bool = False
+    selfillum_tint: Optional[Tuple[float, float, float]] = None
+    selfillum_brightness: Optional[float] = None
 
 
 class VmatParser:
@@ -71,6 +79,9 @@ class VmatParser:
     SHADER_PATTERN = re.compile(r'"shader"\s+"(?P<value>[^"]+)"', re.IGNORECASE)
     FLAG_PATTERN = re.compile(r'"(?P<key>F_[A-Z_]+)"\s+"(?P<value>[01])"')
     SCALAR_PATTERN = re.compile(r'"(?P<key>g_fl[A-Za-z0-9_]+)"\s+"(?P<value>-?[0-9.]+)"')
+    # Vector literals look like:  "g_vSelfIllumTint" "[1.000000 1.000000 1.000000 0.000000]"
+    # We capture the bracketed value verbatim so the body can split it.
+    VECTOR_PATTERN = re.compile(r'"(?P<key>g_v[A-Za-z0-9_]+)"\s+"(?P<value>\[[^"]+\])"')
     IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".tga", ".bmp", ".tif", ".tiff"}
 
     # Source 2 shader names that imply transparent rendering even without an
@@ -250,6 +261,24 @@ class VmatParser:
         metallic_constant = _parse_scalar("g_flMetalness")
         roughness_constant = _parse_scalar("g_flRoughness")
 
+        vectors: Dict[str, str] = dict(self.VECTOR_PATTERN.findall(text))
+
+        def _parse_vec3(key: str) -> Optional[Tuple[float, float, float]]:
+            raw_val = vectors.get(key)
+            if raw_val is None:
+                return None
+            inner = raw_val.strip().lstrip("[").rstrip("]")
+            parts = [p for p in inner.replace(",", " ").split() if p]
+            if len(parts) < 3:
+                return None
+            try:
+                return (float(parts[0]), float(parts[1]), float(parts[2]))
+            except ValueError:
+                return None
+
+        selfillum_tint = _parse_vec3("g_vSelfIllumTint")
+        selfillum_brightness = _parse_scalar("g_flSelfIllumBrightness")
+
         shader_match = self.SHADER_PATTERN.search(text)
         shader_name = (shader_match.group("value").lower() if shader_match else "")
         translucent = (
@@ -345,6 +374,16 @@ class VmatParser:
         if textures.translucency is not None and not translucent and not alphatest:
             translucent = True
 
+        # Self-illumination is enabled when either F_SELF_ILLUM is set OR a
+        # selfillum mask was discovered (TextureSelfIllumMask, or a
+        # *_selfillum sibling texture). The latter handles vmats that didn't
+        # bother flipping the flag but still ship a glow mask.
+        selfillum = flags.get("F_SELF_ILLUM") == "1"
+        if textures.emissive is not None and not selfillum:
+            selfillum = True
+        if selfillum and textures.emissive is None:
+            warnings.append("F_SELF_ILLUM set but no selfillum mask found")
+
         rel_dir = vmat_path.parent
         if vmat_root in vmat_path.parents:
             rel_dir = vmat_path.parent.relative_to(vmat_root)
@@ -360,6 +399,9 @@ class VmatParser:
             alphatest=alphatest,
             metallic_constant=metallic_constant,
             roughness_constant=roughness_constant,
+            selfillum=selfillum,
+            selfillum_tint=selfillum_tint,
+            selfillum_brightness=selfillum_brightness,
         )
 
 
@@ -391,6 +433,10 @@ class VmatBatchRunner(QThread):
         generate_vtf: bool,
         generate_vmt: bool,
         generate_mipmaps: bool,
+        glow_mode: str = "selfillum",
+        transparency_mode: str = "auto",
+        skip_existing: bool = False,
+        synthesize_missing_maps: bool = False,
         row_indices: Optional[List[int]] = None,
     ):
         super().__init__()
@@ -415,6 +461,10 @@ class VmatBatchRunner(QThread):
         self.generate_vtf = generate_vtf
         self.generate_vmt = generate_vmt
         self.generate_mipmaps = generate_mipmaps
+        self.glow_mode = glow_mode
+        self.transparency_mode = transparency_mode
+        self.skip_existing = skip_existing
+        self.synthesize_missing_maps = synthesize_missing_maps
         # Parallel list of QTableWidget row indices (-1 = no row), used to
         # report per-row completion back to the UI.
         self.row_indices = list(row_indices) if row_indices else [-1] * len(entries)
@@ -432,6 +482,52 @@ class VmatBatchRunner(QThread):
             return f"{self.material_path}/{rel}"
         return self.material_path
 
+    def _resolve_transparency(self, entry: VmatEntry) -> Tuple[bool, bool]:
+        """Resolve the (translucent, alphatest) pair to use for one entry.
+
+        ``transparency_mode`` of ``"auto"`` keeps whatever the parser detected
+        from F_TRANSLUCENT / F_ALPHA_TEST / shader name. Forced modes only
+        kick in when the entry already had *some* form of transparency
+        intent — we don't add transparency to materials that were authored
+        opaque, since that would silently break their basetexture alpha
+        channel. ``"opaque"`` strips both flags so the material renders solid
+        regardless of what the source vmat asked for.
+        """
+        translucent = entry.translucent
+        alphatest = entry.alphatest
+        mode = (self.transparency_mode or "auto").lower()
+        if mode == "auto":
+            return translucent, alphatest
+        had_transparency = translucent or alphatest or entry.textures.translucency is not None
+        if mode == "opaque":
+            return False, False
+        if not had_transparency:
+            return translucent, alphatest
+        if mode == "translucent":
+            return True, False
+        if mode == "alphatest":
+            return False, True
+        return translucent, alphatest
+
+    def _should_skip(self, output_dir: Path, material_name: str) -> bool:
+        """Decide whether to skip an entry because its outputs already exist.
+
+        Treat the .vmt as the canonical "done" marker when VMT generation is
+        on — it is the file the user actually edits, so we shouldn't clobber
+        it. When VMT generation is off, fall back to the basetexture .vtf
+        since that's the only reliable artefact the run produces.
+        """
+        if not self.skip_existing:
+            return False
+        if self.generate_vmt:
+            if (output_dir / f"{material_name}.vmt").exists():
+                return True
+        if self.generate_vtf:
+            base_vtf = "_color.vtf" if self.mode == "Fake PBR" else "_base.vtf"
+            if (output_dir / f"{material_name}{base_vtf}").exists():
+                return True
+        return False
+
     def run(self):
         total = len(self.entries)
         if total == 0:
@@ -439,6 +535,7 @@ class VmatBatchRunner(QThread):
             return
 
         ok_count = 0
+        skipped_count = 0
         for idx, entry in enumerate(self.entries, start=1):
             if self.isInterruptionRequested():
                 self.finished.emit(False, f"Cancelled after {ok_count}/{total}")
@@ -446,16 +543,37 @@ class VmatBatchRunner(QThread):
 
             row = self.row_indices[idx - 1] if idx - 1 < len(self.row_indices) else -1
             tex = entry.textures
-            if tex.color is None or tex.normal is None:
-                self.progress.emit(idx, total, f"✗ {entry.name}: missing color or normal")
+            # Color is always required (can't invent the diffuse). Normal is
+            # required UNLESS the user opted into blank-map synthesis, in
+            # which case the processor will materialise a flat tangent normal.
+            missing_required = tex.color is None or (
+                tex.normal is None and not self.synthesize_missing_maps
+            )
+            if missing_required:
+                if tex.color is None:
+                    reason = "missing color"
+                else:
+                    reason = "missing normal (enable 'Synthesize missing maps' to bypass)"
+                self.progress.emit(idx, total, f"✗ {entry.name}: {reason}")
                 if row >= 0:
                     self.row_finished.emit(row, False)
                 continue
 
             output_dir = self._output_dir_for(entry)
-            os.makedirs(output_dir, exist_ok=True)
             material_name = f"{self.prefix}{entry.name}{self.suffix}"
             mat_path = self._material_path_for(entry)
+
+            if self._should_skip(output_dir, material_name):
+                skipped_count += 1
+                self.progress.emit(idx, total, f"↷ {entry.name}: skipped (already exists)")
+                # Don't paint the row green — it's not a fresh success — but
+                # also don't leave it red. row_finished emits its own status,
+                # so we just skip the signal and let the row stay neutral.
+                continue
+
+            os.makedirs(output_dir, exist_ok=True)
+
+            translucent, alphatest = self._resolve_transparency(entry)
 
             try:
                 if self.mode == "Fake PBR":
@@ -469,10 +587,20 @@ class VmatBatchRunner(QThread):
                         phong_strength=self.fake_phong_strength,
                         phong_tint_mode=self.fake_phong_tint_mode,
                         colored_metal_relief=self.fake_colored_metal_relief,
-                        translucent=entry.translucent,
-                        alphatest=entry.alphatest,
+                        translucent=translucent,
+                        alphatest=alphatest,
+                        glow_mode=self.glow_mode,
+                        synthesize_missing_maps=self.synthesize_missing_maps,
                     )
                     processor = FakePBRProcessor(options)
+                    # Selfillum mask is only fed in when the vmat actually
+                    # asked for it (F_SELF_ILLUM or an emissive sibling). The
+                    # mask file alone without entry.selfillum is dropped on the
+                    # floor — Source 2's emission textures don't always mean
+                    # Source 1 selfillum is appropriate.
+                    selfillum_path = (
+                        str(tex.emissive) if entry.selfillum and tex.emissive else None
+                    )
                     inputs = PBRInputs(
                         color=str(tex.color),
                         normal=str(tex.normal),
@@ -482,6 +610,9 @@ class VmatBatchRunner(QThread):
                         translucency=str(tex.translucency) if tex.translucency else None,
                         metallic_constant=entry.metallic_constant,
                         roughness_constant=entry.roughness_constant,
+                        selfillum=selfillum_path,
+                        selfillum_tint=entry.selfillum_tint,
+                        selfillum_brightness=entry.selfillum_brightness,
                     )
                     try:
                         success, msg = processor.process_material(inputs, str(output_dir), material_name, mat_path)
@@ -489,8 +620,9 @@ class VmatBatchRunner(QThread):
                         processor.shutdown()
                 else:
                     # Force alphablend on when the source vmat declares translucency,
-                    # regardless of UI checkbox — the vmat is authoritative.
-                    alphablend = self.exo_alphablend or entry.translucent or entry.alphatest
+                    # regardless of UI checkbox — the vmat is authoritative,
+                    # subject to the user's transparency-mode override above.
+                    alphablend = self.exo_alphablend or translucent or alphatest
                     options = ExoPBROptions(
                         generate_vtf=self.generate_vtf,
                         generate_vmt=self.generate_vmt,
@@ -529,7 +661,10 @@ class VmatBatchRunner(QThread):
             if row >= 0:
                 self.row_finished.emit(row, success)
 
-        self.finished.emit(True, f"Processed {ok_count}/{total} materials")
+        summary = f"Processed {ok_count}/{total} materials"
+        if skipped_count:
+            summary += f" ({skipped_count} skipped, already exists)"
+        self.finished.emit(True, summary)
 
 
 class VmatPBRTool(BaseTool):
@@ -549,64 +684,95 @@ class VmatPBRTool(BaseTool):
         self.setup_content()
 
     def setup_content(self):
-        layout = QVBoxLayout()
-        self.content_layout.addLayout(layout)
+        """Two-pane layout: settings on the left (scrollable), results on
+        the right (always visible). The splitter handle lets the user grow
+        either side; default 1:2 ratio keeps the results table primary."""
+        root = QHBoxLayout()
+        self.content_layout.addLayout(root)
 
-        # Previous runs
-        history_group = QGroupBox("Previous Runs")
-        history_form = QFormLayout()
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.setChildrenCollapsible(False)
+        splitter.addWidget(self._build_settings_pane())
+        splitter.addWidget(self._build_results_pane())
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 2)
+        splitter.setSizes([420, 760])
+        root.addWidget(splitter)
+
+        # Apply mode-driven defaults once the widgets are wired.
+        self._sync_mode_defaults(self.mode_combo.currentText())
+
+    # ------------------------------------------------------------------
+    # Pane builders
+    # ------------------------------------------------------------------
+
+    def _build_settings_pane(self) -> QWidget:
+        """Left pane: scrollable column of settings groupboxes."""
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+
+        container = QWidget()
+        col = QVBoxLayout(container)
+        col.setContentsMargins(0, 0, 6, 0)
+        col.setSpacing(8)
+
+        col.addWidget(self._build_folders_group())
+        col.addWidget(self._build_output_group())
+        col.addWidget(self._build_conversion_group())
+        col.addWidget(self._build_mode_settings_group())
+        col.addWidget(self._build_requirements_group())
+        col.addStretch()
+
+        scroll.setWidget(container)
+        scroll.setMinimumWidth(380)
+        return scroll
+
+    def _build_folders_group(self) -> QGroupBox:
+        """History dropdown + the three required folder paths, stacked."""
+        group = QGroupBox("Folders & History")
+        form = QFormLayout()
+
         self.history_dropdown = QComboBox()
         self.history_dropdown.addItem("-- Recent runs --")
         self.history_dropdown.currentIndexChanged.connect(self.on_history_selected)
-        history_form.addRow("Select Run:", self.history_dropdown)
-        history_group.setLayout(history_form)
-        layout.addWidget(history_group)
+        form.addRow("Recent run:", self.history_dropdown)
         self._refresh_history_dropdown()
-
-        # Folders
-        folder_group = QGroupBox("Folders")
-        folder_form = QFormLayout()
 
         self.vmat_root = QLineEdit()
         vmat_btn = QPushButton("Browse...")
         vmat_btn.clicked.connect(lambda: self._browse_dir_into(self.vmat_root))
-        folder_form.addRow("VMAT Root:", self._row(self.vmat_root, vmat_btn))
+        form.addRow("VMAT root:", self._row(self.vmat_root, vmat_btn))
 
         self.texture_root = QLineEdit()
+        self.texture_root.setPlaceholderText("Optional; same-folder textures auto-detected")
         tex_btn = QPushButton("Browse...")
         tex_btn.clicked.connect(lambda: self._browse_dir_into(self.texture_root))
-        folder_form.addRow("Texture Root:", self._row(self.texture_root, tex_btn))
-        self.texture_root.setPlaceholderText("Optional; same-folder textures are auto-detected")
+        form.addRow("Texture root:", self._row(self.texture_root, tex_btn))
 
         self.output_root = QLineEdit()
         out_btn = QPushButton("Browse...")
         out_btn.clicked.connect(lambda: self._browse_dir_into(self.output_root))
-        folder_form.addRow("Output Root:", self._row(self.output_root, out_btn))
+        form.addRow("Output root:", self._row(self.output_root, out_btn))
 
-        folder_group.setLayout(folder_form)
-        layout.addWidget(folder_group)
+        group.setLayout(form)
+        return group
 
-        # Options
-        opt_group = QGroupBox("Options")
-        opt_form = QFormLayout()
+    def _build_output_group(self) -> QGroupBox:
+        """Mode + naming + which artefact types to write."""
+        group = QGroupBox("Output")
+        form = QFormLayout()
 
         self.mode_combo = QComboBox()
         self.mode_combo.addItems(["Fake PBR", "Exo PBR"])
         self.mode_combo.currentTextChanged.connect(self._sync_mode_defaults)
-        opt_form.addRow("Mode:", self.mode_combo)
+        form.addRow("Mode:", self.mode_combo)
 
         self.material_path = QLineEdit()
         self.material_path.setText("models/ports")
         self.material_path.setPlaceholderText("models/ports (Fake) or exopbr (Exo)")
-        opt_form.addRow("Material Path:", self.material_path)
-
-        self.append_material_subfolders = QCheckBox("Append VMAT subfolders to material path")
-        self.append_material_subfolders.setChecked(True)
-        opt_form.addRow("", self.append_material_subfolders)
-
-        self.preserve_structure = QCheckBox("Preserve VMAT folder structure in output")
-        self.preserve_structure.setChecked(True)
-        opt_form.addRow("", self.preserve_structure)
+        form.addRow("Material path:", self.material_path)
 
         name_row = QHBoxLayout()
         self.prefix_input = QLineEdit()
@@ -615,81 +781,142 @@ class VmatPBRTool(BaseTool):
         self.suffix_input.setPlaceholderText("Suffix")
         name_row.addWidget(self.prefix_input)
         name_row.addWidget(self.suffix_input)
-        opt_form.addRow("Name Prefix/Suffix:", self._row_widget(name_row))
+        form.addRow("Prefix / Suffix:", self._row_widget(name_row))
 
+        self.append_material_subfolders = QCheckBox("Append VMAT subfolders to material path")
+        self.append_material_subfolders.setChecked(True)
+        form.addRow("", self.append_material_subfolders)
+
+        self.preserve_structure = QCheckBox("Preserve VMAT folder structure in output")
+        self.preserve_structure.setChecked(True)
+        form.addRow("", self.preserve_structure)
+
+        # Generation toggles in a grid — they're peers, no reason to waste
+        # full-width form rows on them.
+        gen_grid = QGridLayout()
+        gen_grid.setContentsMargins(0, 0, 0, 0)
+        gen_grid.setHorizontalSpacing(12)
         self.generate_vtf = QCheckBox("Generate VTF")
         self.generate_vtf.setChecked(True)
         self.generate_vmt = QCheckBox("Generate VMT")
         self.generate_vmt.setChecked(True)
         self.generate_mipmaps = QCheckBox("Generate Mipmaps")
         self.generate_mipmaps.setChecked(True)
-        opt_form.addRow("", self.generate_vtf)
-        opt_form.addRow("", self.generate_vmt)
-        opt_form.addRow("", self.generate_mipmaps)
+        self.skip_existing = QCheckBox("Skip already-processed files")
+        self.skip_existing.setChecked(False)
+        self.skip_existing.setToolTip(
+            "Skip any VMAT whose output .vmt already exists in the destination "
+            "folder. Useful when re-running a large batch after fixing a few "
+            "inputs — leaves your hand-edited VMTs untouched. Falls back to "
+            "checking the basetexture .vtf when 'Generate VMT' is off."
+        )
+        self.synthesize_missing = QCheckBox("Synthesize missing maps")
+        self.synthesize_missing.setChecked(False)
+        self.synthesize_missing.setToolTip(
+            "When enabled, fills in missing maps with neutral defaults instead "
+            "of failing the conversion:\n"
+            "• Normal → flat tangent-space (no bump)\n"
+            "• Roughness → uniform 0.5\n"
+            "• Metallic → uniform 0.0 (dielectric)\n"
+            "Useful for quick ports of vmats that ship only a colour map. "
+            "g_flMetalness / g_flRoughness scalars in the vmat still take "
+            "priority over the blank fallback when present."
+        )
+        gen_grid.addWidget(self.generate_vtf, 0, 0)
+        gen_grid.addWidget(self.generate_vmt, 0, 1)
+        gen_grid.addWidget(self.generate_mipmaps, 1, 0)
+        gen_grid.addWidget(self.skip_existing, 1, 1)
+        gen_grid.addWidget(self.synthesize_missing, 2, 0, 1, 2)
+        form.addRow("Generate:", self._wrap_layout(gen_grid))
 
-        opt_group.setLayout(opt_form)
-        layout.addWidget(opt_group)
+        group.setLayout(form)
+        return group
 
-        # Mode-specific options
-        mode_group = QGroupBox("Mode Settings")
-        mode_layout = QVBoxLayout()
+    def _build_conversion_group(self) -> QGroupBox:
+        """Glow + transparency overrides — apply to either Fake or Exo."""
+        group = QGroupBox("Conversion Overrides")
+        form = QFormLayout()
+
+        self.glow_mode_combo = QComboBox()
+        self.glow_mode_combo.addItem("Self-illum ($selfillum)", "selfillum")
+        self.glow_mode_combo.addItem("Emissive Blend ($EmissiveBlend*)", "emissiveblend")
+        self.glow_mode_combo.setToolTip(
+            "Technique used to emit glow VMT params when a vmat declares "
+            "F_SELF_ILLUM or ships a *_selfillum mask.\n"
+            "• Self-illum: classic $selfillum + $selfillummask. Breaks with "
+            "$translucent / $alphatest on some branches.\n"
+            "• Emissive Blend: $EmissiveBlend* family. Plays nicely with "
+            "$translucent and $phong; recommended for L4D2 / Alyx-port targets."
+        )
+        form.addRow("Glow mode:", self.glow_mode_combo)
+
+        self.transparency_mode_combo = QComboBox()
+        self.transparency_mode_combo.addItem("Auto (use vmat flags)", "auto")
+        self.transparency_mode_combo.addItem("Force translucent ($translucent)", "translucent")
+        self.transparency_mode_combo.addItem("Force alphatest ($alphatest)", "alphatest")
+        self.transparency_mode_combo.addItem("Force opaque (no transparency)", "opaque")
+        self.transparency_mode_combo.setToolTip(
+            "Override the transparency technique chosen for materials whose "
+            "source vmat declares F_TRANSLUCENT / F_ALPHA_TEST or ships a "
+            "translucency mask.\n"
+            "• Auto: trust the vmat's own flags.\n"
+            "• Force translucent: emit $translucent 1 + $nocull.\n"
+            "• Force alphatest: emit $alphatest 1 + $alphatestreference 0.5.\n"
+            "• Force opaque: strip both flags entirely.\n"
+            "Force translucent / alphatest only apply to materials that were "
+            "already detected as transparent — opaque materials are left alone."
+        )
+        form.addRow("Transparency:", self.transparency_mode_combo)
+
+        group.setLayout(form)
+        return group
+
+    def _build_mode_settings_group(self) -> QGroupBox:
+        """Stacked mode-specific knobs (Fake PBR sliders OR Exo PBR fields).
+        The QStackedWidget is swapped by ``_sync_mode_defaults`` whenever
+        the Mode combo in the Output group changes."""
+        group = QGroupBox("Mode Settings")
+        layout = QVBoxLayout()
         self.mode_stack = QStackedWidget()
+        self.mode_stack.addWidget(self._build_fake_pbr_widget())
+        self.mode_stack.addWidget(self._build_exo_pbr_widget())
+        layout.addWidget(self.mode_stack)
+        group.setLayout(layout)
+        return group
 
-        # Fake PBR settings
-        fake_widget = QWidget()
-        fake_form = QFormLayout(fake_widget)
+    def _build_fake_pbr_widget(self) -> QWidget:
+        widget = QWidget()
+        form = QFormLayout(widget)
 
-        fake_ao_row = QHBoxLayout()
-        self.fake_ao_slider = QSlider(Qt.Horizontal)
-        self.fake_ao_slider.setRange(0, 200)
-        self.fake_ao_slider.setValue(50)
-        self.fake_ao_value = QLabel("0.50")
-        self.fake_ao_slider.valueChanged.connect(lambda v: self.fake_ao_value.setText(f"{v/100:.2f}"))
-        fake_ao_row.addWidget(self.fake_ao_slider)
-        fake_ao_row.addWidget(self.fake_ao_value)
-        fake_form.addRow("AO Strength:", self._row_widget(fake_ao_row))
+        self.fake_ao_slider, self.fake_ao_value = self._make_slider(0, 200, 50, 0.01)
+        form.addRow("AO Strength:", self._slider_row(self.fake_ao_slider, self.fake_ao_value))
 
-        fake_gamma_row = QHBoxLayout()
-        self.fake_gamma_slider = QSlider(Qt.Horizontal)
-        self.fake_gamma_slider.setRange(10, 40)
-        self.fake_gamma_slider.setValue(22)
-        self.fake_gamma_value = QLabel("2.20")
-        self.fake_gamma_slider.valueChanged.connect(lambda v: self.fake_gamma_value.setText(f"{v/10:.2f}"))
-        fake_gamma_row.addWidget(self.fake_gamma_slider)
-        fake_gamma_row.addWidget(self.fake_gamma_value)
-        fake_form.addRow("Gloss Gamma:", self._row_widget(fake_gamma_row))
+        self.fake_gamma_slider, self.fake_gamma_value = self._make_slider(10, 40, 22, 0.1)
+        form.addRow("Gloss Gamma:", self._slider_row(self.fake_gamma_slider, self.fake_gamma_value))
 
-        fake_metal_row = QHBoxLayout()
-        self.fake_metal_suppression_slider = QSlider(Qt.Horizontal)
-        self.fake_metal_suppression_slider.setRange(0, 100)
-        self.fake_metal_suppression_slider.setValue(70)
+        self.fake_metal_suppression_slider, self.fake_metal_suppression_value = self._make_slider(
+            0, 100, 70, 0.01,
+        )
         self.fake_metal_suppression_slider.setToolTip(
             "How much to darken albedo on metal pixels. "
             "0.00 = no darkening, 1.00 = fully darkened."
         )
-        self.fake_metal_suppression_value = QLabel("0.70")
-        self.fake_metal_suppression_slider.valueChanged.connect(
-            lambda v: self.fake_metal_suppression_value.setText(f"{v/100:.2f}")
+        form.addRow(
+            "Metal Diffuse Suppression:",
+            self._slider_row(self.fake_metal_suppression_slider, self.fake_metal_suppression_value),
         )
-        fake_metal_row.addWidget(self.fake_metal_suppression_slider)
-        fake_metal_row.addWidget(self.fake_metal_suppression_value)
-        fake_form.addRow("Metal Diffuse Suppression:", self._row_widget(fake_metal_row))
 
-        fake_phong_row = QHBoxLayout()
-        self.fake_phong_strength_slider = QSlider(Qt.Horizontal)
-        self.fake_phong_strength_slider.setRange(0, 200)
-        self.fake_phong_strength_slider.setValue(50)
+        self.fake_phong_strength_slider, self.fake_phong_strength_value = self._make_slider(
+            0, 200, 50, 0.01,
+        )
         self.fake_phong_strength_slider.setToolTip(
             "Scales the phong mask (bump alpha) and phong exponent map. "
             "0.00 = no phong, 0.50 = halved (default), 1.00 = original strength."
         )
-        self.fake_phong_strength_value = QLabel("0.50")
-        self.fake_phong_strength_slider.valueChanged.connect(
-            lambda v: self.fake_phong_strength_value.setText(f"{v/100:.2f}")
+        form.addRow(
+            "Phong Strength:",
+            self._slider_row(self.fake_phong_strength_slider, self.fake_phong_strength_value),
         )
-        fake_phong_row.addWidget(self.fake_phong_strength_slider)
-        fake_phong_row.addWidget(self.fake_phong_strength_value)
-        fake_form.addRow("Phong Strength:", self._row_widget(fake_phong_row))
 
         self.fake_phong_tint_mode_combo = QComboBox()
         self.fake_phong_tint_mode_combo.addItem("Off", "off")
@@ -702,65 +929,60 @@ class VmatPBRTool(BaseTool):
             "Blanket: divide-by-luminance compensation everywhere. "
             "No effect on targets without $phongalbedotint."
         )
-        fake_form.addRow("Phong Tint Mode:", self.fake_phong_tint_mode_combo)
+        form.addRow("Phong Tint Mode:", self.fake_phong_tint_mode_combo)
 
-        fake_relief_row = QHBoxLayout()
-        self.fake_colored_metal_relief_slider = QSlider(Qt.Horizontal)
-        self.fake_colored_metal_relief_slider.setRange(0, 100)
-        self.fake_colored_metal_relief_slider.setValue(50)
+        self.fake_colored_metal_relief_slider, self.fake_colored_metal_relief_value = self._make_slider(
+            0, 100, 50, 0.01,
+        )
         self.fake_colored_metal_relief_slider.setToolTip(
             "Per-pixel relief on Metal Diffuse Suppression for chromatic metals. "
             "Only applied when Phong Tint Mode is not Off."
         )
-        self.fake_colored_metal_relief_value = QLabel("0.50")
-        self.fake_colored_metal_relief_slider.valueChanged.connect(
-            lambda v: self.fake_colored_metal_relief_value.setText(f"{v/100:.2f}")
+        form.addRow(
+            "Colored Metal Relief:",
+            self._slider_row(self.fake_colored_metal_relief_slider, self.fake_colored_metal_relief_value),
         )
-        fake_relief_row.addWidget(self.fake_colored_metal_relief_slider)
-        fake_relief_row.addWidget(self.fake_colored_metal_relief_value)
-        fake_form.addRow("Colored Metal Relief:", self._row_widget(fake_relief_row))
 
-        # Exo PBR settings
-        exo_widget = QWidget()
-        exo_form = QFormLayout(exo_widget)
+        return widget
+
+    def _build_exo_pbr_widget(self) -> QWidget:
+        widget = QWidget()
+        form = QFormLayout(widget)
 
         self.exo_emission = QDoubleSpinBox()
         self.exo_emission.setRange(0.0, 10.0)
         self.exo_emission.setDecimals(2)
         self.exo_emission.setSingleStep(0.1)
         self.exo_emission.setValue(0.0)
-        exo_form.addRow("$emissionscale:", self.exo_emission)
+        form.addRow("$emissionscale:", self.exo_emission)
 
         self.exo_parallax = QDoubleSpinBox()
         self.exo_parallax.setRange(0.0, 1.0)
         self.exo_parallax.setDecimals(3)
         self.exo_parallax.setSingleStep(0.01)
         self.exo_parallax.setValue(0.0)
-        exo_form.addRow("$parallaxscale:", self.exo_parallax)
+        form.addRow("$parallaxscale:", self.exo_parallax)
 
         self.exo_alphablend = QCheckBox("Enable partial opacity")
         self.exo_alphablend.setChecked(False)
-        exo_form.addRow("$alphablend:", self.exo_alphablend)
+        form.addRow("$alphablend:", self.exo_alphablend)
 
-        self.mode_stack.addWidget(fake_widget)
-        self.mode_stack.addWidget(exo_widget)
+        return widget
 
-        mode_layout.addWidget(self.mode_stack)
-        mode_group.setLayout(mode_layout)
-        layout.addWidget(mode_group)
-
-        # Requirements: which texture roles must be present for a VMAT to
-        # be processed. Color/Normal default on (matching today's hardcoded
-        # validation); the rest default off so existing scans behave as
-        # before. Metallic/Roughness count as "present" when the VMAT
-        # provides a g_flMetalness / g_flRoughness scalar even without a
-        # texture — those cases produce a synthesised uniform map at
-        # processing time.
-        req_group = QGroupBox("Requirements")
-        req_layout = QHBoxLayout()
-        req_layout.setContentsMargins(8, 6, 8, 6)
+    def _build_requirements_group(self) -> QGroupBox:
+        """Texture-role filters laid out as a compact 2-column grid so they
+        don't run off the side of the narrow settings pane.
+        Color/Normal default on (matching the runner's hard validation);
+        the rest default off so existing scans behave as before. Metallic /
+        Roughness count as 'present' when the VMAT provides a g_flMetalness /
+        g_flRoughness scalar even without a texture — those cases produce a
+        synthesised uniform map at processing time."""
+        group = QGroupBox("Required maps (filter)")
+        grid = QGridLayout()
+        grid.setContentsMargins(8, 6, 8, 6)
+        grid.setHorizontalSpacing(12)
         self.req_checkboxes: Dict[str, QCheckBox] = {}
-        for label, key, default in (
+        roles = (
             ("Color", "color", True),
             ("Normal", "normal", True),
             ("AO", "ao", False),
@@ -768,7 +990,8 @@ class VmatPBRTool(BaseTool):
             ("Metallic", "metallic", False),
             ("Emissive", "emissive", False),
             ("Translucency", "translucency", False),
-        ):
+        )
+        for idx, (label, key, default) in enumerate(roles):
             cb = QCheckBox(label)
             cb.setChecked(default)
             cb.setToolTip(
@@ -776,13 +999,63 @@ class VmatPBRTool(BaseTool):
                 f"Rows missing this role will be auto-unchecked in the table."
             )
             cb.stateChanged.connect(self._apply_requirements_filter)
-            req_layout.addWidget(cb)
+            grid.addWidget(cb, idx // 2, idx % 2)
             self.req_checkboxes[key] = cb
-        req_layout.addStretch()
-        req_group.setLayout(req_layout)
-        layout.addWidget(req_group)
+        group.setLayout(grid)
+        return group
 
-        # Results table
+    def _build_results_pane(self) -> QWidget:
+        """Right pane: scan controls, selection bar, results table, run buttons."""
+        pane = QWidget()
+        col = QVBoxLayout(pane)
+        col.setContentsMargins(6, 0, 0, 0)
+        col.setSpacing(6)
+
+        # Scan + selection bar on a single line so the table stays as tall
+        # as possible — these are the one-shot "before each batch" controls.
+        action_row = QHBoxLayout()
+        self.scan_btn = QPushButton("Scan VMATs")
+        self.scan_btn.clicked.connect(self.scan)
+        action_row.addWidget(self.scan_btn)
+
+        action_row.addSpacing(12)
+        action_row.addWidget(QLabel("All:"))
+        self.select_all_btn = QPushButton("Check")
+        self.select_all_btn.clicked.connect(lambda: self._set_all_results_selected(True))
+        self.select_none_btn = QPushButton("Uncheck")
+        self.select_none_btn.clicked.connect(lambda: self._set_all_results_selected(False))
+        self.select_invert_btn = QPushButton("Invert")
+        self.select_invert_btn.clicked.connect(self._invert_results_selection)
+        for b in (self.select_all_btn, self.select_none_btn, self.select_invert_btn):
+            action_row.addWidget(b)
+
+        action_row.addSpacing(12)
+        action_row.addWidget(QLabel("Selected:"))
+        # "Selected" here means the row(s) highlighted via click / shift-click /
+        # ctrl-click — same selection model as Windows Explorer. These buttons
+        # apply the action to the highlighted rows only, leaving the rest alone.
+        sel_tooltip = (
+            "Click a row, then Shift+Click (range) or Ctrl+Click (toggle) more "
+            "rows like in Explorer.\n"
+            "These buttons toggle the Include checkbox for the highlighted rows "
+            "only. Pressing Space while the table has focus does the same."
+        )
+        self.check_selected_btn = QPushButton("Check")
+        self.check_selected_btn.setToolTip(sel_tooltip)
+        self.check_selected_btn.clicked.connect(lambda: self._set_selected_rows_checked(True))
+        self.uncheck_selected_btn = QPushButton("Uncheck")
+        self.uncheck_selected_btn.setToolTip(sel_tooltip)
+        self.uncheck_selected_btn.clicked.connect(lambda: self._set_selected_rows_checked(False))
+        self.toggle_selected_btn = QPushButton("Toggle")
+        self.toggle_selected_btn.setToolTip(sel_tooltip)
+        self.toggle_selected_btn.clicked.connect(self._toggle_selected_rows)
+        for b in (self.check_selected_btn, self.uncheck_selected_btn, self.toggle_selected_btn):
+            action_row.addWidget(b)
+
+        action_row.addStretch()
+        col.addLayout(action_row)
+
+        # Results table — set to expand into all available space.
         self.results_table = QTableWidget(0, 10)
         self.results_table.setHorizontalHeaderLabels([
             "Include", "VMAT", "Color", "Normal", "AO", "Rough", "Metal", "Emissive", "Trans", "Notes"
@@ -790,32 +1063,65 @@ class VmatPBRTool(BaseTool):
         header = self.results_table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.Stretch)
         self.results_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        # Enable Explorer-style multi-row selection: click → single, Shift+Click
+        # → contiguous range, Ctrl+Click → toggle individual rows. This is Qt's
+        # default for QTableWidget but we set it explicitly so it stays robust
+        # if a stylesheet or future change ever flips it.
+        self.results_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.results_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        layout.addWidget(self.results_table)
+        self.results_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        # Capture Space key on the table to toggle Include for *all* highlighted
+        # rows. Default Qt behavior toggles only the focused cell's checkbox.
+        self.results_table.installEventFilter(self)
+        col.addWidget(self.results_table, 1)
 
-        # Progress
         self.progress = QProgressBar()
         self.progress.setVisible(False)
-        layout.addWidget(self.progress)
+        col.addWidget(self.progress)
 
-        # Buttons
-        btn_row = QHBoxLayout()
-        self.scan_btn = QPushButton("Scan VMATs")
-        self.scan_btn.clicked.connect(self.scan)
-        self.convert_btn = QPushButton("Convert")
-        self.convert_btn.setEnabled(False)
-        self.convert_btn.clicked.connect(self.convert)
+        # Run controls live next to the table where the user actually clicks
+        # them, instead of being buried below all the settings.
+        run_row = QHBoxLayout()
+        run_row.addStretch()
         self.cancel_btn = QPushButton("Cancel")
         self.cancel_btn.setEnabled(False)
         self.cancel_btn.clicked.connect(self.cancel)
-        btn_row.addWidget(self.scan_btn)
-        btn_row.addStretch()
-        btn_row.addWidget(self.cancel_btn)
-        btn_row.addWidget(self.convert_btn)
-        layout.addLayout(btn_row)
+        self.convert_btn = QPushButton("Convert")
+        self.convert_btn.setEnabled(False)
+        self.convert_btn.clicked.connect(self.convert)
+        run_row.addWidget(self.cancel_btn)
+        run_row.addWidget(self.convert_btn)
+        col.addLayout(run_row)
 
-        layout.addStretch()
-        self._sync_mode_defaults(self.mode_combo.currentText())
+        return pane
+
+    # ------------------------------------------------------------------
+    # Small layout helpers
+    # ------------------------------------------------------------------
+
+    def _make_slider(
+        self, lo: int, hi: int, initial: int, step: float,
+    ) -> Tuple[QSlider, QLabel]:
+        """Build a horizontal slider + value label, wired so the label
+        always shows the current scaled value."""
+        slider = QSlider(Qt.Horizontal)
+        slider.setRange(lo, hi)
+        slider.setValue(initial)
+        label = QLabel(f"{initial * step:.2f}")
+        slider.valueChanged.connect(lambda v, _s=step: label.setText(f"{v * _s:.2f}"))
+        return slider, label
+
+    def _slider_row(self, slider: QSlider, label: QLabel) -> QWidget:
+        row = QHBoxLayout()
+        row.addWidget(slider, 1)
+        row.addWidget(label)
+        return self._row_widget(row)
+
+    @staticmethod
+    def _wrap_layout(layout) -> QWidget:
+        w = QWidget()
+        w.setLayout(layout)
+        return w
 
     def _load_history(self):
         try:
@@ -873,6 +1179,10 @@ class VmatPBRTool(BaseTool):
             "exo_emission": float(self.exo_emission.value()),
             "exo_parallax": float(self.exo_parallax.value()),
             "exo_alphablend": self.exo_alphablend.isChecked(),
+            "glow_mode": self.glow_mode_combo.currentData() or "selfillum",
+            "transparency_mode": self.transparency_mode_combo.currentData() or "auto",
+            "skip_existing": self.skip_existing.isChecked(),
+            "synthesize_missing_maps": self.synthesize_missing.isChecked(),
             "requirements": {key: cb.isChecked() for key, cb in self.req_checkboxes.items()},
         }
 
@@ -888,7 +1198,8 @@ class VmatPBRTool(BaseTool):
             "fake_gloss_gamma", "fake_metal_diffuse_suppression", "fake_phong_strength",
             "fake_phong_tint_mode", "fake_colored_metal_relief",
             "exo_emission",
-            "exo_parallax", "exo_alphablend", "requirements"
+            "exo_parallax", "exo_alphablend", "glow_mode", "transparency_mode",
+            "skip_existing", "synthesize_missing_maps", "requirements"
         ]
 
         def _same(a: dict, b: dict) -> bool:
@@ -943,6 +1254,16 @@ class VmatPBRTool(BaseTool):
         self.exo_emission.setValue(float(entry.get("exo_emission", 0.0)))
         self.exo_parallax.setValue(float(entry.get("exo_parallax", 0.0)))
         self.exo_alphablend.setChecked(bool(entry.get("exo_alphablend", False)))
+        glow_mode_val = str(entry.get("glow_mode", "selfillum"))
+        glow_idx = self.glow_mode_combo.findData(glow_mode_val)
+        if glow_idx >= 0:
+            self.glow_mode_combo.setCurrentIndex(glow_idx)
+        transparency_mode_val = str(entry.get("transparency_mode", "auto"))
+        transparency_idx = self.transparency_mode_combo.findData(transparency_mode_val)
+        if transparency_idx >= 0:
+            self.transparency_mode_combo.setCurrentIndex(transparency_idx)
+        self.skip_existing.setChecked(bool(entry.get("skip_existing", False)))
+        self.synthesize_missing.setChecked(bool(entry.get("synthesize_missing_maps", False)))
         reqs = entry.get("requirements") or {}
         for key, cb in self.req_checkboxes.items():
             if key in reqs:
@@ -1068,6 +1389,8 @@ class VmatPBRTool(BaseTool):
                 mode_notes.append("translucent")
             if entry.alphatest:
                 mode_notes.append("alphatest")
+            if entry.selfillum:
+                mode_notes.append("selfillum")
             warn_text = "; ".join(mode_notes + entry.warnings)
             warn_item = QTableWidgetItem(warn_text)
             self.results_table.setItem(row, 9, warn_item)
@@ -1082,6 +1405,81 @@ class VmatPBRTool(BaseTool):
             selected.append(entries[row])
             rows.append(row)
         return selected, rows
+
+    def _set_all_results_selected(self, checked: bool):
+        """Bulk toggle every Include checkbox in the results table."""
+        state = Qt.Checked if checked else Qt.Unchecked
+        for row in range(self.results_table.rowCount()):
+            item = self.results_table.item(row, 0)
+            if item is not None:
+                item.setCheckState(state)
+
+    def _invert_results_selection(self):
+        """Flip every Include checkbox in the results table."""
+        for row in range(self.results_table.rowCount()):
+            item = self.results_table.item(row, 0)
+            if item is None:
+                continue
+            item.setCheckState(
+                Qt.Unchecked if item.checkState() == Qt.Checked else Qt.Checked
+            )
+
+    def _highlighted_rows(self) -> List[int]:
+        """Return distinct row indices highlighted in the results table.
+
+        Uses ``selectedIndexes`` rather than ``selectedRows`` so a partial
+        selection (e.g. just one cell) still returns its row — matches how
+        Explorer treats a single-cell click as selecting the row.
+        """
+        sel_model = self.results_table.selectionModel()
+        if sel_model is None:
+            return []
+        rows = sorted({idx.row() for idx in sel_model.selectedIndexes()})
+        return rows
+
+    def _set_selected_rows_checked(self, checked: bool):
+        """Set Include for every highlighted row (Shift/Ctrl-click selection)."""
+        state = Qt.Checked if checked else Qt.Unchecked
+        for row in self._highlighted_rows():
+            item = self.results_table.item(row, 0)
+            if item is not None:
+                item.setCheckState(state)
+
+    def _toggle_selected_rows(self):
+        """Flip Include for every highlighted row.
+
+        When the highlighted rows have mixed Include states, normalise the
+        toggle by treating ``majority checked`` as ``all → unchecked`` and
+        vice-versa — the same fence-sit behaviour Explorer's checkbox uses
+        when you bulk-toggle a multi-selection."""
+        rows = self._highlighted_rows()
+        if not rows:
+            return
+        checked_count = sum(
+            1 for row in rows
+            if self.results_table.item(row, 0) is not None
+            and self.results_table.item(row, 0).checkState() == Qt.Checked
+        )
+        # If at least half are checked, uncheck them all; otherwise check
+        # them all. Predictable single-tap behaviour for a mixed selection.
+        new_state = Qt.Unchecked if checked_count * 2 >= len(rows) else Qt.Checked
+        for row in rows:
+            item = self.results_table.item(row, 0)
+            if item is not None:
+                item.setCheckState(new_state)
+
+    def eventFilter(self, obj, event):
+        """Intercept Space on the results table to bulk-toggle highlighted rows.
+
+        Without this, Qt's default Space handler only toggles the *focused*
+        cell's checkbox even when many rows are highlighted, which feels wrong
+        coming from Explorer where Space ticks the whole multi-selection.
+        """
+        if obj is self.results_table and event.type() == QEvent.KeyPress:
+            if event.key() in (Qt.Key_Space, Qt.Key_Select):
+                self._toggle_selected_rows()
+                return True
+        return super().eventFilter(obj, event)
 
     def convert(self):
         vmat_root = self.vmat_root.text().strip()
@@ -1129,6 +1527,10 @@ class VmatPBRTool(BaseTool):
             generate_vtf=self.generate_vtf.isChecked(),
             generate_vmt=self.generate_vmt.isChecked(),
             generate_mipmaps=self.generate_mipmaps.isChecked(),
+            glow_mode=self.glow_mode_combo.currentData() or "selfillum",
+            transparency_mode=self.transparency_mode_combo.currentData() or "auto",
+            skip_existing=self.skip_existing.isChecked(),
+            synthesize_missing_maps=self.synthesize_missing.isChecked(),
             row_indices=row_indices,
         )
         self.thread.progress.connect(self.on_progress)
