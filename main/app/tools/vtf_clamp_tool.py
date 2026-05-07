@@ -241,8 +241,12 @@ class VtfClampTool(BaseTool):
         max_row.addStretch()
         settings_layout.addLayout(max_row)
 
-        self.recursive_check = QCheckBox("Scan folder recursively")
+        self.recursive_check = QCheckBox("Recursive (include subfolders)")
         self.recursive_check.setChecked(True)
+        self.recursive_check.setToolTip(
+            "When on, scan all subfolders of the input. When off, scan only "
+            "the input folder itself."
+        )
         settings_layout.addWidget(self.recursive_check)
 
         self.preserve_aspect_check = QCheckBox("Preserve aspect ratio")
@@ -250,12 +254,18 @@ class VtfClampTool(BaseTool):
         self.preserve_aspect_check.setToolTip("Keeps rectangular textures rectangular, e.g. 2048x1024 → 1024x512.")
         settings_layout.addWidget(self.preserve_aspect_check)
 
-        self.overwrite_check = QCheckBox("Overwrite original VTF files")
+        self.overwrite_check = QCheckBox("Replace existing outputs")
         self.overwrite_check.setChecked(True)
+        self.overwrite_check.setToolTip(
+            "Overwrite outputs that already exist in the destination folder."
+        )
         settings_layout.addWidget(self.overwrite_check)
 
-        self.backup_check = QCheckBox("Create .vtf.bak backups before overwriting")
+        self.backup_check = QCheckBox("Create backups (.bak)")
         self.backup_check.setChecked(True)
+        self.backup_check.setToolTip(
+            "Save the original alongside the modified copy."
+        )
         settings_layout.addWidget(self.backup_check)
 
         settings_group.setLayout(settings_layout)
@@ -271,15 +281,17 @@ class VtfClampTool(BaseTool):
 
         buttons = QHBoxLayout()
         buttons.addStretch()
-        self.clamp_button = QPushButton("Clamp VTF Textures")
-        self.clamp_button.setMinimumWidth(160)
-        self.clamp_button.clicked.connect(self.start_clamp)
-        buttons.addWidget(self.clamp_button)
 
         self.cancel_button = QPushButton("Cancel")
         self.cancel_button.setEnabled(False)
         self.cancel_button.clicked.connect(self.cancel_worker)
         buttons.addWidget(self.cancel_button)
+
+        self.clamp_button = QPushButton("Process")
+        self.clamp_button.setMinimumWidth(120)
+        self.clamp_button.clicked.connect(self.start_clamp)
+        buttons.addWidget(self.clamp_button)
+
         self.content_layout.addLayout(buttons)
         self.content_layout.addStretch()
 
