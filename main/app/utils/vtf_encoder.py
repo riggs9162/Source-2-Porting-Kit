@@ -238,6 +238,28 @@ class VTFEncoder:
             generate_mipmaps=generate_mipmaps
         )
 
+    def encode_selfillum_mask(
+        self,
+        pixel_data: np.ndarray,
+        output_path: str,
+        generate_mipmaps: bool = True
+    ) -> bool:
+        """Encode a $selfillummask texture (RGB color map, sRGB DXT5).
+
+        Source 1's $selfillummask works as a colored mask — non-black RGB
+        pixels glow at their authored color, scaled by $selfillumtint. We
+        encode sRGB so the colors round-trip with the rest of the material's
+        sRGB textures.
+        """
+        return self.encode_to_vtf(
+            pixel_data,
+            output_path,
+            image_format=vtfpp.ImageFormat.DXT5,
+            flags=VTF_FLAG_SRGB,
+            invert_green=False,
+            generate_mipmaps=generate_mipmaps
+        )
+
     def encode_phong_map(
         self,
         pixel_data: np.ndarray,
