@@ -266,8 +266,11 @@ class BoneBackportTool(BaseTool):
         options_group = QGroupBox("Options")
         options_layout = QVBoxLayout()
         
-        self.backup_check = QCheckBox("Create backup files")
+        self.backup_check = QCheckBox("Create backups (.bak)")
         self.backup_check.setChecked(True)
+        self.backup_check.setToolTip(
+            "Save the original alongside the modified copy."
+        )
         options_layout.addWidget(self.backup_check)
         
         self.process_qc_check = QCheckBox("Process QC files")
@@ -306,13 +309,15 @@ class BoneBackportTool(BaseTool):
         # Action buttons
         btn_layout = QHBoxLayout()
         
-        self.process_btn = QPushButton("Process Files")
-        self.process_btn.clicked.connect(self.process_files)
-        btn_layout.addWidget(self.process_btn)
-        
         self.default_mapping_btn = QPushButton("View Default Mapping")
         self.default_mapping_btn.clicked.connect(self.show_default_mapping)
         btn_layout.addWidget(self.default_mapping_btn)
+
+        btn_layout.addStretch()
+
+        self.process_btn = QPushButton("Process")
+        self.process_btn.clicked.connect(self.process_files)
+        btn_layout.addWidget(self.process_btn)
         
         self.content_layout.addLayout(btn_layout)
         
