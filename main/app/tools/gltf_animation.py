@@ -240,39 +240,65 @@ def parse_skin(gltf_data: dict, buffer: Optional[bytes], skin_idx: int = 0) -> O
 # Skin vertex attributes (JOINTS_0 / WEIGHTS_0)
 # ---------------------------------------------------------------------------
 
-def parse_skin_vertex_data(gltf_data: dict, buffer: bytes, mesh_idx: int = 0
+def parse_skin_vertex_data(gltf_data: dict, buffer: bytes,
+                            mesh_idx: Optional[int] = None,
                             ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
-    """Concatenate JOINTS_0 / WEIGHTS_0 across all primitives of one mesh.
+    """Concatenate JOINTS_0 / WEIGHTS_0 across primitives in glTF order.
 
     Returns (joints[N,4] uint16, weights[N,4] float32). Either may be None
-    if missing. Joint indices are local to the mesh's skin (i.e. they index
-    into ``GltfSkin.joints`` directly, by glTF convention).
+    if missing. Joint indices are local to each primitive's skin; this
+    function assumes all skins share the same joint list (the typical S2V
+    case where one skeleton is duplicated across many ``skins[]`` entries
+    so each mesh-node can reference a private skin) and does not remap.
+
+    ``mesh_idx`` selects a single mesh by index; default ``None`` walks
+    *every* glTF mesh in JSON order, matching what trimesh's scene loader
+    feeds to the geometry concatenator. A previous implementation only
+    walked ``meshes[0]``, which produced a vertex-vs-skin-attribute count
+    mismatch on multi-mesh assets like the Combine console
+    (vr_combine_interface_01: geometry concatenates 20 meshes →
+    95 489 vertices, but only mesh[0]'s 79 716 skin attributes were
+    loaded).
     """
     meshes = gltf_data.get('meshes') or []
-    if mesh_idx >= len(meshes):
+    if not meshes:
         return (None, None)
+
+    if mesh_idx is not None:
+        if mesh_idx >= len(meshes):
+            return (None, None)
+        mesh_iter = [meshes[mesh_idx]]
+    else:
+        mesh_iter = meshes
 
     joints_chunks: List[np.ndarray] = []
     weights_chunks: List[np.ndarray] = []
 
-    for prim in meshes[mesh_idx].get('primitives') or []:
-        attrs = prim.get('attributes') or {}
-        j_idx = attrs.get('JOINTS_0')
-        w_idx = attrs.get('WEIGHTS_0')
-        if j_idx is None or w_idx is None:
-            return (None, None)
+    for mesh in mesh_iter:
+        for prim in mesh.get('primitives') or []:
+            attrs = prim.get('attributes') or {}
+            j_idx = attrs.get('JOINTS_0')
+            w_idx = attrs.get('WEIGHTS_0')
+            if j_idx is None or w_idx is None:
+                # A primitive without skin attributes in an otherwise-skinned
+                # asset is malformed — treating it as "not animated" is
+                # safer than guessing. The caller falls back to static export.
+                return (None, None)
 
-        j_raw = read_accessor(gltf_data, buffer, j_idx).astype(np.uint16)
-        w_raw = read_accessor(gltf_data, buffer, w_idx).astype(np.float32)
-        if j_raw.ndim == 1:
-            j_raw = j_raw.reshape(-1, 1)
-        if w_raw.ndim == 1:
-            w_raw = w_raw.reshape(-1, 1)
-        if j_raw.shape[1] != 4 or w_raw.shape[1] != 4:
-            return (None, None)
+            j_raw = read_accessor(gltf_data, buffer, j_idx).astype(np.uint16)
+            w_raw = read_accessor(gltf_data, buffer, w_idx).astype(np.float32)
+            if j_raw.ndim == 1:
+                j_raw = j_raw.reshape(-1, 1)
+            if w_raw.ndim == 1:
+                w_raw = w_raw.reshape(-1, 1)
+            if j_raw.shape[1] != 4 or w_raw.shape[1] != 4:
+                return (None, None)
+            if j_raw.shape[0] != w_raw.shape[0]:
+                # Spec says JOINTS_0 and WEIGHTS_0 must have matching counts.
+                return (None, None)
 
-        joints_chunks.append(j_raw)
-        weights_chunks.append(w_raw)
+            joints_chunks.append(j_raw)
+            weights_chunks.append(w_raw)
 
     if not joints_chunks:
         return (None, None)
