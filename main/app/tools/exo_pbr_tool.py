@@ -18,9 +18,9 @@ from PySide6.QtWidgets import (
     QLineEdit, QGroupBox, QDoubleSpinBox, QCheckBox,
     QProgressBar, QFormLayout, QWidget, QComboBox, QTabWidget,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
-    QSpinBox
+    QSpinBox, QSplitter, QScrollArea, QSizePolicy, QGridLayout,
 )
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt, QThread, Signal, QEvent
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Event
 
@@ -742,158 +742,10 @@ class ExoPBRTool(BaseTool):
 
         tabs.addTab(manual_tab, "Manual")
 
-        # ---------- Automate Tab ----------
-        automate_tab = QWidget()
-        automate_layout = QVBoxLayout(automate_tab)
-
-        # History dropdown (previous runs for automation)
-        auto_history_group = QGroupBox("Previous Runs")
-        auto_history_form = QFormLayout()
-        self.auto_history_dropdown = QComboBox()
-        self.auto_history_dropdown.addItem("-- Recent runs --")
-        self.auto_history_dropdown.currentIndexChanged.connect(self.on_auto_history_selected)
-        auto_history_form.addRow("Select Run:", self.auto_history_dropdown)
-        auto_history_group.setLayout(auto_history_form)
-        automate_layout.addWidget(auto_history_group)
-
-        # Scan settings
-        scan_group = QGroupBox("Automation Scan")
-        scan_form = QFormLayout()
-
-        # Input root folder
-        self.auto_input_folder = QLineEdit()
-        auto_browse_in = QPushButton("Browse...")
-        auto_browse_in.clicked.connect(lambda: self._browse_dir_into(self.auto_input_folder))
-        in_row = QHBoxLayout()
-        in_row.addWidget(self.auto_input_folder)
-        in_row.addWidget(auto_browse_in)
-        scan_form.addRow("Input Root Folder:", self._row_widget(in_row))
-
-        # Output folder
-        self.auto_output_folder = QLineEdit()
-        auto_browse_out = QPushButton("Browse...")
-        auto_browse_out.clicked.connect(lambda: self._browse_dir_into(self.auto_output_folder))
-        out_row = QHBoxLayout()
-        out_row.addWidget(self.auto_output_folder)
-        out_row.addWidget(auto_browse_out)
-        scan_form.addRow("Output Folder:", self._row_widget(out_row))
-
-        # Material path
-        self.auto_material_path = QLineEdit()
-        self.auto_material_path.setPlaceholderText("e.g., exopbr")
-        self.auto_material_path.setText("exopbr")
-        scan_form.addRow("Material Path:", self.auto_material_path)
-
-        # Material prefix
-        self.auto_prefix = QLineEdit()
-        self.auto_prefix.setPlaceholderText("e.g., exo_")
-        scan_form.addRow("Material Prefix:", self.auto_prefix)
-
-        # Material suffix
-        self.auto_suffix = QLineEdit()
-        self.auto_suffix.setPlaceholderText("e.g., _mat")
-        scan_form.addRow("Material Suffix:", self.auto_suffix)
-
-        # Recursive scan toggle
-        self.auto_recursive = QCheckBox("Include subfolders")
-        self.auto_recursive.setChecked(True)
-        self.auto_recursive.setToolTip(
-            "When enabled, the scan walks all subfolders of the input root. "
-            "When disabled, only files directly in the input root are scanned."
-        )
-        scan_form.addRow("Scan Recursively:", self.auto_recursive)
-
-        scan_group.setLayout(scan_form)
-        automate_layout.addWidget(scan_group)
-
-        # Options
-        auto_options = QGroupBox("Processing Options")
-        auto_opt_form = QFormLayout()
-
-        # Emission scale
-        self.auto_emission_spin = QDoubleSpinBox()
-        self.auto_emission_spin.setRange(0.0, 10.0)
-        self.auto_emission_spin.setSingleStep(0.1)
-        self.auto_emission_spin.setDecimals(2)
-        self.auto_emission_spin.setValue(0.0)
-        auto_opt_form.addRow("$emissionscale:", self.auto_emission_spin)
-        
-        # Parallax scale
-        self.auto_parallax_spin = QDoubleSpinBox()
-        self.auto_parallax_spin.setRange(0.0, 1.0)
-        self.auto_parallax_spin.setSingleStep(0.01)
-        self.auto_parallax_spin.setDecimals(3)
-        self.auto_parallax_spin.setValue(0.0)
-        auto_opt_form.addRow("$parallaxscale:", self.auto_parallax_spin)
-
-        # Alpha blend
-        self.auto_alphablend = QCheckBox("Enable partial opacity")
-        self.auto_alphablend.setChecked(False)
-        auto_opt_form.addRow("$alphablend:", self.auto_alphablend)
-
-        # Generate VTF
-        self.auto_generate_vtf = QCheckBox("Generate VTF")
-        self.auto_generate_vtf.setChecked(True)
-        auto_opt_form.addRow("Generate VTF:", self.auto_generate_vtf)
-
-        # Generate mipmaps
-        self.auto_generate_mipmaps = QCheckBox("Generate Mipmaps")
-        self.auto_generate_mipmaps.setChecked(True)
-        auto_opt_form.addRow("Generate Mipmaps:", self.auto_generate_mipmaps)
-
-        # Generate VMT
-        self.auto_generate_vmt = QCheckBox("Generate VMT")
-        self.auto_generate_vmt.setChecked(True)
-        auto_opt_form.addRow("Generate VMT:", self.auto_generate_vmt)
-
-        # Skip already-processed materials
-        self.auto_skip_existing = QCheckBox("Skip if VMT/VTF outputs already exist")
-        self.auto_skip_existing.setChecked(False)
-        self.auto_skip_existing.setToolTip(
-            "When enabled, materials whose .vmt and enabled .vtf outputs already "
-            "exist in the output folder are skipped."
-        )
-        auto_opt_form.addRow("Skip Existing:", self.auto_skip_existing)
-
-        # Max parallel workers
-        max_cpu = os.cpu_count() or 4
-        self.auto_max_parallel = QSpinBox()
-        self.auto_max_parallel.setRange(1, max(2, max_cpu))
-        self.auto_max_parallel.setValue(min(4, max_cpu))
-        auto_opt_form.addRow("Max Parallel:", self.auto_max_parallel)
-
-        auto_options.setLayout(auto_opt_form)
-        automate_layout.addWidget(auto_options)
-
-        # Results table
-        self.scan_table = QTableWidget(0, 10)
-        self.scan_table.setHorizontalHeaderLabels([
-            "Include", "Material", "Color", "Normal", "AO", "Roughness", "Metallic", "SelfIllum", "Height", "Transparency"
-        ])
-        header = self.scan_table.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.Stretch)
-        self.scan_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.scan_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        automate_layout.addWidget(self.scan_table)
-
-        # Buttons
-        btn_row = QHBoxLayout()
-        self.scan_button = QPushButton("Scan Folder")
-        self.scan_button.clicked.connect(self.scan_folder_for_materials)
-        self.process_all_button = QPushButton("Process All")
-        self.process_all_button.setEnabled(False)
-        self.process_all_button.clicked.connect(self.process_all_materials)
-        # Cancel button (automate)
-        self.cancel_all_button = QPushButton("Cancel")
-        self.cancel_all_button.setEnabled(False)
-        self.cancel_all_button.clicked.connect(self.cancel_automation)
-        btn_row.addWidget(self.scan_button)
-        btn_row.addStretch()
-        btn_row.addWidget(self.cancel_all_button)
-        btn_row.addWidget(self.process_all_button)
-        automate_layout.addLayout(btn_row)
-
-        tabs.addTab(automate_tab, "Automate")
+        # ---------- Automate Tab (two-pane batch UI) ----------
+        # Settings on the left (scrollable), results table + run controls on
+        # the right — same shape as vmat_pbr_tool / gltf_smd_batch_tool.
+        tabs.addTab(self._build_automate_tab(), "Automate")
 
         # Populate history dropdowns now that UI exists
         try:
@@ -901,7 +753,292 @@ class ExoPBRTool(BaseTool):
             self._refresh_auto_history_dropdown()
         except Exception:
             pass
-    
+
+    # ------------------------------------------------------------------
+    # Automate tab — two-pane builders (scrollable settings + results)
+    # ------------------------------------------------------------------
+
+    def _build_automate_tab(self) -> QWidget:
+        """Construct the Automate tab as a horizontal splitter with
+        scrollable settings on the left and the scan/results table on
+        the right. Mirrors fake_pbr_tool / vmat_pbr_tool / gltf_smd_batch_tool."""
+        tab = QWidget()
+        outer = QHBoxLayout(tab)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.setChildrenCollapsible(False)
+        splitter.addWidget(self._build_auto_settings_pane())
+        splitter.addWidget(self._build_auto_results_pane())
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 2)
+        splitter.setSizes([460, 880])
+        outer.addWidget(splitter)
+        return tab
+
+    def _build_auto_settings_pane(self) -> QWidget:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+
+        container = QWidget()
+        col = QVBoxLayout(container)
+        col.setContentsMargins(0, 0, 6, 0)
+        col.setSpacing(8)
+
+        col.addWidget(self._build_auto_folders_group())
+        col.addWidget(self._build_auto_output_group())
+        col.addWidget(self._build_auto_processing_group())
+        col.addStretch()
+
+        scroll.setWidget(container)
+        scroll.setMinimumWidth(420)
+        return scroll
+
+    def _build_auto_folders_group(self) -> QGroupBox:
+        group = QGroupBox("Folders & Recent Runs")
+        form = QFormLayout()
+
+        self.auto_history_dropdown = QComboBox()
+        self.auto_history_dropdown.addItem("-- Recent runs --")
+        self.auto_history_dropdown.currentIndexChanged.connect(self.on_auto_history_selected)
+        form.addRow("Recent run:", self.auto_history_dropdown)
+
+        self.auto_input_folder = QLineEdit()
+        in_btn = QPushButton("Browse...")
+        in_btn.clicked.connect(lambda: self._browse_dir_into(self.auto_input_folder))
+        in_row = QHBoxLayout()
+        in_row.addWidget(self.auto_input_folder)
+        in_row.addWidget(in_btn)
+        form.addRow("Input root:", self._row_widget(in_row))
+
+        self.auto_output_folder = QLineEdit()
+        out_btn = QPushButton("Browse...")
+        out_btn.clicked.connect(lambda: self._browse_dir_into(self.auto_output_folder))
+        out_row = QHBoxLayout()
+        out_row.addWidget(self.auto_output_folder)
+        out_row.addWidget(out_btn)
+        form.addRow("Output root:", self._row_widget(out_row))
+
+        self.auto_material_path = QLineEdit()
+        self.auto_material_path.setPlaceholderText("e.g., exopbr")
+        self.auto_material_path.setText("exopbr")
+        form.addRow("Material path:", self.auto_material_path)
+
+        name_row = QHBoxLayout()
+        self.auto_prefix = QLineEdit()
+        self.auto_prefix.setPlaceholderText("Prefix")
+        self.auto_suffix = QLineEdit()
+        self.auto_suffix.setPlaceholderText("Suffix")
+        name_row.addWidget(self.auto_prefix)
+        name_row.addWidget(self.auto_suffix)
+        form.addRow("Prefix / Suffix:", self._row_widget(name_row))
+
+        group.setLayout(form)
+        return group
+
+    def _build_auto_output_group(self) -> QGroupBox:
+        group = QGroupBox("Output")
+        form = QFormLayout()
+
+        gen_grid = QGridLayout()
+        gen_grid.setContentsMargins(0, 0, 0, 0)
+        gen_grid.setHorizontalSpacing(12)
+        self.auto_generate_vtf = QCheckBox("Generate VTF")
+        self.auto_generate_vtf.setChecked(True)
+        self.auto_generate_vmt = QCheckBox("Generate VMT")
+        self.auto_generate_vmt.setChecked(True)
+        self.auto_generate_mipmaps = QCheckBox("Generate Mipmaps")
+        self.auto_generate_mipmaps.setChecked(True)
+        self.auto_skip_existing = QCheckBox("Skip already-processed files")
+        self.auto_skip_existing.setChecked(False)
+        self.auto_skip_existing.setToolTip(
+            "Skip any input whose .vmt and enabled .vtf outputs already exist "
+            "in the destination folder."
+        )
+        gen_grid.addWidget(self.auto_generate_vtf, 0, 0)
+        gen_grid.addWidget(self.auto_generate_vmt, 0, 1)
+        gen_grid.addWidget(self.auto_generate_mipmaps, 1, 0)
+        gen_grid.addWidget(self.auto_skip_existing, 1, 1)
+        form.addRow("Generate:", self._wrap_layout(gen_grid))
+
+        self.auto_recursive = QCheckBox("Recursive (include subfolders)")
+        self.auto_recursive.setChecked(True)
+        self.auto_recursive.setToolTip(
+            "When on, scan all subfolders of the input. When off, scan only "
+            "the input folder itself."
+        )
+        form.addRow("", self.auto_recursive)
+
+        max_cpu = os.cpu_count() or 4
+        self.auto_max_parallel = QSpinBox()
+        self.auto_max_parallel.setRange(1, max(2, max_cpu))
+        self.auto_max_parallel.setValue(min(4, max_cpu))
+        form.addRow("Max parallel:", self.auto_max_parallel)
+
+        group.setLayout(form)
+        return group
+
+    def _build_auto_processing_group(self) -> QGroupBox:
+        group = QGroupBox("Processing Options")
+        form = QFormLayout()
+
+        self.auto_emission_spin = QDoubleSpinBox()
+        self.auto_emission_spin.setRange(0.0, 10.0)
+        self.auto_emission_spin.setSingleStep(0.1)
+        self.auto_emission_spin.setDecimals(2)
+        self.auto_emission_spin.setValue(0.0)
+        form.addRow("$emissionscale:", self.auto_emission_spin)
+
+        self.auto_parallax_spin = QDoubleSpinBox()
+        self.auto_parallax_spin.setRange(0.0, 1.0)
+        self.auto_parallax_spin.setSingleStep(0.01)
+        self.auto_parallax_spin.setDecimals(3)
+        self.auto_parallax_spin.setValue(0.0)
+        form.addRow("$parallaxscale:", self.auto_parallax_spin)
+
+        self.auto_alphablend = QCheckBox("Enable partial opacity")
+        self.auto_alphablend.setChecked(False)
+        form.addRow("$alphablend:", self.auto_alphablend)
+
+        group.setLayout(form)
+        return group
+
+    def _build_auto_results_pane(self) -> QWidget:
+        pane = QWidget()
+        col = QVBoxLayout(pane)
+        col.setContentsMargins(6, 0, 0, 0)
+        col.setSpacing(6)
+
+        action_row = QHBoxLayout()
+        self.scan_button = QPushButton("Scan")
+        self.scan_button.clicked.connect(self.scan_folder_for_materials)
+        action_row.addWidget(self.scan_button)
+
+        action_row.addSpacing(12)
+        action_row.addWidget(QLabel("All:"))
+        self.scan_select_all_btn = QPushButton("Check")
+        self.scan_select_all_btn.clicked.connect(lambda: self._set_all_scan_selected(True))
+        self.scan_select_none_btn = QPushButton("Uncheck")
+        self.scan_select_none_btn.clicked.connect(lambda: self._set_all_scan_selected(False))
+        self.scan_select_invert_btn = QPushButton("Invert")
+        self.scan_select_invert_btn.clicked.connect(self._invert_scan_selection)
+        for b in (self.scan_select_all_btn, self.scan_select_none_btn, self.scan_select_invert_btn):
+            action_row.addWidget(b)
+
+        action_row.addSpacing(12)
+        action_row.addWidget(QLabel("Selected:"))
+        sel_tooltip = (
+            "Click a row, then Shift+Click (range) or Ctrl+Click (toggle) more "
+            "rows like in Explorer.\n"
+            "These buttons toggle the Include checkbox for the highlighted rows "
+            "only. Pressing Space while the table has focus does the same."
+        )
+        self.scan_check_selected_btn = QPushButton("Check")
+        self.scan_check_selected_btn.setToolTip(sel_tooltip)
+        self.scan_check_selected_btn.clicked.connect(lambda: self._set_selected_scan_rows_checked(True))
+        self.scan_uncheck_selected_btn = QPushButton("Uncheck")
+        self.scan_uncheck_selected_btn.setToolTip(sel_tooltip)
+        self.scan_uncheck_selected_btn.clicked.connect(lambda: self._set_selected_scan_rows_checked(False))
+        self.scan_toggle_selected_btn = QPushButton("Toggle")
+        self.scan_toggle_selected_btn.setToolTip(sel_tooltip)
+        self.scan_toggle_selected_btn.clicked.connect(self._toggle_selected_scan_rows)
+        for b in (self.scan_check_selected_btn, self.scan_uncheck_selected_btn, self.scan_toggle_selected_btn):
+            action_row.addWidget(b)
+
+        action_row.addStretch()
+        col.addLayout(action_row)
+
+        # Results table
+        self.scan_table = QTableWidget(0, 10)
+        self.scan_table.setHorizontalHeaderLabels([
+            "Include", "Material", "Color", "Normal", "AO", "Roughness",
+            "Metallic", "SelfIllum", "Height", "Transparency",
+        ])
+        header = self.scan_table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.Stretch)
+        self.scan_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.scan_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.scan_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.scan_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.scan_table.installEventFilter(self)
+        col.addWidget(self.scan_table, 1)
+
+        run_row = QHBoxLayout()
+        run_row.addStretch()
+        self.cancel_all_button = QPushButton("Cancel")
+        self.cancel_all_button.setEnabled(False)
+        self.cancel_all_button.clicked.connect(self.cancel_automation)
+        self.process_all_button = QPushButton("Convert")
+        self.process_all_button.setEnabled(False)
+        self.process_all_button.clicked.connect(self.process_all_materials)
+        run_row.addWidget(self.cancel_all_button)
+        run_row.addWidget(self.process_all_button)
+        col.addLayout(run_row)
+
+        return pane
+
+    @staticmethod
+    def _wrap_layout(layout) -> QWidget:
+        w = QWidget()
+        w.setLayout(layout)
+        return w
+
+    # --- Selection helpers + Spacebar event filter (Explorer-style) ---
+
+    def _set_all_scan_selected(self, checked: bool):
+        state = Qt.Checked if checked else Qt.Unchecked
+        for row in range(self.scan_table.rowCount()):
+            item = self.scan_table.item(row, 0)
+            if item is not None:
+                item.setCheckState(state)
+
+    def _invert_scan_selection(self):
+        for row in range(self.scan_table.rowCount()):
+            item = self.scan_table.item(row, 0)
+            if item is None:
+                continue
+            item.setCheckState(
+                Qt.Unchecked if item.checkState() == Qt.Checked else Qt.Checked
+            )
+
+    def _highlighted_scan_rows(self) -> list:
+        sm = self.scan_table.selectionModel()
+        if sm is None:
+            return []
+        return sorted({idx.row() for idx in sm.selectedIndexes()})
+
+    def _set_selected_scan_rows_checked(self, checked: bool):
+        state = Qt.Checked if checked else Qt.Unchecked
+        for row in self._highlighted_scan_rows():
+            item = self.scan_table.item(row, 0)
+            if item is not None:
+                item.setCheckState(state)
+
+    def _toggle_selected_scan_rows(self):
+        rows = self._highlighted_scan_rows()
+        if not rows:
+            return
+        checked_count = sum(
+            1 for row in rows
+            if self.scan_table.item(row, 0) is not None
+            and self.scan_table.item(row, 0).checkState() == Qt.Checked
+        )
+        new_state = Qt.Unchecked if checked_count * 2 >= len(rows) else Qt.Checked
+        for row in rows:
+            item = self.scan_table.item(row, 0)
+            if item is not None:
+                item.setCheckState(new_state)
+
+    def eventFilter(self, obj, event):
+        """Intercept Space on the scan table to bulk-toggle highlighted rows."""
+        if obj is self.scan_table and event.type() == QEvent.KeyPress:
+            if event.key() in (Qt.Key_Space, Qt.Key_Select):
+                self._toggle_selected_scan_rows()
+                return True
+        return super().eventFilter(obj, event)
+
     def create_file_input(self) -> QWidget:
         """Create a file input row with browse button"""
         container = QWidget()
