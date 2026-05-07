@@ -296,9 +296,12 @@ class FilenameSanitizerTool(BaseTool):
         self.whitespace_check.setChecked(True)
         options_layout.addWidget(self.whitespace_check)
         
-        self.recursive_check = QCheckBox("Process subdirectories recursively")
+        self.recursive_check = QCheckBox("Recursive (include subfolders)")
         self.recursive_check.setChecked(True)
-        self.recursive_check.setToolTip("Include all files in subdirectories")
+        self.recursive_check.setToolTip(
+            "When on, scan all subfolders of the input. When off, scan only "
+            "the input folder itself."
+        )
         options_layout.addWidget(self.recursive_check)
         
         self.update_refs_check = QCheckBox("Update file references in text files (SLOW)")
@@ -349,10 +352,12 @@ class FilenameSanitizerTool(BaseTool):
         self.undo_btn.setEnabled(False)
         button_layout.addWidget(self.undo_btn)
         
-        self.dry_run_btn = QPushButton("Dry Run")
-        self.dry_run_btn.setMinimumWidth(100)
+        self.dry_run_btn = QPushButton("Dry run (no writes)")
+        self.dry_run_btn.setMinimumWidth(140)
         self.dry_run_btn.clicked.connect(lambda: self.start_processing(dry_run=True))
-        self.dry_run_btn.setToolTip("Preview changes without actually renaming files")
+        self.dry_run_btn.setToolTip(
+            "Do everything except writing files — useful for previewing the work."
+        )
         button_layout.addWidget(self.dry_run_btn)
         
         self.process_btn = QPushButton("Process")
