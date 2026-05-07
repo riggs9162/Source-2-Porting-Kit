@@ -174,13 +174,19 @@ class FolderSearchReplaceTool(BaseTool):
         options_group = QGroupBox("Options")
         options_layout = QVBoxLayout()
 
-        self.recursive_check = QCheckBox("Process subdirectories recursively")
+        self.recursive_check = QCheckBox("Recursive (include subfolders)")
         self.recursive_check.setChecked(True)
-        self.recursive_check.setToolTip("Include all folders in subdirectories")
+        self.recursive_check.setToolTip(
+            "When on, scan all subfolders of the input. When off, scan only "
+            "the input folder itself."
+        )
         options_layout.addWidget(self.recursive_check)
 
-        self.backup_check = QCheckBox("Create backup before processing")
+        self.backup_check = QCheckBox("Create backups (.bak)")
         self.backup_check.setChecked(False)
+        self.backup_check.setToolTip(
+            "Save the original alongside the modified copy."
+        )
         options_layout.addWidget(self.backup_check)
 
         options_group.setLayout(options_layout)
