@@ -147,7 +147,7 @@ class AlphaMaskTool(BaseTool):
         # Action buttons
         buttons = QHBoxLayout()
         buttons.addStretch()
-        run_btn = QPushButton("Apply Mask")
+        run_btn = QPushButton("Process")
         run_btn.setMinimumWidth(140)
         run_btn.clicked.connect(self._start)
         buttons.addWidget(run_btn)
