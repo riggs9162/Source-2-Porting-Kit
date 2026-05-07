@@ -472,7 +472,7 @@ def generate_unlit_vmt(output_path: str, base_texture_path: str) -> bool:
     params = {
         "\"$basetexture\"": base_texture_path,
         "\"$model\"": "1",
-        "\"$nocull\"": "1",
+        "\"$nocull\"": "0",
         "\"$selfillum\"": "1"
     }
     
