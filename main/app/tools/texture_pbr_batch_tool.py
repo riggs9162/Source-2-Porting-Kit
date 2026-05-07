@@ -34,9 +34,10 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFileDialog,
     QLineEdit, QGroupBox, QDoubleSpinBox, QCheckBox, QSlider,
     QProgressBar, QFormLayout, QWidget, QComboBox, QTableWidget,
-    QTableWidgetItem, QHeaderView, QAbstractItemView
+    QTableWidgetItem, QHeaderView, QAbstractItemView,
+    QSplitter, QScrollArea, QSizePolicy, QGridLayout,
 )
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt, QThread, Signal, QEvent
 
 from .base_tool import BaseTool
 from .fake_pbr_tool import FakePBRProcessor, ProcessingOptions, PBRInputs, _paint_table_row
@@ -484,104 +485,144 @@ class TexturePBRBatchTool(BaseTool):
         self.setup_content()
 
     def setup_content(self):
-        layout = QVBoxLayout()
-        self.content_layout.addLayout(layout)
+        """Two-pane layout: scrollable settings left, results table right —
+        same shape as vmat_pbr_tool / gltf_smd_batch_tool."""
+        root = QHBoxLayout()
+        self.content_layout.addLayout(root)
 
-        # Previous runs
-        history_group = QGroupBox("Previous Runs")
-        history_form = QFormLayout()
-        self.history_dropdown = QComboBox()
-        self.history_dropdown.addItem("-- Recent runs --")
-        self.history_dropdown.currentIndexChanged.connect(self.on_history_selected)
-        history_form.addRow("Select Run:", self.history_dropdown)
-        history_group.setLayout(history_form)
-        layout.addWidget(history_group)
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.setChildrenCollapsible(False)
+        splitter.addWidget(self._build_settings_pane())
+        splitter.addWidget(self._build_results_pane())
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 2)
+        splitter.setSizes([460, 880])
+        root.addWidget(splitter)
 
         self._refresh_history_dropdown()
 
-        # Input/Output
-        io_group = QGroupBox("Folders")
-        io_form = QFormLayout()
+    # ------------------------------------------------------------------
+    # Pane builders
+    # ------------------------------------------------------------------
+
+    def _build_settings_pane(self) -> QWidget:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+
+        container = QWidget()
+        col = QVBoxLayout(container)
+        col.setContentsMargins(0, 0, 6, 0)
+        col.setSpacing(8)
+
+        col.addWidget(self._build_folders_group())
+        col.addWidget(self._build_output_group())
+        col.addWidget(self._build_processing_group())
+        col.addWidget(self._build_requirements_group())
+        col.addStretch()
+
+        scroll.setWidget(container)
+        scroll.setMinimumWidth(420)
+        return scroll
+
+    def _build_folders_group(self) -> QGroupBox:
+        group = QGroupBox("Folders & Recent Runs")
+        form = QFormLayout()
+
+        self.history_dropdown = QComboBox()
+        self.history_dropdown.addItem("-- Recent runs --")
+        self.history_dropdown.currentIndexChanged.connect(self.on_history_selected)
+        form.addRow("Recent run:", self.history_dropdown)
 
         self.input_root = QLineEdit()
         in_btn = QPushButton("Browse...")
         in_btn.clicked.connect(lambda: self._browse_dir_into(self.input_root))
-        io_form.addRow("Input Root:", self._row(self.input_root, in_btn))
+        form.addRow("Input root:", self._row(self.input_root, in_btn))
 
         self.output_root = QLineEdit()
         out_btn = QPushButton("Browse...")
         out_btn.clicked.connect(lambda: self._browse_dir_into(self.output_root))
-        io_form.addRow("Output Root:", self._row(self.output_root, out_btn))
+        form.addRow("Output root:", self._row(self.output_root, out_btn))
 
-        io_group.setLayout(io_form)
-        layout.addWidget(io_group)
+        self.material_path = QLineEdit()
+        self.material_path.setText("models/ports")
+        self.material_path.setPlaceholderText("models/ports (Fake) or exopbr (Exo)")
+        form.addRow("Material path:", self.material_path)
 
-        # Options
-        opt_group = QGroupBox("Options")
-        opt_form = QFormLayout()
+        group.setLayout(form)
+        return group
+
+    def _build_output_group(self) -> QGroupBox:
+        group = QGroupBox("Output")
+        form = QFormLayout()
 
         self.mode_combo = QComboBox()
         self.mode_combo.addItems(["Fake PBR", "Exo PBR"])
-        opt_form.addRow("Mode:", self.mode_combo)
+        form.addRow("Mode:", self.mode_combo)
 
-        self.recursive_scan = QCheckBox("Scan recursively")
+        # Boolean toggles in a 2x2 grid.
+        gen_grid = QGridLayout()
+        gen_grid.setContentsMargins(0, 0, 0, 0)
+        gen_grid.setHorizontalSpacing(12)
+        self.recursive_scan = QCheckBox("Recursive (include subfolders)")
         self.recursive_scan.setChecked(True)
-        self.recursive_scan.setToolTip("Include subfolders when scanning the input root.")
-        opt_form.addRow("", self.recursive_scan)
-
+        self.recursive_scan.setToolTip(
+            "When on, scan all subfolders of the input. When off, scan only "
+            "the input folder itself."
+        )
         self.preserve_structure = QCheckBox("Preserve folder structure")
         self.preserve_structure.setChecked(True)
-        opt_form.addRow("", self.preserve_structure)
-
-        self.overwrite = QCheckBox("Overwrite existing outputs")
+        self.preserve_structure.setToolTip(
+            "Mirror the input folder tree under the output root."
+        )
+        self.overwrite = QCheckBox("Replace existing outputs")
         self.overwrite.setChecked(False)
-        opt_form.addRow("", self.overwrite)
-
+        self.overwrite.setToolTip(
+            "Overwrite outputs that already exist in the destination folder."
+        )
         self.include_emissive = QCheckBox("Include emissive if present")
         self.include_emissive.setChecked(True)
-        opt_form.addRow("", self.include_emissive)
-
         self.generate_mipmaps = QCheckBox("Generate Mipmaps")
         self.generate_mipmaps.setChecked(True)
-        opt_form.addRow("", self.generate_mipmaps)
+        gen_grid.addWidget(self.recursive_scan, 0, 0)
+        gen_grid.addWidget(self.preserve_structure, 0, 1)
+        gen_grid.addWidget(self.overwrite, 1, 0)
+        gen_grid.addWidget(self.include_emissive, 1, 1)
+        gen_grid.addWidget(self.generate_mipmaps, 2, 0)
+        form.addRow("Run mode:", self._wrap_layout(gen_grid))
 
-        metal_supp_row = QHBoxLayout()
-        self.metal_suppression_slider = QSlider(Qt.Horizontal)
-        self.metal_suppression_slider.setRange(0, 100)
-        self.metal_suppression_slider.setValue(70)
+        group.setLayout(form)
+        return group
+
+    def _build_processing_group(self) -> QGroupBox:
+        """Sliders + tint mode (Fake PBR only — Exo ignores these)."""
+        group = QGroupBox("Processing Options")
+        form = QFormLayout()
+
+        self.metal_suppression_slider, self.metal_suppression_value = self._make_slider(
+            0, 100, 70, 0.01,
+        )
         self.metal_suppression_slider.setToolTip(
             "Fake PBR only. How much to darken albedo on metal pixels. "
             "0.00 = no darkening, 1.00 = fully darkened (metal becomes black diffuse)."
         )
-        self.metal_suppression_value = QLabel("0.70")
-        self.metal_suppression_slider.valueChanged.connect(
-            lambda v: self.metal_suppression_value.setText(f"{v/100:.2f}")
+        form.addRow(
+            "Metal Diffuse Suppression:",
+            self._slider_row(self.metal_suppression_slider, self.metal_suppression_value),
         )
-        metal_supp_row.addWidget(self.metal_suppression_slider)
-        metal_supp_row.addWidget(self.metal_suppression_value)
-        metal_supp_widget = QWidget()
-        metal_supp_widget.setLayout(metal_supp_row)
-        metal_supp_row.setContentsMargins(0, 0, 0, 0)
-        opt_form.addRow("Metal Diffuse Suppression:", metal_supp_widget)
 
-        phong_row = QHBoxLayout()
-        self.phong_strength_slider = QSlider(Qt.Horizontal)
-        self.phong_strength_slider.setRange(0, 200)
-        self.phong_strength_slider.setValue(50)
+        self.phong_strength_slider, self.phong_strength_value = self._make_slider(
+            0, 200, 50, 0.01,
+        )
         self.phong_strength_slider.setToolTip(
             "Fake PBR only. Scales the phong mask and phong exponent map. "
             "0.00 = no phong, 0.50 = halved (default), 1.00 = original strength."
         )
-        self.phong_strength_value = QLabel("0.50")
-        self.phong_strength_slider.valueChanged.connect(
-            lambda v: self.phong_strength_value.setText(f"{v/100:.2f}")
+        form.addRow(
+            "Phong Strength:",
+            self._slider_row(self.phong_strength_slider, self.phong_strength_value),
         )
-        phong_row.addWidget(self.phong_strength_slider)
-        phong_row.addWidget(self.phong_strength_value)
-        phong_widget = QWidget()
-        phong_widget.setLayout(phong_row)
-        phong_row.setContentsMargins(0, 0, 0, 0)
-        opt_form.addRow("Phong Strength:", phong_widget)
 
         self.phong_tint_mode_combo = QComboBox()
         self.phong_tint_mode_combo.addItem("Off", "off")
@@ -594,50 +635,37 @@ class TexturePBRBatchTool(BaseTool):
             "Blanket: divide-by-luminance compensation everywhere. "
             "No effect on targets without $phongalbedotint."
         )
-        opt_form.addRow("Phong Tint Mode:", self.phong_tint_mode_combo)
+        form.addRow("Phong Tint Mode:", self.phong_tint_mode_combo)
 
-        relief_row = QHBoxLayout()
-        self.colored_metal_relief_slider = QSlider(Qt.Horizontal)
-        self.colored_metal_relief_slider.setRange(0, 100)
-        self.colored_metal_relief_slider.setValue(50)
+        self.colored_metal_relief_slider, self.colored_metal_relief_value = self._make_slider(
+            0, 100, 50, 0.01,
+        )
         self.colored_metal_relief_slider.setToolTip(
             "Fake PBR only. Per-pixel relief on Metal Diffuse Suppression for chromatic metals. "
             "Only applied when Phong Tint Mode is not Off."
         )
-        self.colored_metal_relief_value = QLabel("0.50")
-        self.colored_metal_relief_slider.valueChanged.connect(
-            lambda v: self.colored_metal_relief_value.setText(f"{v/100:.2f}")
+        form.addRow(
+            "Colored Metal Relief:",
+            self._slider_row(self.colored_metal_relief_slider, self.colored_metal_relief_value),
         )
-        relief_row.addWidget(self.colored_metal_relief_slider)
-        relief_row.addWidget(self.colored_metal_relief_value)
-        relief_widget = QWidget()
-        relief_widget.setLayout(relief_row)
-        relief_row.setContentsMargins(0, 0, 0, 0)
-        opt_form.addRow("Colored Metal Relief:", relief_widget)
 
-        self.material_path = QLineEdit()
-        self.material_path.setText("models/ports")
-        self.material_path.setPlaceholderText("models/ports (Fake) or exopbr (Exo)")
-        opt_form.addRow("Material Path:", self.material_path)
+        group.setLayout(form)
+        return group
 
-        opt_group.setLayout(opt_form)
-        layout.addWidget(opt_group)
-
-        # Requirements: which texture roles must be present for an asset to
-        # be processed. Color/Normal default on (matching today's hardcoded
-        # validation); ORM/Emissive default off so existing scans behave as
-        # before. Toggling re-applies live to the table — rows missing a
-        # required role get auto-unchecked.
-        req_group = QGroupBox("Requirements")
-        req_layout = QHBoxLayout()
-        req_layout.setContentsMargins(8, 6, 8, 6)
+    def _build_requirements_group(self) -> QGroupBox:
+        """Texture-role filter — 2-column grid so it fits in the narrow pane."""
+        group = QGroupBox("Required maps (filter)")
+        grid = QGridLayout()
+        grid.setContentsMargins(8, 6, 8, 6)
+        grid.setHorizontalSpacing(12)
         self.req_checkboxes: Dict[str, QCheckBox] = {}
-        for label, key, default in (
+        roles = (
             ("Color", "color", True),
             ("Normal", "normal", True),
             ("ORM", "orm", False),
             ("Emissive", "emissive", False),
-        ):
+        )
+        for idx, (label, key, default) in enumerate(roles):
             cb = QCheckBox(label)
             cb.setChecked(default)
             cb.setToolTip(
@@ -645,45 +673,171 @@ class TexturePBRBatchTool(BaseTool):
                 f"Rows missing this role will be auto-unchecked in the table."
             )
             cb.stateChanged.connect(self._apply_requirements_filter)
-            req_layout.addWidget(cb)
+            grid.addWidget(cb, idx // 2, idx % 2)
             self.req_checkboxes[key] = cb
-        req_layout.addStretch()
-        req_group.setLayout(req_layout)
-        layout.addWidget(req_group)
+        group.setLayout(grid)
+        return group
+
+    def _build_results_pane(self) -> QWidget:
+        pane = QWidget()
+        col = QVBoxLayout(pane)
+        col.setContentsMargins(6, 0, 0, 0)
+        col.setSpacing(6)
+
+        action_row = QHBoxLayout()
+        self.scan_btn = QPushButton("Scan")
+        self.scan_btn.clicked.connect(self.scan)
+        action_row.addWidget(self.scan_btn)
+
+        action_row.addSpacing(12)
+        action_row.addWidget(QLabel("All:"))
+        self.select_all_btn = QPushButton("Check")
+        self.select_all_btn.clicked.connect(lambda: self._set_all_results_selected(True))
+        self.select_none_btn = QPushButton("Uncheck")
+        self.select_none_btn.clicked.connect(lambda: self._set_all_results_selected(False))
+        self.select_invert_btn = QPushButton("Invert")
+        self.select_invert_btn.clicked.connect(self._invert_results_selection)
+        for b in (self.select_all_btn, self.select_none_btn, self.select_invert_btn):
+            action_row.addWidget(b)
+
+        action_row.addSpacing(12)
+        action_row.addWidget(QLabel("Selected:"))
+        sel_tooltip = (
+            "Click a row, then Shift+Click (range) or Ctrl+Click (toggle) more "
+            "rows like in Explorer.\n"
+            "These buttons toggle the Include checkbox for the highlighted rows "
+            "only. Pressing Space while the table has focus does the same."
+        )
+        self.check_selected_btn = QPushButton("Check")
+        self.check_selected_btn.setToolTip(sel_tooltip)
+        self.check_selected_btn.clicked.connect(lambda: self._set_selected_rows_checked(True))
+        self.uncheck_selected_btn = QPushButton("Uncheck")
+        self.uncheck_selected_btn.setToolTip(sel_tooltip)
+        self.uncheck_selected_btn.clicked.connect(lambda: self._set_selected_rows_checked(False))
+        self.toggle_selected_btn = QPushButton("Toggle")
+        self.toggle_selected_btn.setToolTip(sel_tooltip)
+        self.toggle_selected_btn.clicked.connect(self._toggle_selected_rows)
+        for b in (self.check_selected_btn, self.uncheck_selected_btn, self.toggle_selected_btn):
+            action_row.addWidget(b)
+
+        action_row.addStretch()
+        col.addLayout(action_row)
 
         # Results table
         self.results_table = QTableWidget(0, 8)
         self.results_table.setHorizontalHeaderLabels([
-            "Include", "Asset", "Color", "Normal", "ORM", "Emissive", "Metal Override", "Warnings"
+            "Include", "Asset", "Color", "Normal", "ORM", "Emissive",
+            "Metal Override", "Warnings",
         ])
         header = self.results_table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.Stretch)
         self.results_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.results_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.results_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        layout.addWidget(self.results_table)
+        self.results_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.results_table.installEventFilter(self)
+        col.addWidget(self.results_table, 1)
 
-        # Progress
         self.progress = QProgressBar()
         self.progress.setVisible(False)
-        layout.addWidget(self.progress)
+        col.addWidget(self.progress)
 
-        # Buttons
-        btn_row = QHBoxLayout()
-        self.scan_btn = QPushButton("Scan")
-        self.scan_btn.clicked.connect(self.scan)
-        self.convert_btn = QPushButton("Convert")
-        self.convert_btn.setEnabled(False)
-        self.convert_btn.clicked.connect(self.convert)
+        run_row = QHBoxLayout()
+        run_row.addStretch()
         self.cancel_btn = QPushButton("Cancel")
         self.cancel_btn.setEnabled(False)
         self.cancel_btn.clicked.connect(self.cancel)
-        btn_row.addWidget(self.scan_btn)
-        btn_row.addStretch()
-        btn_row.addWidget(self.cancel_btn)
-        btn_row.addWidget(self.convert_btn)
-        layout.addLayout(btn_row)
+        self.convert_btn = QPushButton("Convert")
+        self.convert_btn.setEnabled(False)
+        self.convert_btn.clicked.connect(self.convert)
+        run_row.addWidget(self.cancel_btn)
+        run_row.addWidget(self.convert_btn)
+        col.addLayout(run_row)
 
-        layout.addStretch()
+        return pane
+
+    # ------------------------------------------------------------------
+    # Small layout helpers
+    # ------------------------------------------------------------------
+
+    def _make_slider(self, lo: int, hi: int, initial: int, step: float):
+        slider = QSlider(Qt.Horizontal)
+        slider.setRange(lo, hi)
+        slider.setValue(initial)
+        label = QLabel(f"{initial * step:.2f}")
+        slider.valueChanged.connect(lambda v, _s=step: label.setText(f"{v * _s:.2f}"))
+        return slider, label
+
+    def _slider_row(self, slider: QSlider, label: QLabel) -> QWidget:
+        row = QHBoxLayout()
+        row.addWidget(slider, 1)
+        row.addWidget(label)
+        wrap = QWidget()
+        row.setContentsMargins(0, 0, 0, 0)
+        wrap.setLayout(row)
+        return wrap
+
+    @staticmethod
+    def _wrap_layout(layout) -> QWidget:
+        w = QWidget()
+        w.setLayout(layout)
+        return w
+
+    # ------------------------------------------------------------------
+    # Selection helpers + Spacebar event filter (Explorer-style)
+    # ------------------------------------------------------------------
+
+    def _set_all_results_selected(self, checked: bool):
+        state = Qt.Checked if checked else Qt.Unchecked
+        for row in range(self.results_table.rowCount()):
+            item = self.results_table.item(row, 0)
+            if item is not None:
+                item.setCheckState(state)
+
+    def _invert_results_selection(self):
+        for row in range(self.results_table.rowCount()):
+            item = self.results_table.item(row, 0)
+            if item is None:
+                continue
+            item.setCheckState(
+                Qt.Unchecked if item.checkState() == Qt.Checked else Qt.Checked
+            )
+
+    def _highlighted_rows(self) -> List[int]:
+        sm = self.results_table.selectionModel()
+        if sm is None:
+            return []
+        return sorted({idx.row() for idx in sm.selectedIndexes()})
+
+    def _set_selected_rows_checked(self, checked: bool):
+        state = Qt.Checked if checked else Qt.Unchecked
+        for row in self._highlighted_rows():
+            item = self.results_table.item(row, 0)
+            if item is not None:
+                item.setCheckState(state)
+
+    def _toggle_selected_rows(self):
+        rows = self._highlighted_rows()
+        if not rows:
+            return
+        checked_count = sum(
+            1 for row in rows
+            if self.results_table.item(row, 0) is not None
+            and self.results_table.item(row, 0).checkState() == Qt.Checked
+        )
+        new_state = Qt.Unchecked if checked_count * 2 >= len(rows) else Qt.Checked
+        for row in rows:
+            item = self.results_table.item(row, 0)
+            if item is not None:
+                item.setCheckState(new_state)
+
+    def eventFilter(self, obj, event):
+        """Intercept Space on the results table to bulk-toggle highlighted rows."""
+        if obj is self.results_table and event.type() == QEvent.KeyPress:
+            if event.key() in (Qt.Key_Space, Qt.Key_Select):
+                self._toggle_selected_rows()
+                return True
+        return super().eventFilter(obj, event)
 
     def _load_history(self):
         try:
