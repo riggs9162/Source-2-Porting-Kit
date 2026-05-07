@@ -35,20 +35,24 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 from PIL import Image
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt, QThread, Signal, QEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
     QComboBox,
     QFileDialog,
     QFormLayout,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QLineEdit,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
     QSlider,
+    QSplitter,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -336,34 +340,70 @@ class FakePBRReverseTool(BaseTool):
     # ------------------------------------------------------------------ UI
 
     def setup_tool_ui(self):
-        # Previous runs
-        history_group = QGroupBox("Previous Runs")
-        history_form = QFormLayout()
+        """Two-pane layout: scrollable settings left, results table + run
+        controls right — matches vmat_pbr_tool / gltf_smd_batch_tool."""
+        root = QHBoxLayout()
+        self.content_layout.addLayout(root)
+
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.setChildrenCollapsible(False)
+        splitter.addWidget(self._build_settings_pane())
+        splitter.addWidget(self._build_results_pane())
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 2)
+        splitter.setSizes([460, 880])
+        root.addWidget(splitter)
+
+    # ------------------------------------------------------------------
+    # Pane builders
+    # ------------------------------------------------------------------
+
+    def _build_settings_pane(self) -> QWidget:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+
+        container = QWidget()
+        col = QVBoxLayout(container)
+        col.setContentsMargins(0, 0, 6, 0)
+        col.setSpacing(8)
+
+        col.addWidget(self._build_folders_group())
+        col.addWidget(self._build_options_group())
+        col.addWidget(self._build_decode_group())
+        col.addStretch()
+
+        scroll.setWidget(container)
+        scroll.setMinimumWidth(420)
+        return scroll
+
+    def _build_folders_group(self) -> QGroupBox:
+        group = QGroupBox("Folders & Recent Runs")
+        form = QFormLayout()
+
         self.history_dropdown = QComboBox()
         self.history_dropdown.addItem("-- Recent runs --")
         self.history_dropdown.currentIndexChanged.connect(self.on_history_selected)
-        history_form.addRow("Select Run:", self.history_dropdown)
-        history_group.setLayout(history_form)
-        self.content_layout.addWidget(history_group)
+        form.addRow("Recent run:", self.history_dropdown)
 
-        # Folders
-        io_group = QGroupBox("Folders")
-        io_form = QFormLayout()
         self.input_root = QLineEdit()
         in_btn = QPushButton("Browse...")
         in_btn.clicked.connect(lambda: self._browse_dir_into(self.input_root))
-        io_form.addRow("Input Root:", self._row(self.input_root, in_btn))
+        form.addRow("Input root:", self._row(self.input_root, in_btn))
 
         self.output_root = QLineEdit()
         out_btn = QPushButton("Browse...")
         out_btn.clicked.connect(lambda: self._browse_dir_into(self.output_root))
-        io_form.addRow("Output Root:", self._row(self.output_root, out_btn))
-        io_group.setLayout(io_form)
-        self.content_layout.addWidget(io_group)
+        form.addRow("Output root:", self._row(self.output_root, out_btn))
 
-        # Options
-        opt_group = QGroupBox("Options")
-        opt_form = QFormLayout()
+        group.setLayout(form)
+        return group
+
+    def _build_options_group(self) -> QGroupBox:
+        """Scan mode + run-mode booleans."""
+        group = QGroupBox("Output")
+        form = QFormLayout()
 
         self.scan_mode = QComboBox()
         self.scan_mode.addItems([self.SCAN_MODE_VTF, self.SCAN_MODE_VMT])
@@ -375,15 +415,46 @@ class FakePBRReverseTool(BaseTool):
             "$phongexponenttexture and use the VMT name as the output base. "
             "Robust against messy VTF filenames."
         )
-        opt_form.addRow("Scan Mode:", self.scan_mode)
+        form.addRow("Scan mode:", self.scan_mode)
 
-        self.recursive = QCheckBox("Scan recursively")
+        # Run-mode booleans in a 2x2 grid.
+        run_grid = QGridLayout()
+        run_grid.setContentsMargins(0, 0, 0, 0)
+        run_grid.setHorizontalSpacing(12)
+        self.recursive = QCheckBox("Recursive (include subfolders)")
         self.recursive.setChecked(True)
-        opt_form.addRow("", self.recursive)
-
+        self.recursive.setToolTip(
+            "When on, scan all subfolders of the input. When off, scan only "
+            "the input folder itself."
+        )
         self.preserve_structure = QCheckBox("Preserve folder structure")
         self.preserve_structure.setChecked(True)
-        opt_form.addRow("", self.preserve_structure)
+        self.preserve_structure.setToolTip(
+            "Mirror the input folder tree under the output root."
+        )
+        self.overwrite = QCheckBox("Replace existing outputs")
+        self.overwrite.setChecked(False)
+        self.overwrite.setToolTip(
+            "Overwrite outputs that already exist in the destination folder."
+        )
+        self.write_opacity = QCheckBox("Write opacity PNG")
+        self.write_opacity.setChecked(True)
+        self.write_opacity.setToolTip(
+            "Write opacity PNG when color alpha is non-trivial."
+        )
+        run_grid.addWidget(self.recursive, 0, 0)
+        run_grid.addWidget(self.preserve_structure, 0, 1)
+        run_grid.addWidget(self.overwrite, 1, 0)
+        run_grid.addWidget(self.write_opacity, 1, 1)
+        form.addRow("Run mode:", self._wrap_layout(run_grid))
+
+        group.setLayout(form)
+        return group
+
+    def _build_decode_group(self) -> QGroupBox:
+        """Decoding knobs — sliders + the metal-undo checkbox."""
+        group = QGroupBox("Decode Settings")
+        form = QFormLayout()
 
         self.invert_green = QCheckBox("Invert normal green channel (Y-flip)")
         self.invert_green.setChecked(False)
@@ -391,7 +462,7 @@ class FakePBRReverseTool(BaseTool):
             "Enable if the source PBR pipeline used OpenGL (+Y up) normals "
             "and you need DirectX (-Y up) on output, or vice versa."
         )
-        opt_form.addRow("", self.invert_green)
+        form.addRow("", self.invert_green)
 
         self.recover_albedo = QCheckBox("Attempt metal-suppression undo on color")
         self.recover_albedo.setChecked(False)
@@ -402,22 +473,14 @@ class FakePBRReverseTool(BaseTool):
             "partially recovers the original albedo and can over-brighten "
             "metal areas."
         )
-        opt_form.addRow("", self.recover_albedo)
-
-        self.write_opacity = QCheckBox("Write opacity PNG when color alpha is non-trivial")
-        self.write_opacity.setChecked(True)
-        opt_form.addRow("", self.write_opacity)
-
-        self.overwrite = QCheckBox("Overwrite existing PNGs")
-        self.overwrite.setChecked(False)
-        opt_form.addRow("", self.overwrite)
+        form.addRow("", self.recover_albedo)
 
         self.gloss_gamma_slider, gamma_widget, self.gloss_gamma_label = self._make_slider(
             10, 40, 20, 10.0, "{:.2f}",
             "Gloss gamma originally used when encoding (default 2.00). "
             "Used to invert (1 - roughness)^gamma when recovering roughness."
         )
-        opt_form.addRow("Gloss Gamma:", gamma_widget)
+        form.addRow("Gloss Gamma:", gamma_widget)
 
         self.phong_strength_slider, phong_widget, self.phong_strength_label = self._make_slider(
             1, 200, 100, 100.0, "{:.2f}",
@@ -428,47 +491,162 @@ class FakePBRReverseTool(BaseTool):
             "Use 0.50 for VTFs you just made with this app's current Fake PBR "
             "default (which halves the phong R channel)."
         )
-        opt_form.addRow("Phong Strength:", phong_widget)
+        form.addRow("Phong Strength:", phong_widget)
 
         self.metal_supp_slider, metal_widget, self.metal_supp_label = self._make_slider(
             0, 100, 70, 100.0, "{:.2f}",
             "Metal Diffuse Suppression originally used when encoding (default 0.70). "
             "Only applied when 'Attempt metal-suppression undo on color' is enabled."
         )
-        opt_form.addRow("Metal Diffuse Suppression:", metal_widget)
+        form.addRow("Metal Diffuse Suppression:", metal_widget)
 
-        opt_group.setLayout(opt_form)
-        self.content_layout.addWidget(opt_group)
+        group.setLayout(form)
+        return group
 
-        # Scan results table — populated by Scan, consumed by Reverse.
-        # Columns adapt to the scan mode (VMT scans show the VMT path).
-        self.results_table = QTableWidget(0, 7)
+    def _build_results_pane(self) -> QWidget:
+        pane = QWidget()
+        col = QVBoxLayout(pane)
+        col.setContentsMargins(6, 0, 0, 0)
+        col.setSpacing(6)
+
+        action_row = QHBoxLayout()
+        self.scan_button = QPushButton("Scan")
+        self.scan_button.clicked.connect(self.scan)
+        action_row.addWidget(self.scan_button)
+
+        action_row.addSpacing(12)
+        action_row.addWidget(QLabel("All:"))
+        self.select_all_btn = QPushButton("Check")
+        self.select_all_btn.clicked.connect(lambda: self._set_all_results_selected(True))
+        self.select_none_btn = QPushButton("Uncheck")
+        self.select_none_btn.clicked.connect(lambda: self._set_all_results_selected(False))
+        self.select_invert_btn = QPushButton("Invert")
+        self.select_invert_btn.clicked.connect(self._invert_results_selection)
+        for b in (self.select_all_btn, self.select_none_btn, self.select_invert_btn):
+            action_row.addWidget(b)
+
+        action_row.addSpacing(12)
+        action_row.addWidget(QLabel("Selected:"))
+        sel_tooltip = (
+            "Click a row, then Shift+Click (range) or Ctrl+Click (toggle) more "
+            "rows like in Explorer.\n"
+            "These buttons toggle the Include checkbox for the highlighted rows "
+            "only. Pressing Space while the table has focus does the same."
+        )
+        self.check_selected_btn = QPushButton("Check")
+        self.check_selected_btn.setToolTip(sel_tooltip)
+        self.check_selected_btn.clicked.connect(lambda: self._set_selected_rows_checked(True))
+        self.uncheck_selected_btn = QPushButton("Uncheck")
+        self.uncheck_selected_btn.setToolTip(sel_tooltip)
+        self.uncheck_selected_btn.clicked.connect(lambda: self._set_selected_rows_checked(False))
+        self.toggle_selected_btn = QPushButton("Toggle")
+        self.toggle_selected_btn.setToolTip(sel_tooltip)
+        self.toggle_selected_btn.clicked.connect(self._toggle_selected_rows)
+        for b in (self.check_selected_btn, self.uncheck_selected_btn, self.toggle_selected_btn):
+            action_row.addWidget(b)
+
+        action_row.addStretch()
+        col.addLayout(action_row)
+
+        # Results table — Include checkbox at column 0 plus the original
+        # 7 data columns shifted by +1.
+        self.results_table = QTableWidget(0, 8)
         self._set_results_headers(self.SCAN_MODE_VTF)
         header = self.results_table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.Stretch)
         self.results_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.results_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.results_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.results_table.setMinimumHeight(180)
-        self.content_layout.addWidget(self.results_table)
+        self.results_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.results_table.installEventFilter(self)
+        col.addWidget(self.results_table, 1)
 
-        # Buttons: Scan → enables Reverse; Cancel
-        btn_row = QHBoxLayout()
-        self.scan_button = QPushButton("Scan")
-        self.scan_button.setMinimumHeight(36)
-        self.scan_button.clicked.connect(self.scan)
-        self.run_button = QPushButton("Reverse to PNGs")
-        self.run_button.setMinimumHeight(36)
-        self.run_button.setEnabled(False)
-        self.run_button.clicked.connect(self.start_reverse)
+        run_row = QHBoxLayout()
+        run_row.addStretch()
         self.cancel_button = QPushButton("Cancel")
         self.cancel_button.setEnabled(False)
         self.cancel_button.clicked.connect(self.cancel_worker)
-        btn_row.addWidget(self.scan_button)
-        btn_row.addStretch()
-        btn_row.addWidget(self.cancel_button)
-        btn_row.addWidget(self.run_button)
-        self.content_layout.addLayout(btn_row)
-        self.content_layout.addStretch()
+        self.run_button = QPushButton("Reverse")
+        self.run_button.setEnabled(False)
+        self.run_button.clicked.connect(self.start_reverse)
+        run_row.addWidget(self.cancel_button)
+        run_row.addWidget(self.run_button)
+        col.addLayout(run_row)
+
+        return pane
+
+    @staticmethod
+    def _wrap_layout(layout) -> QWidget:
+        w = QWidget()
+        w.setLayout(layout)
+        return w
+
+    # ------------------------------------------------------------------
+    # Selection helpers + Spacebar event filter (Explorer-style)
+    # ------------------------------------------------------------------
+
+    def _set_all_results_selected(self, checked: bool):
+        state = Qt.Checked if checked else Qt.Unchecked
+        for row in range(self.results_table.rowCount()):
+            item = self.results_table.item(row, 0)
+            if item is not None:
+                item.setCheckState(state)
+
+    def _invert_results_selection(self):
+        for row in range(self.results_table.rowCount()):
+            item = self.results_table.item(row, 0)
+            if item is None:
+                continue
+            item.setCheckState(
+                Qt.Unchecked if item.checkState() == Qt.Checked else Qt.Checked
+            )
+
+    def _highlighted_rows(self) -> List[int]:
+        sm = self.results_table.selectionModel()
+        if sm is None:
+            return []
+        return sorted({idx.row() for idx in sm.selectedIndexes()})
+
+    def _set_selected_rows_checked(self, checked: bool):
+        state = Qt.Checked if checked else Qt.Unchecked
+        for row in self._highlighted_rows():
+            item = self.results_table.item(row, 0)
+            if item is not None:
+                item.setCheckState(state)
+
+    def _toggle_selected_rows(self):
+        rows = self._highlighted_rows()
+        if not rows:
+            return
+        checked_count = sum(
+            1 for row in rows
+            if self.results_table.item(row, 0) is not None
+            and self.results_table.item(row, 0).checkState() == Qt.Checked
+        )
+        new_state = Qt.Unchecked if checked_count * 2 >= len(rows) else Qt.Checked
+        for row in rows:
+            item = self.results_table.item(row, 0)
+            if item is not None:
+                item.setCheckState(new_state)
+
+    def _selected_materials(self) -> List["Material"]:
+        """Filter ``scanned_materials`` to rows whose Include box is ticked."""
+        chosen: List[Material] = []
+        for row in range(self.results_table.rowCount()):
+            item = self.results_table.item(row, 0)
+            if item is None or item.checkState() != Qt.Checked:
+                continue
+            if 0 <= row < len(self.scanned_materials):
+                chosen.append(self.scanned_materials[row])
+        return chosen
+
+    def eventFilter(self, obj, event):
+        """Intercept Space on the results table to bulk-toggle highlighted rows."""
+        if obj is self.results_table and event.type() == QEvent.KeyPress:
+            if event.key() in (Qt.Key_Space, Qt.Key_Select):
+                self._toggle_selected_rows()
+                return True
+        return super().eventFilter(obj, event)
 
     def _row(self, line_edit: QLineEdit, button: QPushButton) -> QWidget:
         w = QWidget()
@@ -500,10 +678,13 @@ class FakePBRReverseTool(BaseTool):
     # ------------------------------------------------------------------ results table
 
     def _set_results_headers(self, mode: str) -> None:
-        """Set column headers — VMT mode shows the VMT path instead of the VTF stem."""
-        first_col = "VMT" if mode == self.SCAN_MODE_VMT else "Material"
+        """Set column headers — VMT mode shows the VMT path instead of the
+        VTF stem. Column 0 is always the Include checkbox; data columns
+        start at index 1."""
+        name_col = "VMT" if mode == self.SCAN_MODE_VMT else "Material"
         self.results_table.setHorizontalHeaderLabels(
-            [first_col, "Color", "Normal", "Phong", "Envmask", "Folder", "Output Name"]
+            ["Include", name_col, "Color", "Normal", "Phong",
+             "Envmask", "Folder", "Output Name"]
         )
 
     def _populate_results_table(self, materials: List[Material], mode: str) -> None:
@@ -512,23 +693,38 @@ class FakePBRReverseTool(BaseTool):
         for output_name, folder, paths in materials:
             row = self.results_table.rowCount()
             self.results_table.insertRow(row)
+
+            # Include checkbox (column 0) — defaults checked, like every
+            # other batch tool's results table.
+            include_item = QTableWidgetItem()
+            include_item.setFlags(
+                (include_item.flags() | Qt.ItemIsUserCheckable) & ~Qt.ItemIsEditable
+            )
+            include_item.setCheckState(Qt.Checked)
+            self.results_table.setItem(row, 0, include_item)
+
+            # Material/VMT name (column 1)
             if mode == self.SCAN_MODE_VMT:
                 vmt_label = f"{output_name}.vmt"
             else:
                 vmt_label = output_name
-            first_item = QTableWidgetItem(vmt_label)
-            first_item.setToolTip(str(folder))
-            self.results_table.setItem(row, 0, first_item)
-            for col, role in enumerate(("color", "normal", "phong", "envmask"), start=1):
+            name_item = QTableWidgetItem(vmt_label)
+            name_item.setToolTip(str(folder))
+            self.results_table.setItem(row, 1, name_item)
+
+            # Texture role columns (color/normal/phong/envmask: 2..5)
+            for col, role in enumerate(("color", "normal", "phong", "envmask"), start=2):
                 p = paths.get(role)
                 cell = QTableWidgetItem(p.name if p is not None else "—")
                 if p is not None:
                     cell.setToolTip(str(p))
                 self.results_table.setItem(row, col, cell)
+
+            # Folder + Output Name (columns 6, 7)
             folder_item = QTableWidgetItem(str(folder))
             folder_item.setToolTip(str(folder))
-            self.results_table.setItem(row, 5, folder_item)
-            self.results_table.setItem(row, 6, QTableWidgetItem(output_name))
+            self.results_table.setItem(row, 6, folder_item)
+            self.results_table.setItem(row, 7, QTableWidgetItem(output_name))
 
     def _on_scan_mode_changed(self) -> None:
         self._set_results_headers(self.scan_mode.currentText())
@@ -632,6 +828,10 @@ class FakePBRReverseTool(BaseTool):
         if not self.scanned_materials:
             self.log("Nothing to reverse — run Scan first.", "ERROR")
             return
+        materials = self._selected_materials()
+        if not materials:
+            self.log("No materials selected — tick at least one Include row.", "ERROR")
+            return
         out_text = self.output_root.text().strip()
         if not out_text:
             self.log("Output root is required", "ERROR")
@@ -646,7 +846,7 @@ class FakePBRReverseTool(BaseTool):
         self.cancel_button.setEnabled(True)
 
         self.worker = FakePBRReverseWorker(
-            materials=self.scanned_materials,
+            materials=materials,
             output_root=out_root,
             input_root=in_root,
             preserve_structure=self.preserve_structure.isChecked(),
