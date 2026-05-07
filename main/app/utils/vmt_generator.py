@@ -184,6 +184,16 @@ def generate_fakepbr_vmt(
         ("Phong", ["\"$phong\"", "\"$phongboost\"", "\"$phongexponentfactor\"", "\"$phongtint\"", "\"$phongalbedotint\"", "\"$phongfresnelranges\""]),
         ("Environment Map", ["\"$envmap\"", "\"$envmapmask\"", "\"$envmaptint\"", "\"$envmapcontrast\"", "\"$envmapsaturation\"", "\"$envmapfresnel\"", "\"$normalmapalphaenvmapmask\"", "\"$envmaplightscale\""]),
         ("Rimlight", ["\"$rimlight\"", "\"$rimlightexponent\"", "\"$rimlightboost\"", "\"$rimmask\""]),
+        ("Self-Illumination", ["\"$selfillum\"", "\"$selfillummask\"", "\"$selfillumtint\"", "\"$selfillummaskscale\""]),
+        ("Emissive Blend", [
+            "\"$EmissiveBlendEnabled\"",
+            "\"$EmissiveBlendStrength\"",
+            "\"$EmissiveBlendTexture\"",
+            "\"$EmissiveBlendBaseTexture\"",
+            "\"$EmissiveBlendFlowTexture\"",
+            "\"$EmissiveBlendTint\"",
+            "\"$EmissiveBlendScrollVector\"",
+        ]),
         ("Surface", ["\"$halflambert\"", "\"$model\""]),
     ]
 
