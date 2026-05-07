@@ -35,9 +35,10 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFileDialog,
     QLineEdit, QGroupBox, QDoubleSpinBox, QCheckBox, QRadioButton,
     QProgressBar, QFormLayout, QWidget, QTableWidget, QTableWidgetItem,
-    QHeaderView, QScrollArea, QSplitter, QTextEdit, QButtonGroup, QComboBox
+    QHeaderView, QScrollArea, QSplitter, QTextEdit, QButtonGroup, QComboBox,
+    QGridLayout, QSizePolicy, QAbstractItemView,
 )
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt, QThread, Signal, QEvent
 from PySide6.QtGui import QColor
 
 from .base_tool import BaseTool
@@ -850,6 +851,8 @@ class BatchRunner(QThread):
         export_animations: bool = True,
         animation_fps: float = 30.0,
         auto_loop_detect: bool = True,
+        skip_physics_for_large: bool = True,
+        large_model_threshold: float = 1024.0,
     ):
         super().__init__()
         self.model_sets = model_sets
@@ -878,6 +881,8 @@ class BatchRunner(QThread):
         self.export_animations = export_animations
         self.animation_fps = animation_fps
         self.auto_loop_detect = auto_loop_detect
+        self.skip_physics_for_large = skip_physics_for_large
+        self.large_model_threshold = large_model_threshold
 
     def _get_output_dir(self, model_set: ModelSet) -> Path:
         """Calculate output directory for model."""
@@ -1051,9 +1056,29 @@ class BatchRunner(QThread):
                         f"{model_set.name}: skinned ref SMD ({len(skin.joints)} bones)"
                     )
 
-                    # Per-clip animation SMDs
+                    # Per-clip animation SMDs.
+                    # S2V sometimes exports each clip twice — once with its
+                    # canonical name and once with an "@"-prefixed alias
+                    # (e.g. "closed_idle" + "@closed_idle"). Both entries
+                    # share their channel data, and our sanitiser strips
+                    # non-alnum chars so the prefixed alias collapses to the
+                    # same filename. Without dedupe we'd overwrite the SMD
+                    # in place AND emit duplicate $animation/$sequence
+                    # entries in the QC, which studiomdl rejects with
+                    # "Duplicate animation name". Track sanitised names and
+                    # skip subsequent collisions.
+                    seen_clip_names: set = set()
                     for clip in clips:
                         safe = sanitize_clip_filename(clip.name)
+                        if safe in seen_clip_names:
+                            self.progress.emit(
+                                idx, total,
+                                f"{model_set.name}: skipping duplicate clip "
+                                f"{clip.name!r} (resolves to {safe!r}, already written)"
+                            )
+                            continue
+                        seen_clip_names.add(safe)
+
                         anim_smd = out_dir / f"{model_set.name}_anim_{safe}.smd"
                         frames, num_frames = sample_clip(clip, skin, fps=self.animation_fps)
                         ok, anim_err = SmdAnimationExporter.write_animation(
@@ -1094,7 +1119,27 @@ class BatchRunner(QThread):
             # processed render mesh so the prop still gets a real $collisionmodel
             # instead of studiomdl's default-sphere fallback.
             physics_mesh = None
-            if self.export_physics:
+            # vphysics chokes on enormous collision meshes — multi-thousand-inch
+            # props (Citadel, skyboxes, drop-ships) can crash the engine on load.
+            # Bypass the entire physics block when the render mesh exceeds the
+            # configured threshold; the QC will then omit $collisionmodel and
+            # studiomdl will leave the model with no collision (which is what
+            # you want for huge static set-pieces anyway).
+            render_too_large = False
+            if self.export_physics and self.skip_physics_for_large:
+                try:
+                    render_extent = float(np.max(render_mesh.bounds[1] - render_mesh.bounds[0]))
+                except Exception:
+                    render_extent = 0.0
+                if render_extent > self.large_model_threshold:
+                    render_too_large = True
+                    self.progress.emit(
+                        idx, total,
+                        f"{model_set.name}: skipping physics — bbox {render_extent:.0f}u "
+                        f"exceeds {self.large_model_threshold:.0f}u threshold "
+                        f"(vphysics may crash on collision this large)"
+                    )
+            if self.export_physics and not render_too_large:
                 loaded_physics = None
                 load_failure = None
 
@@ -1314,84 +1359,128 @@ class GltfSmdBatchTool(BaseTool):
         self.setup_content()
 
     def setup_content(self):
-        """Build UI."""
-        main_layout = QVBoxLayout()
-        self.content_layout.addLayout(main_layout)
+        """Two-pane layout: settings on the left (scrollable, narrow), preview
+        + run controls on the right (always visible). Mirrors the VMAT PBR
+        tool so the two batch tools share a familiar shape."""
+        root = QHBoxLayout()
+        self.content_layout.addLayout(root)
 
-        # Splitter: controls on left, preview on right
         splitter = QSplitter(Qt.Horizontal)
-        main_layout.addWidget(splitter)
+        splitter.setChildrenCollapsible(False)
+        splitter.addWidget(self._build_settings_pane())
+        splitter.addWidget(self._build_preview_pane())
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 2)
+        splitter.setSizes([460, 880])
+        root.addWidget(splitter)
 
-        # Left panel: controls
-        left_widget = QWidget()
-        left_layout = QVBoxLayout(left_widget)
-        left_layout.setContentsMargins(0, 0, 0, 0)
+        # Initial-state plumbing that depends on widgets being constructed.
+        self._on_export_animations_toggled(self.export_animations_check.isChecked())
+        self._on_auto_mass_toggled(self.auto_mass_radio.isChecked())
+        self._on_auto_surf_toggled(self.auto_surf_radio.isChecked())
 
-        # Recent Runs
-        recent_group = QGroupBox("Recent Runs")
-        recent_layout = QVBoxLayout()
-        
+    # ------------------------------------------------------------------
+    # Pane builders
+    # ------------------------------------------------------------------
+
+    def _build_settings_pane(self) -> QWidget:
+        """Left pane: scrollable column of settings groupboxes."""
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+
+        container = QWidget()
+        col = QVBoxLayout(container)
+        col.setContentsMargins(0, 0, 6, 0)
+        col.setSpacing(8)
+
+        col.addWidget(self._build_folders_group())
+        col.addWidget(self._build_processing_group())
+        col.addWidget(self._build_output_group())
+        col.addWidget(self._build_qc_group())
+        col.addWidget(self._build_physics_group())
+        col.addWidget(self._build_advanced_group())
+        col.addStretch()
+
+        scroll.setWidget(container)
+        scroll.setMinimumWidth(420)
+        return scroll
+
+    def _build_folders_group(self) -> QGroupBox:
+        """Recent runs + input/output folders, stacked."""
+        group = QGroupBox("Folders & Recent Runs")
+        form = QFormLayout()
+
         self.recent_combo = QComboBox()
         self.recent_combo.addItem("-- Select a recent run --")
         self.recent_combo.currentIndexChanged.connect(self.on_recent_run_selected)
         self.populate_recent_runs()
-        recent_layout.addWidget(self.recent_combo)
-        
-        recent_group.setLayout(recent_layout)
-        left_layout.addWidget(recent_group)
+        form.addRow("Recent run:", self.recent_combo)
 
-        # Input/Output
-        io_group = QGroupBox("Folders")
-        io_layout = QFormLayout()
-        
         self.input_edit = QLineEdit()
         input_btn = QPushButton("Browse...")
         input_btn.clicked.connect(self.browse_input)
-        io_layout.addRow("Input:", self._row_widget(self.input_edit, input_btn))
+        form.addRow("Input:", self._row_widget(self.input_edit, input_btn))
 
         self.output_edit = QLineEdit()
         output_btn = QPushButton("Browse...")
         output_btn.clicked.connect(self.browse_output)
-        io_layout.addRow("Output:", self._row_widget(self.output_edit, output_btn))
+        form.addRow("Output:", self._row_widget(self.output_edit, output_btn))
 
-        io_group.setLayout(io_layout)
-        left_layout.addWidget(io_group)
+        # Inline warning for input==output — no longer floating after the
+        # left column, since the right pane is the focal area now.
+        self.input_output_warning = QLabel(
+            "⚠️ Input and Output are the same. You may overwrite source exports."
+        )
+        self.input_output_warning.setStyleSheet("color: orange; font-weight: bold;")
+        self.input_output_warning.setVisible(False)
+        self.input_output_warning.setWordWrap(True)
+        form.addRow("", self.input_output_warning)
 
-        # Processing
-        proc_group = QGroupBox("Processing")
-        proc_layout = QFormLayout()
+        group.setLayout(form)
+        return group
+
+    def _build_processing_group(self) -> QGroupBox:
+        group = QGroupBox("Processing")
+        form = QFormLayout()
 
         self.scale_spin = QDoubleSpinBox()
         self.scale_spin.setRange(0.001, 10000.0)
         self.scale_spin.setValue(40.0)
         self.scale_spin.setDecimals(3)
         self.scale_spin.valueChanged.connect(self.update_preview)
-        proc_layout.addRow("Scale:", self.scale_spin)
+        form.addRow("Scale:", self.scale_spin)
 
         self.weld_spin = QDoubleSpinBox()
         self.weld_spin.setRange(0.0, 1.0)
         self.weld_spin.setDecimals(6)
         self.weld_spin.setSingleStep(0.00001)
-        self.weld_spin.setValue(0.0001)  # Must be after setDecimals
+        self.weld_spin.setValue(0.0001)
         self.weld_spin.valueChanged.connect(self.update_preview)
-        proc_layout.addRow("Weld distance:", self.weld_spin)
+        form.addRow("Weld distance:", self.weld_spin)
 
-        proc_group.setLayout(proc_layout)
-        left_layout.addWidget(proc_group)
+        group.setLayout(form)
+        return group
 
-        # Output Options
-        output_group = QGroupBox("Output Options")
-        output_layout = QFormLayout()
+    def _build_output_group(self) -> QGroupBox:
+        """Generation toggles + animation knobs."""
+        group = QGroupBox("Output")
+        form = QFormLayout()
 
+        # 2x2 grid for the boolean generate-X toggles.
+        gen_grid = QGridLayout()
+        gen_grid.setContentsMargins(0, 0, 0, 0)
+        gen_grid.setHorizontalSpacing(12)
         self.generate_smd_check = QCheckBox("Generate SMD")
         self.generate_smd_check.setChecked(True)
         self.generate_smd_check.toggled.connect(self.update_preview)
-        output_layout.addRow("", self.generate_smd_check)
-
         self.generate_qc_check = QCheckBox("Generate QC")
         self.generate_qc_check.setChecked(True)
         self.generate_qc_check.toggled.connect(self.update_preview)
-        output_layout.addRow("", self.generate_qc_check)
+        gen_grid.addWidget(self.generate_smd_check, 0, 0)
+        gen_grid.addWidget(self.generate_qc_check, 0, 1)
+        form.addRow("Generate:", self._wrap_layout(gen_grid))
 
         self.export_animations_check = QCheckBox("Export animations")
         self.export_animations_check.setChecked(True)
@@ -1401,14 +1490,17 @@ class GltfSmdBatchTool(BaseTool):
             "$sequence in the QC. Files without animations stay on the static path."
         )
         self.export_animations_check.toggled.connect(self.update_preview)
-        output_layout.addRow("", self.export_animations_check)
+        self.export_animations_check.toggled.connect(self._on_export_animations_toggled)
+        form.addRow("", self.export_animations_check)
 
         self.animation_fps_spin = QDoubleSpinBox()
         self.animation_fps_spin.setRange(1.0, 120.0)
         self.animation_fps_spin.setValue(30.0)
         self.animation_fps_spin.setDecimals(1)
-        self.animation_fps_spin.setToolTip("Sampling rate for animation SMDs. 30 matches Source's default.")
-        output_layout.addRow("Animation FPS:", self.animation_fps_spin)
+        self.animation_fps_spin.setToolTip(
+            "Sampling rate for animation SMDs. 30 matches Source's default."
+        )
+        form.addRow("  Animation FPS:", self.animation_fps_spin)
 
         self.auto_loop_check = QCheckBox("Auto-detect looping clips")
         self.auto_loop_check.setChecked(True)
@@ -1416,196 +1508,333 @@ class GltfSmdBatchTool(BaseTool):
             "Mark $sequences as 'loop' when the clip name contains idle / loop / "
             "walk / run / breathe / cycle."
         )
-        output_layout.addRow("", self.auto_loop_check)
+        form.addRow("", self.auto_loop_check)
 
-        output_group.setLayout(output_layout)
-        left_layout.addWidget(output_group)
+        group.setLayout(form)
+        return group
 
-        # QC Options
-        qc_group = QGroupBox("QC Options")
-        qc_layout = QFormLayout()
+    def _build_qc_group(self) -> QGroupBox:
+        """Modelname / cdmaterials / mass + surfaceprop radio groups.
+        Mass and surfaceprop fields auto-disable when their radio is off."""
+        group = QGroupBox("QC")
+        form = QFormLayout()
 
         self.modelname_edit = QLineEdit()
         self.modelname_edit.setPlaceholderText("{name} or path/to/{name}")
         self.modelname_edit.textChanged.connect(self.update_preview)
-        qc_layout.addRow("Model name:", self.modelname_edit)
+        form.addRow("Model name:", self.modelname_edit)
 
         self.cdmaterials_edit = QLineEdit()
         self.cdmaterials_edit.setText("models/")
         self.cdmaterials_edit.textChanged.connect(self.update_preview)
-        qc_layout.addRow("cdmaterials:", self.cdmaterials_edit)
+        form.addRow("cdmaterials:", self.cdmaterials_edit)
 
         self.concave_check = QCheckBox("$concave")
         self.concave_check.setChecked(True)
         self.concave_check.toggled.connect(self.update_preview)
-        qc_layout.addRow("", self.concave_check)
+        form.addRow("", self.concave_check)
 
-        # Mass options
+        # Mass: radio pair, each with its own knob. Side-by-side rows so the
+        # "auto" path and "static" path don't get mistaken for a four-row
+        # checklist.
         mass_group = QButtonGroup(self)
         self.auto_mass_radio = QRadioButton("Auto mass")
         self.auto_mass_radio.setChecked(True)
         self.auto_mass_radio.toggled.connect(self.update_preview)
+        self.auto_mass_radio.toggled.connect(self._on_auto_mass_toggled)
         mass_group.addButton(self.auto_mass_radio)
-        qc_layout.addRow("", self.auto_mass_radio)
-
         self.mass_modifier_spin = QDoubleSpinBox()
         self.mass_modifier_spin.setRange(0.001, 10000.0)
         self.mass_modifier_spin.setValue(1.0)
         self.mass_modifier_spin.setDecimals(3)
         self.mass_modifier_spin.valueChanged.connect(self.update_preview)
-        qc_layout.addRow("  Modifier:", self.mass_modifier_spin)
+        form.addRow(self.auto_mass_radio, self.mass_modifier_spin)
 
         self.static_mass_radio = QRadioButton("Static mass")
         mass_group.addButton(self.static_mass_radio)
         self.static_mass_radio.toggled.connect(self.update_preview)
-        qc_layout.addRow("", self.static_mass_radio)
-
         self.static_mass_spin = QDoubleSpinBox()
         self.static_mass_spin.setRange(0.001, 10000.0)
         self.static_mass_spin.setValue(10.0)
         self.static_mass_spin.setDecimals(3)
         self.static_mass_spin.valueChanged.connect(self.update_preview)
-        qc_layout.addRow("  Value:", self.static_mass_spin)
+        form.addRow(self.static_mass_radio, self.static_mass_spin)
 
-        # Surfaceprop options
+        # Surfaceprop pair on the same compact pattern.
         surf_group = QButtonGroup(self)
         self.auto_surf_radio = QRadioButton("Auto surfaceprop")
         self.auto_surf_radio.setChecked(True)
         self.auto_surf_radio.toggled.connect(self.update_preview)
+        self.auto_surf_radio.toggled.connect(self._on_auto_surf_toggled)
         surf_group.addButton(self.auto_surf_radio)
-        qc_layout.addRow("", self.auto_surf_radio)
+        form.addRow("", self.auto_surf_radio)
 
         self.static_surf_radio = QRadioButton("Static surfaceprop")
         surf_group.addButton(self.static_surf_radio)
         self.static_surf_radio.toggled.connect(self.update_preview)
-        qc_layout.addRow("", self.static_surf_radio)
-
         self.static_surf_edit = QLineEdit()
         self.static_surf_edit.setText("metal")
         self.static_surf_edit.textChanged.connect(self.update_preview)
-        qc_layout.addRow("  Value:", self.static_surf_edit)
+        form.addRow(self.static_surf_radio, self.static_surf_edit)
 
-        qc_group.setLayout(qc_layout)
-        left_layout.addWidget(qc_group)
+        group.setLayout(form)
+        return group
 
-        # Advanced Options
-        adv_group = QGroupBox("Advanced")
-        adv_layout = QFormLayout()
+    def _build_physics_group(self) -> QGroupBox:
+        """Export physics + the size-skip safety net for huge models."""
+        group = QGroupBox("Physics")
+        form = QFormLayout()
+
+        self.export_physics_check = QCheckBox("Export physics")
+        self.export_physics_check.setChecked(True)
+        self.export_physics_check.toggled.connect(self.update_preview)
+        form.addRow("", self.export_physics_check)
+
+        self.skip_large_physics_check = QCheckBox("Skip physics for very large models")
+        self.skip_large_physics_check.setChecked(True)
+        self.skip_large_physics_check.setToolTip(
+            "When the render mesh's bounding box exceeds the threshold below, "
+            "skip physics generation entirely (no $collisionmodel block in the QC).\n"
+            "Source's vphysics can crash on enormous collision meshes — Citadels, "
+            "skybox props, dropship hulls, etc. — so a no-collision compile is "
+            "safer than a half-broken one. Static set-pieces rarely need physics anyway."
+        )
+        form.addRow("", self.skip_large_physics_check)
+
+        self.large_threshold_spin = QDoubleSpinBox()
+        self.large_threshold_spin.setRange(64.0, 100000.0)
+        self.large_threshold_spin.setDecimals(0)
+        self.large_threshold_spin.setSingleStep(64.0)
+        self.large_threshold_spin.setValue(1024.0)
+        self.large_threshold_spin.setSuffix(" u")
+        self.large_threshold_spin.setToolTip(
+            "Maximum bounding-box extent (in Source units / inches) before physics "
+            "is skipped. 1024u (~85ft) is a conservative default; Citadels and other "
+            "set-pieces sit well above this."
+        )
+        self.large_threshold_spin.setEnabled(self.skip_large_physics_check.isChecked())
+        self.skip_large_physics_check.toggled.connect(self.large_threshold_spin.setEnabled)
+        form.addRow("  Skip threshold:", self.large_threshold_spin)
+
+        group.setLayout(form)
+        return group
+
+    def _build_advanced_group(self) -> QGroupBox:
+        """UV / axis / preserve-folders / dry-run / verbose."""
+        group = QGroupBox("Advanced")
+        form = QFormLayout()
 
         self.flip_v_check = QCheckBox("Flip V (1 - tv)")
         self.flip_v_check.setChecked(False)
         self.flip_v_check.setToolTip("Flip vertical UV coordinate (rarely needed for Source)")
-        adv_layout.addRow("", self.flip_v_check)
+        form.addRow("", self.flip_v_check)
 
         self.axis_conversion_check = QCheckBox("Z-up to Source axis (-90° X)")
         self.axis_conversion_check.setChecked(True)
         self.axis_conversion_check.setToolTip("Convert Z-up (Blender) to Source engine coordinates")
-        adv_layout.addRow("", self.axis_conversion_check)
+        form.addRow("", self.axis_conversion_check)
 
         self.uv_mode_combo = QComboBox()
-        self.uv_mode_combo.addItems(['Preserve UVs', 'Wrap to 0-1 (tiling)', 'Clamp to 0-1', 'Normalize (fit to 0-1)'])
-        self.uv_mode_combo.setCurrentIndex(0)  # Default to preserve - Source 1 handles tiled UVs fine
+        self.uv_mode_combo.addItems([
+            'Preserve UVs', 'Wrap to 0-1 (tiling)', 'Clamp to 0-1', 'Normalize (fit to 0-1)'
+        ])
+        self.uv_mode_combo.setCurrentIndex(0)
         self.uv_mode_combo.setToolTip(
             "Preserve: Keep original UV coordinates as-is (recommended)\n"
             "Wrap: Apply modulo to wrap UVs into 0-1 range\n"
             "Clamp: Clamp UVs to 0-1 range (may distort tiling)\n"
             "Normalize: Scale UVs to fit 0-1 based on min/max"
         )
-        adv_layout.addRow("UV mode:", self.uv_mode_combo)
+        form.addRow("UV mode:", self.uv_mode_combo)
 
-        self.export_physics_check = QCheckBox("Export physics")
-        self.export_physics_check.setChecked(True)
-        self.export_physics_check.toggled.connect(self.update_preview)
-        adv_layout.addRow("", self.export_physics_check)
-
-        self.preserve_folders_check = QCheckBox("Preserve folder structure")
+        # Run-time toggles in a 2x2 grid — same layout idea as Output.
+        run_grid = QGridLayout()
+        run_grid.setContentsMargins(0, 0, 0, 0)
+        run_grid.setHorizontalSpacing(12)
+        self.preserve_folders_check = QCheckBox("Preserve folders")
         self.preserve_folders_check.setChecked(True)
         self.preserve_folders_check.toggled.connect(self.update_preview)
-        adv_layout.addRow("", self.preserve_folders_check)
-
         self.replace_existing_check = QCheckBox("Replace existing outputs")
         self.replace_existing_check.setChecked(True)
+        self.replace_existing_check.setToolTip(
+            "Overwrite outputs that already exist in the destination folder."
+        )
         self.replace_existing_check.toggled.connect(self.update_preview)
-        adv_layout.addRow("", self.replace_existing_check)
-
         self.dry_run_check = QCheckBox("Dry run (no writes)")
-        adv_layout.addRow("", self.dry_run_check)
-
-        self.verbose_check = QCheckBox("Verbose logging (show full errors)")
+        self.verbose_check = QCheckBox("Verbose logging")
         self.verbose_check.setChecked(False)
-        adv_layout.addRow("", self.verbose_check)
+        run_grid.addWidget(self.preserve_folders_check, 0, 0)
+        run_grid.addWidget(self.replace_existing_check, 0, 1)
+        run_grid.addWidget(self.dry_run_check, 1, 0)
+        run_grid.addWidget(self.verbose_check, 1, 1)
+        form.addRow("Run mode:", self._wrap_layout(run_grid))
 
-        adv_group.setLayout(adv_layout)
-        left_layout.addWidget(adv_group)
+        group.setLayout(form)
+        return group
 
-        # Input == Output warning
-        self.input_output_warning = QLabel("⚠️ Input and Output are the same. You may overwrite source exports.")
-        self.input_output_warning.setStyleSheet("color: orange; font-weight: bold;")
-        self.input_output_warning.setVisible(False)
-        self.input_output_warning.setWordWrap(True)
-        left_layout.addWidget(self.input_output_warning)
+    # ------------------------------------------------------------------
+    # Right pane (preview + selection + run)
+    # ------------------------------------------------------------------
 
-        # Scan controls
-        scan_layout = QHBoxLayout()
-        self.rescan_btn = QPushButton("Rescan")
+    def _build_preview_pane(self) -> QWidget:
+        pane = QWidget()
+        col = QVBoxLayout(pane)
+        col.setContentsMargins(6, 0, 0, 0)
+        col.setSpacing(6)
+
+        # Combined scan + selection row so the table stays as tall as possible.
+        action_row = QHBoxLayout()
+        self.rescan_btn = QPushButton("Scan")
         self.rescan_btn.clicked.connect(self.scan_models)
-        self.recursive_scan_check = QCheckBox("Recursive")
+        action_row.addWidget(self.rescan_btn)
+        self.recursive_scan_check = QCheckBox("Recursive (include subfolders)")
         self.recursive_scan_check.setChecked(True)
         self.recursive_scan_check.setToolTip(
             "When on, scan all subfolders of the input. When off, scan only "
             "the input folder itself."
         )
         self.recursive_scan_check.toggled.connect(self.scan_models)
+        action_row.addWidget(self.recursive_scan_check)
         self.auto_rescan_check = QCheckBox("Auto-rescan")
         self.auto_rescan_check.toggled.connect(self.toggle_auto_rescan)
-        scan_layout.addWidget(self.rescan_btn)
-        scan_layout.addWidget(self.recursive_scan_check)
-        scan_layout.addWidget(self.auto_rescan_check)
-        scan_layout.addStretch()
-        left_layout.addLayout(scan_layout)
+        action_row.addWidget(self.auto_rescan_check)
 
-        left_layout.addStretch()
-        splitter.addWidget(left_widget)
+        action_row.addSpacing(16)
+        action_row.addWidget(QLabel("All:"))
+        self.select_all_btn = QPushButton("Check")
+        self.select_all_btn.clicked.connect(lambda: self._set_all_selected(True))
+        self.select_none_btn = QPushButton("Uncheck")
+        self.select_none_btn.clicked.connect(lambda: self._set_all_selected(False))
+        self.select_invert_btn = QPushButton("Invert")
+        self.select_invert_btn.clicked.connect(self._invert_selection)
+        for b in (self.select_all_btn, self.select_none_btn, self.select_invert_btn):
+            action_row.addWidget(b)
 
-        # Right panel: preview table
-        right_widget = QWidget()
-        right_layout = QVBoxLayout(right_widget)
-        right_layout.setContentsMargins(0, 0, 0, 0)
+        action_row.addSpacing(12)
+        action_row.addWidget(QLabel("Selected:"))
+        sel_tooltip = (
+            "Click a row, then Shift+Click (range) or Ctrl+Click (toggle) more "
+            "rows like in Explorer.\n"
+            "These buttons toggle the Include checkbox for the highlighted rows "
+            "only. Pressing Space while the table has focus does the same."
+        )
+        self.check_selected_btn = QPushButton("Check")
+        self.check_selected_btn.setToolTip(sel_tooltip)
+        self.check_selected_btn.clicked.connect(lambda: self._set_selected_rows_checked(True))
+        self.uncheck_selected_btn = QPushButton("Uncheck")
+        self.uncheck_selected_btn.setToolTip(sel_tooltip)
+        self.uncheck_selected_btn.clicked.connect(lambda: self._set_selected_rows_checked(False))
+        self.toggle_selected_btn = QPushButton("Toggle")
+        self.toggle_selected_btn.setToolTip(sel_tooltip)
+        self.toggle_selected_btn.clicked.connect(self._toggle_selected_rows)
+        for b in (self.check_selected_btn, self.uncheck_selected_btn, self.toggle_selected_btn):
+            action_row.addWidget(b)
 
-        preview_label = QLabel("Preview")
-        preview_label.setStyleSheet("font-weight: bold;")
-        right_layout.addWidget(preview_label)
+        action_row.addStretch()
+        col.addLayout(action_row)
 
+        # Preview table — fills remaining vertical space.
         self.preview_table = QTableWidget()
-        self.preview_table.setColumnCount(9)
+        self.preview_table.setColumnCount(10)
         self.preview_table.setHorizontalHeaderLabels([
-            "Name", "Physics", "Anim", "Load", "Modelname", "Mass", "Surfaceprop", "Status", "Warnings"
+            "Include", "Name", "Physics", "Anim", "Load", "Modelname",
+            "Mass", "Surfaceprop", "Status", "Warnings",
         ])
         self.preview_table.horizontalHeader().setStretchLastSection(True)
         self.preview_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.preview_table.setSelectionBehavior(QTableWidget.SelectRows)
-        right_layout.addWidget(self.preview_table)
+        # Explorer-style multi-select: click → single, Shift+Click → range,
+        # Ctrl+Click → toggle individual.
+        self.preview_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.preview_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        # Spacebar bulk-toggle for highlighted rows.
+        self.preview_table.installEventFilter(self)
+        col.addWidget(self.preview_table, 1)
 
-        splitter.addWidget(right_widget)
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 2)
-
-        # Progress
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
-        main_layout.addWidget(self.progress_bar)
+        col.addWidget(self.progress_bar)
 
-        # Run controls
-        btn_layout = QHBoxLayout()
-        self.run_btn = QPushButton("Run Batch")
-        self.run_btn.clicked.connect(self.run_batch)
+        # Run controls live in the right pane next to the table.
+        run_row = QHBoxLayout()
+        run_row.addStretch()
         self.cancel_btn = QPushButton("Cancel")
         self.cancel_btn.setEnabled(False)
         self.cancel_btn.clicked.connect(self.cancel_batch)
-        btn_layout.addWidget(self.run_btn)
-        btn_layout.addWidget(self.cancel_btn)
-        btn_layout.addStretch()
-        main_layout.addLayout(btn_layout)
+        self.run_btn = QPushButton("Run Batch")
+        self.run_btn.clicked.connect(self.run_batch)
+        run_row.addWidget(self.cancel_btn)
+        run_row.addWidget(self.run_btn)
+        col.addLayout(run_row)
+
+        return pane
+
+    # ------------------------------------------------------------------
+    # Small helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _wrap_layout(layout) -> QWidget:
+        w = QWidget()
+        w.setLayout(layout)
+        return w
+
+    def _on_export_animations_toggled(self, on: bool):
+        """Grey out animation knobs when animations are disabled — the spin
+        and the loop checkbox are no-ops without animation export."""
+        self.animation_fps_spin.setEnabled(on)
+        self.auto_loop_check.setEnabled(on)
+
+    def _on_auto_mass_toggled(self, on: bool):
+        """When auto mass is on, the modifier spin is live and the static
+        spin is greyed; flip when static is selected. Keeps users from
+        accidentally tweaking the inactive knob."""
+        self.mass_modifier_spin.setEnabled(on)
+        self.static_mass_spin.setEnabled(not on)
+
+    def _on_auto_surf_toggled(self, on: bool):
+        self.static_surf_edit.setEnabled(not on)
+
+    # ------------------------------------------------------------------
+    # Selected-rows helpers + Space key filter (Explorer-style)
+    # ------------------------------------------------------------------
+
+    def _highlighted_rows(self) -> List[int]:
+        sel_model = self.preview_table.selectionModel()
+        if sel_model is None:
+            return []
+        return sorted({idx.row() for idx in sel_model.selectedIndexes()})
+
+    def _set_selected_rows_checked(self, checked: bool):
+        state = Qt.Checked if checked else Qt.Unchecked
+        for row in self._highlighted_rows():
+            item = self.preview_table.item(row, 0)
+            if item is not None:
+                item.setCheckState(state)
+
+    def _toggle_selected_rows(self):
+        rows = self._highlighted_rows()
+        if not rows:
+            return
+        checked_count = sum(
+            1 for row in rows
+            if self.preview_table.item(row, 0) is not None
+            and self.preview_table.item(row, 0).checkState() == Qt.Checked
+        )
+        # Majority-wins toggle: predictable result for mixed selections.
+        new_state = Qt.Unchecked if checked_count * 2 >= len(rows) else Qt.Checked
+        for row in rows:
+            item = self.preview_table.item(row, 0)
+            if item is not None:
+                item.setCheckState(new_state)
+
+    def eventFilter(self, obj, event):
+        """Intercept Space on the preview table to bulk-toggle highlighted rows."""
+        if obj is self.preview_table and event.type() == QEvent.KeyPress:
+            if event.key() in (Qt.Key_Space, Qt.Key_Select):
+                self._toggle_selected_rows()
+                return True
+        return super().eventFilter(obj, event)
 
     def _row_widget(self, *widgets) -> QWidget:
         """Create horizontal row of widgets."""
@@ -1785,24 +2014,54 @@ class GltfSmdBatchTool(BaseTool):
             self.preview_models.append(preview)
 
         # Populate table
+        # Preserve existing user selections across re-previews so that toggling
+        # an option (e.g. axis_conversion) doesn't clobber the user's manual
+        # picks. Keyed by render_path which is the stable per-model identity.
+        prior_selection = {}
+        for row in range(self.preview_table.rowCount()):
+            include_item = self.preview_table.item(row, 0)
+            if include_item is None:
+                continue
+            key = include_item.data(Qt.UserRole)
+            if key:
+                prior_selection[key] = include_item.checkState() == Qt.Checked
+
         self.preview_table.setRowCount(len(self.preview_models))
         for row, pm in enumerate(self.preview_models):
+            # Include checkbox — failed loads default to off since the runner
+            # will skip them anyway and unchecked makes the bulk-select state
+            # easier to reason about.
+            ms = self.model_sets[row]
+            include_item = QTableWidgetItem()
+            include_item.setFlags(
+                (include_item.flags() | Qt.ItemIsUserCheckable) & ~Qt.ItemIsEditable
+            )
+            key = str(ms.render_path)
+            if key in prior_selection:
+                include_default = prior_selection[key]
+            else:
+                include_default = pm.load_status != "Failed"
+            include_item.setCheckState(Qt.Checked if include_default else Qt.Unchecked)
+            include_item.setData(Qt.UserRole, key)
+            include_item.setToolTip("Tick to include this model in the batch run")
+            self.preview_table.setItem(row, 0, include_item)
+
             # Name
             name_item = QTableWidgetItem(pm.name)
             name_item.setToolTip(str(pm.render_smd_path))
-            self.preview_table.setItem(row, 0, name_item)
-            
+            self.preview_table.setItem(row, 1, name_item)
+
             # Physics
             phys_item = QTableWidgetItem("Yes" if pm.has_physics else "No")
             if pm.physics_smd_path:
                 phys_item.setToolTip(str(pm.physics_smd_path))
-            self.preview_table.setItem(row, 1, phys_item)
+            self.preview_table.setItem(row, 2, phys_item)
 
             # Anim
             anim_item = QTableWidgetItem(pm.anim_summary)
             if pm.anim_summary != "static":
                 anim_item.setForeground(QColor("blue"))
-            self.preview_table.setItem(row, 2, anim_item)
+            self.preview_table.setItem(row, 3, anim_item)
 
             # Load status
             load_item = QTableWidgetItem(pm.load_status)
@@ -1811,16 +2070,16 @@ class GltfSmdBatchTool(BaseTool):
                 load_item.setToolTip(pm.failure_reason)
             elif pm.load_status == "Ok":
                 load_item.setForeground(QColor("green"))
-            self.preview_table.setItem(row, 3, load_item)
+            self.preview_table.setItem(row, 4, load_item)
 
             # Modelname
-            self.preview_table.setItem(row, 4, QTableWidgetItem(pm.modelname))
+            self.preview_table.setItem(row, 5, QTableWidgetItem(pm.modelname))
 
             # Mass
-            self.preview_table.setItem(row, 5, QTableWidgetItem(f"{pm.mass:.2f}"))
+            self.preview_table.setItem(row, 6, QTableWidgetItem(f"{pm.mass:.2f}"))
 
             # Surfaceprop
-            self.preview_table.setItem(row, 6, QTableWidgetItem(pm.surfaceprop))
+            self.preview_table.setItem(row, 7, QTableWidgetItem(pm.surfaceprop))
 
             # Status (Overwrite/Skip/New)
             status = "Overwrite" if pm.will_overwrite else ("Skip" if pm.will_skip else "New")
@@ -1829,7 +2088,7 @@ class GltfSmdBatchTool(BaseTool):
                 status_item.setForeground(QColor("orange"))
             elif pm.will_overwrite:
                 status_item.setForeground(QColor("red"))
-            self.preview_table.setItem(row, 7, status_item)
+            self.preview_table.setItem(row, 8, status_item)
 
             # Warnings
             warnings_text = ""
@@ -1840,9 +2099,36 @@ class GltfSmdBatchTool(BaseTool):
             warnings_item = QTableWidgetItem(warnings_text)
             if warnings_text:
                 warnings_item.setForeground(QColor("orange"))
-            self.preview_table.setItem(row, 8, warnings_item)
+            self.preview_table.setItem(row, 9, warnings_item)
 
         self.preview_table.resizeColumnsToContents()
+
+    def _set_all_selected(self, checked: bool):
+        state = Qt.Checked if checked else Qt.Unchecked
+        for row in range(self.preview_table.rowCount()):
+            item = self.preview_table.item(row, 0)
+            if item is not None:
+                item.setCheckState(state)
+
+    def _invert_selection(self):
+        for row in range(self.preview_table.rowCount()):
+            item = self.preview_table.item(row, 0)
+            if item is None:
+                continue
+            item.setCheckState(
+                Qt.Unchecked if item.checkState() == Qt.Checked else Qt.Checked
+            )
+
+    def _selected_model_sets(self) -> List[ModelSet]:
+        """Return ``model_sets`` filtered to rows whose Include box is ticked."""
+        chosen: List[ModelSet] = []
+        for row in range(self.preview_table.rowCount()):
+            item = self.preview_table.item(row, 0)
+            if item is None or item.checkState() != Qt.Checked:
+                continue
+            if 0 <= row < len(self.model_sets):
+                chosen.append(self.model_sets[row])
+        return chosen
 
     def run_batch(self):
         """Start batch conversion."""
@@ -1857,6 +2143,17 @@ class GltfSmdBatchTool(BaseTool):
             self.log("No models to convert. Click Rescan.", "WARNING")
             return
 
+        selected_sets = self._selected_model_sets()
+        if not selected_sets:
+            self.log("No models selected. Tick at least one Include checkbox.", "WARNING")
+            return
+        if len(selected_sets) < len(self.model_sets):
+            self.log(
+                f"Running on {len(selected_sets)} of {len(self.model_sets)} models "
+                f"(selected via Include checkboxes)",
+                "INFO",
+            )
+
         # Add to recent runs
         self.add_recent_run(input_path, output_path)
 
@@ -1866,7 +2163,7 @@ class GltfSmdBatchTool(BaseTool):
         self.run_btn.setEnabled(False)
         self.cancel_btn.setEnabled(True)
         self.progress_bar.setVisible(True)
-        self.progress_bar.setRange(0, len(self.model_sets))
+        self.progress_bar.setRange(0, len(selected_sets))
         self.progress_bar.setValue(0)
 
         # Map UI combo selection to uv_mode parameter
@@ -1879,7 +2176,7 @@ class GltfSmdBatchTool(BaseTool):
         uv_mode = uv_mode_map.get(self.uv_mode_combo.currentIndex(), 'preserve')
 
         self.thread = BatchRunner(
-            model_sets=self.model_sets,
+            model_sets=selected_sets,
             input_root=input_root,
             output_root=output_root,
             scale=self.scale_spin.value(),
@@ -1905,6 +2202,8 @@ class GltfSmdBatchTool(BaseTool):
             export_animations=self.export_animations_check.isChecked(),
             animation_fps=self.animation_fps_spin.value(),
             auto_loop_detect=self.auto_loop_check.isChecked(),
+            skip_physics_for_large=self.skip_large_physics_check.isChecked(),
+            large_model_threshold=self.large_threshold_spin.value(),
         )
         self.thread.progress.connect(self.on_progress)
         self.thread.finished.connect(self.on_finished)
@@ -1981,6 +2280,8 @@ class GltfSmdBatchTool(BaseTool):
             'flip_v': self.flip_v_check.isChecked(),
             'axis_conversion': self.axis_conversion_check.isChecked(),
             'export_physics': self.export_physics_check.isChecked(),
+            'skip_physics_for_large': self.skip_large_physics_check.isChecked(),
+            'large_model_threshold': self.large_threshold_spin.value(),
             'preserve_folders': self.preserve_folders_check.isChecked(),
             'replace_existing': self.replace_existing_check.isChecked(),
             # Animation options
@@ -2076,6 +2377,10 @@ class GltfSmdBatchTool(BaseTool):
                 self.axis_conversion_check.setChecked(run['axis_conversion'])
             if 'export_physics' in run:
                 self.export_physics_check.setChecked(run['export_physics'])
+            if 'skip_physics_for_large' in run:
+                self.skip_large_physics_check.setChecked(bool(run['skip_physics_for_large']))
+            if 'large_model_threshold' in run:
+                self.large_threshold_spin.setValue(float(run['large_model_threshold']))
             if 'preserve_folders' in run:
                 self.preserve_folders_check.setChecked(run['preserve_folders'])
             if 'replace_existing' in run:
