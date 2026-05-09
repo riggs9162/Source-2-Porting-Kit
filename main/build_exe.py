@@ -160,7 +160,7 @@ def build_command(args: argparse.Namespace) -> list[str]:
         str(SCRIPT_DIR / "build" / "spec"),
     ]
 
-    if not args.no_clean:
+    if args.clean:
         cmd.append("--clean")
 
     cmd.append("--onefile" if args.onefile else "--onedir")
@@ -227,12 +227,32 @@ def output_exe_path(app_name: str, onefile: bool) -> Path:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Build Source 2 Porting Kit executable")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Build Source 2 Porting Kit executable. By default the build is "
+            "incremental: dependencies are NOT reinstalled and PyInstaller's "
+            "analysis cache is reused, so re-runs are ~10x faster than a full "
+            "rebuild. Pass --clean for a full rebuild, --install-deps to refresh "
+            "Python packages."
+        )
+    )
     parser.add_argument("--onefile", action="store_true", help="Build a single-file executable (slower startup)")
     parser.add_argument("--console", action="store_true", help="Show console window for debugging")
     parser.add_argument("--debug", action="store_true", help="Enable PyInstaller debug mode")
-    parser.add_argument("--no-clean", action="store_true", help="Do not remove previous build/dist output")
-    parser.add_argument("--no-deps", action="store_true", help="Skip pip install for requirements and PyInstaller")
+    parser.add_argument(
+        "--clean",
+        action="store_true",
+        help="Wipe build/ and dist/ before building and pass --clean to PyInstaller (forces full rebuild)",
+    )
+    parser.add_argument(
+        "--install-deps",
+        action="store_true",
+        help="Run pip install for PyInstaller and requirements.txt before building",
+    )
+    # Back-compat aliases (silently accepted; current defaults already match
+    # what these flags used to request).
+    parser.add_argument("--no-clean", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--no-deps", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--name", default=APP_NAME, help=f"Executable name (default: {APP_NAME})")
     return parser.parse_args()
 
@@ -250,12 +270,21 @@ def main() -> int:
     print(f"Mode: {'onefile' if args.onefile else 'onedir'}")
 
     try:
-        if not args.no_deps:
+        # PyInstaller is required either way; quietly verify the import
+        # without invoking pip when the package is already present.
+        if args.install_deps:
             ensure_pyinstaller_installed()
             install_requirements()
+        elif not _has_module("PyInstaller"):
+            ensure_pyinstaller_installed()
 
-        if not args.no_clean:
+        if args.clean:
+            # Full rebuild: wipe everything and let PyInstaller redo analysis.
             clean_build_outputs()
+        else:
+            # Incremental rebuild: only the previous app folder needs to go;
+            # keep build/work/ so PyInstaller can reuse its analysis cache.
+            clean_dist_only()
 
         ensure_build_dirs()
 
