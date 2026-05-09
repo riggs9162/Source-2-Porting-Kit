@@ -243,12 +243,29 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Run pip install for PyInstaller and requirements.txt before building",
     )
+    parser.add_argument(
+        "--release",
+        action="store_true",
+        help=(
+            "Produce a distribution-ready single-file build. Implies --onefile and "
+            "--clean. Onefile mode extracts to %%TEMP%% on launch which gives "
+            "PyInstaller's bootloader a flat DLL search directory and avoids the "
+            "'Failed to load Python DLL' error seen on some end-user machines with "
+            "the onedir layout (GitHub issue #2). Slower startup (~2-5s) but more "
+            "robust on clean Windows installs."
+        ),
+    )
     # Back-compat aliases (silently accepted; current defaults already match
     # what these flags used to request).
     parser.add_argument("--no-clean", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--no-deps", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--name", default=APP_NAME, help=f"Executable name (default: {APP_NAME})")
-    return parser.parse_args()
+    args = parser.parse_args()
+    # --release is a convenience preset for distribution builds.
+    if args.release:
+        args.onefile = True
+        args.clean = True
+    return args
 
 
 def main() -> int:
