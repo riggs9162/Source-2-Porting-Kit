@@ -449,6 +449,11 @@ class VmatBatchRunner(QThread):
         self.append_material_subfolders = append_material_subfolders
         self.prefix = prefix
         self.suffix = suffix
+        # When the user types a path-shaped prefix (with slashes), the leading
+        # path portion overrides the Material path used inside generated VMTs
+        # and the trailing component is treated as a filename prefix. See
+        # `_split_prefix` for the rule.
+        self._prefix_path, self._prefix_tail = self._split_prefix(prefix)
         self.fake_ao_strength = fake_ao_strength
         self.fake_gloss_gamma = fake_gloss_gamma
         self.fake_metal_diffuse_suppression = fake_metal_diffuse_suppression
@@ -470,17 +475,50 @@ class VmatBatchRunner(QThread):
         self.row_indices = list(row_indices) if row_indices else [-1] * len(entries)
 
     def _output_dir_for(self, entry: VmatEntry) -> Path:
+        # When the user supplied a path-shaped prefix, inject its path part
+        # between the output root and any rel_dir so the .vmt lands at the
+        # same place its own $basetexture path points to. Source 1 needs the
+        # file at `<game>/materials/<material_path>/<name>.vmt` to find it.
+        base = self.output_root
+        if self._prefix_path:
+            base = base / self._prefix_path
         if self.preserve_structure and entry.rel_dir is not None:
-            return self.output_root / entry.rel_dir
-        return self.output_root
+            return base / entry.rel_dir
+        return base
+
+    @staticmethod
+    def _split_prefix(prefix: str) -> Tuple[str, str]:
+        """Split the user's prefix into (material_path_part, filename_tail).
+
+        A prefix containing a forward or back slash is treated as path-shaped:
+        everything up to the LAST slash becomes a Material-path override; the
+        remainder (which may be empty) is used as the filename prefix. A plain
+        prefix with no slashes is returned as ('', prefix) — i.e. filename
+        prefix only, no path override.
+
+        Examples:
+            ''                          -> ('', '')
+            'foo_'                      -> ('', 'foo_')
+            'models/riggs9162/hlvr/'    -> ('models/riggs9162/hlvr', '')
+            'models/riggs9162/hlvr'     -> ('models/riggs9162', 'hlvr')
+            'subdir/foo_'               -> ('subdir', 'foo_')
+            'models\\foo\\'             -> ('models/foo', '')
+        """
+        if "/" not in prefix and "\\" not in prefix:
+            return ("", prefix)
+        norm = prefix.replace("\\", "/")
+        head, _, tail = norm.rpartition("/")
+        return (head, tail)
 
     def _material_path_for(self, entry: VmatEntry) -> str:
+        # Path-shaped prefix overrides the Material-path field entirely.
+        base = self._prefix_path if self._prefix_path else self.material_path
         if not self.append_material_subfolders:
-            return self.material_path
+            return base
         rel = entry.rel_dir.as_posix().strip("./")
         if rel:
-            return f"{self.material_path}/{rel}"
-        return self.material_path
+            return f"{base}/{rel}"
+        return base
 
     def _resolve_transparency(self, entry: VmatEntry) -> Tuple[bool, bool]:
         """Resolve the (translucent, alphatest) pair to use for one entry.
@@ -560,7 +598,7 @@ class VmatBatchRunner(QThread):
                 continue
 
             output_dir = self._output_dir_for(entry)
-            material_name = f"{self.prefix}{entry.name}{self.suffix}"
+            material_name = f"{self._prefix_tail}{entry.name}{self.suffix}"
             mat_path = self._material_path_for(entry)
 
             if self._should_skip(output_dir, material_name):
@@ -741,6 +779,7 @@ class VmatPBRTool(BaseTool):
         self._refresh_history_dropdown()
 
         self.vmat_root = QLineEdit()
+        self.vmat_root.textChanged.connect(self._on_vmat_root_changed)
         vmat_btn = QPushButton("Browse...")
         vmat_btn.clicked.connect(lambda: self._browse_dir_into(self.vmat_root))
         form.addRow("VMAT root:", self._row(self.vmat_root, vmat_btn))
@@ -772,19 +811,85 @@ class VmatPBRTool(BaseTool):
         self.material_path = QLineEdit()
         self.material_path.setText("models/ports")
         self.material_path.setPlaceholderText("models/ports (Fake) or exopbr (Exo)")
-        form.addRow("Material path:", self.material_path)
+        self.material_path.setToolTip(
+            "Source 1 material reference path — what comes after `materials/` "
+            "when the engine looks up a material.\n\n"
+            "Used in two places:\n"
+            "  1. As the $basetexture/$bumpmap prefix inside generated .vmt files. "
+            "A material path of 'models/props/hazmat' produces e.g. "
+            "$basetexture \"models/props/hazmat/foo_color\".\n"
+            "  2. As the output subdirectory under the chosen output root.\n\n"
+            "Convention: this is the path tail under your materialsrc/materials/ "
+            "tree. For materialsrc/materials/models/props/hazmat/, set this to "
+            "'models/props/hazmat'. The Auto button does this for you.\n\n"
+            "Auto-fill: when you set the VMAT root, the field updates "
+            "automatically as long as it still holds a default ('', 'models/ports', "
+            "'exopbr') or a previously auto-derived value. Once you type your own "
+            "value, manual edits are sticky — the field stops auto-changing."
+        )
+        # Track the most recent auto-derived value so that auto-fill on VMAT
+        # root change can update freely until the user manually edits — at which
+        # point we stop overwriting and let the manual value stick.
+        self._last_auto_material_path: Optional[str] = None
+        auto_btn = QPushButton("Auto")
+        auto_btn.setToolTip(
+            "Force-derive the material path from VMAT root: take everything "
+            "after the last 'materials' component.\n\n"
+            "Examples:\n"
+            "  <addon>/materialsrc/materials/models/props/hazmat → models/props/hazmat\n"
+            "  <addon>/materialsrc/materials/cable → cable\n"
+            "  <addon>/materialsrc/materials → (no change — too generic)\n\n"
+            "Overwrites the field even if you've manually edited it."
+        )
+        auto_btn.clicked.connect(lambda: self._auto_fill_material_path(force=True))
+        form.addRow("Material path:", self._row(self.material_path, auto_btn))
 
         name_row = QHBoxLayout()
         self.prefix_input = QLineEdit()
-        self.prefix_input.setPlaceholderText("Prefix")
+        self.prefix_input.setPlaceholderText("Prefix (e.g. 'pre_' or 'models/riggs9162/hlvr/')")
+        self.prefix_input.setToolTip(
+            "Prepended to each generated material name.\n\n"
+            "Plain prefix (no slashes): used as a filename prefix only.\n"
+            "  'pre_' + 'cable.vmat' -> 'pre_cable.vmt'\n\n"
+            "Path-shaped prefix (contains '/' or '\\\\'): the part up to the "
+            "LAST slash overrides the Material path field AND the on-disk "
+            "output directory for this batch; the remainder (if any) is the "
+            "filename prefix.\n"
+            "  'models/riggs9162/hlvr/' -> Material path = "
+            "'models/riggs9162/hlvr', filename prefix = (none)\n"
+            "  'subdir/foo_'            -> Material path = 'subdir', "
+            "filename prefix = 'foo_'\n\n"
+            "Both effects fire together: the .vmt lands at "
+            "<output>/<prefix-path>/<rel_dir>/<name>.vmt, matching its own "
+            "$basetexture reference so Source 1 can find the file at runtime."
+        )
         self.suffix_input = QLineEdit()
         self.suffix_input.setPlaceholderText("Suffix")
+        self.suffix_input.setToolTip(
+            "Appended to each generated material name (filename only). "
+            "Slash-shaped suffixes are not interpreted as paths."
+        )
         name_row.addWidget(self.prefix_input)
         name_row.addWidget(self.suffix_input)
         form.addRow("Prefix / Suffix:", self._row_widget(name_row))
 
         self.append_material_subfolders = QCheckBox("Append VMAT subfolders to material path")
         self.append_material_subfolders.setChecked(True)
+        self.append_material_subfolders.setToolTip(
+            "When enabled, each VMAT's location relative to the VMAT root is "
+            "appended to the material path used for that file's output. Lets a "
+            "single batch run cover several material subfolders with their "
+            "structure preserved.\n\n"
+            "Example — VMAT root = materialsrc/materials/, material path = "
+            "models/props:\n"
+            "  materials/models/props/hazmat/foo.vmat → output material path "
+            "'models/props/hazmat'\n"
+            "  materials/models/props/cable/bar.vmat → output material path "
+            "'models/props/cable'\n\n"
+            "Disable when your VMAT root already points at the exact target "
+            "folder and you want every VMT to share the same material path "
+            "verbatim."
+        )
         form.addRow("", self.append_material_subfolders)
 
         self.preserve_structure = QCheckBox("Preserve VMAT folder structure in output")
@@ -1287,6 +1392,63 @@ class VmatPBRTool(BaseTool):
         folder = QFileDialog.getExistingDirectory(self, "Select Folder", "")
         if folder:
             line_edit.setText(folder)
+
+    # ------------------------------------------------------------------
+    # Auto-derive material path from VMAT root
+    # ------------------------------------------------------------------
+
+    # Values the auto-fill is willing to overwrite without explicit user
+    # confirmation. "" / mode defaults / a previously auto-derived value all
+    # count as "not manually edited."
+    _DEFAULT_MATERIAL_PATHS = {"", "models/ports", "exopbr"}
+
+    @staticmethod
+    def _derive_material_path_from(vmat_root: str) -> str:
+        """Find the last `materials` component in `vmat_root` and return the
+        path tail after it, joined with forward slashes.
+
+        Examples:
+            <addon>/materialsrc/materials/models/props/hazmat -> models/props/hazmat
+            <addon>/materialsrc/materials/cable               -> cable
+            <addon>/materialsrc/materials                     -> ""
+            <addon>/random/folder                             -> ""
+        """
+        if not vmat_root:
+            return ""
+        try:
+            parts = Path(vmat_root).parts
+        except (TypeError, ValueError):
+            return ""
+        idxs = [i for i, p in enumerate(parts) if p.lower() == "materials"]
+        if not idxs:
+            return ""
+        tail = parts[idxs[-1] + 1:]
+        return "/".join(tail)
+
+    def _on_vmat_root_changed(self, _text: str):
+        self._auto_fill_material_path(force=False)
+
+    def _auto_fill_material_path(self, force: bool = False):
+        """Populate Material path from VMAT root.
+
+        `force=True` (the Auto button) overwrites whatever's there.
+        `force=False` (text-changed signal) only overwrites if the field still
+        looks default — empty string, a mode-default, or the previously
+        auto-derived value. This keeps manual edits sticky.
+        """
+        derived = self._derive_material_path_from(self.vmat_root.text().strip())
+        if not derived:
+            return
+        current = self.material_path.text().strip()
+        if not force:
+            looks_default = (
+                current in self._DEFAULT_MATERIAL_PATHS
+                or current == self._last_auto_material_path
+            )
+            if not looks_default:
+                return
+        self.material_path.setText(derived)
+        self._last_auto_material_path = derived
 
     def _sync_mode_defaults(self, mode: str):
         if mode == "Fake PBR":
