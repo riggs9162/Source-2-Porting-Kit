@@ -3,9 +3,9 @@ Quad to Stereo Audio Tool
 Converts quad audio files (L, LS, R, RS) to stereo format
 """
 
-import math
 import re
 from pathlib import Path
+from threading import Lock
 from typing import Dict, List, Optional, Tuple
 
 from PySide6.QtCore import QThread, Signal
@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.tools.base_tool import BaseTool
+from app.utils.audio_runner import default_workers, parallel_for_each, run_ffmpeg
 
 
 class QuadToStereoWorker(QThread):
@@ -53,23 +54,18 @@ class QuadToStereoWorker(QThread):
         self.quality = quality
         self.overwrite_existing = overwrite_existing
         self.delete_originals = delete_originals
+        self._counter_lock = Lock()
+        self._converted = 0
+        self._skipped = 0
+        self._failed = 0
 
     def run(self):
         try:
-            from pydub import AudioSegment
-        except ImportError:
-            self.progress.emit(
-                "pydub library is required. Install with: pip install pydub",
-                "ERROR",
-            )
+            self.output_folder.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            self.progress.emit(f"Could not create output folder: {exc}", "ERROR")
             self.finished.emit(0, 0, len(self.quad_groups))
             return
-
-        converted = 0
-        skipped = 0
-        failed = 0
-
-        self.output_folder.mkdir(parents=True, exist_ok=True)
 
         self.progress.emit(
             f"Starting conversion of {len(self.quad_groups)} quad groups...",
@@ -79,86 +75,106 @@ class QuadToStereoWorker(QThread):
         self.progress.emit(f"Volume adjustment: {self.volume_adjustment}x", "INFO")
         self.progress.emit(f"Output format: {self.output_format} ({self.quality})", "INFO")
 
-        for base_name, files in self.quad_groups.items():
-            if self.isInterruptionRequested():
-                break
+        items = list(self.quad_groups.items())
 
-            try:
-                self.progress.emit(f"Processing: {base_name}", "INFO")
-
-                # Determine output filename
-                output_filename = f"{base_name}.{self.output_format}"
-                output_path = self.output_folder / output_filename
-
-                # Check if output exists
-                if output_path.exists() and not self.overwrite_existing:
-                    self.progress.emit(f"  Skipped (file exists): {output_filename}", "WARNING")
-                    skipped += 1
-                    continue
-
-                # Load audio files
-                l_audio = AudioSegment.from_file(str(files["l"]))
-                ls_audio = AudioSegment.from_file(str(files["ls"]))
-                r_audio = AudioSegment.from_file(str(files["r"]))
-                rs_audio = AudioSegment.from_file(str(files["rs"]))
-
-                # Ensure all files have the same length
-                min_length = min(len(l_audio), len(ls_audio), len(r_audio), len(rs_audio))
-                l_audio = l_audio[:min_length]
-                ls_audio = ls_audio[:min_length]
-                r_audio = r_audio[:min_length]
-                rs_audio = rs_audio[:min_length]
-
-                # Mix channels based on mode
-                if self.mix_mode == "balance":
-                    # L+LS to left channel, R+RS to right channel
-                    left_channel = l_audio.overlay(ls_audio)
-                    right_channel = r_audio.overlay(rs_audio)
-                else:  # downmix
-                    # Mix all channels to stereo
-                    mono_mix = l_audio.overlay(ls_audio).overlay(r_audio).overlay(rs_audio)
-                    left_channel = mono_mix
-                    right_channel = mono_mix
-
-                # Apply volume adjustment
-                if self.volume_adjustment != 1.0:
-                    db_adjustment = 20 * math.log10(self.volume_adjustment)
-                    left_channel = left_channel.apply_gain(db_adjustment)
-                    right_channel = right_channel.apply_gain(db_adjustment)
-
-                # Create stereo audio
-                stereo_audio = AudioSegment.from_mono_audiosegments(left_channel, right_channel)
-
-                # Export based on format
-                export_params: Dict = {}
-                if self.output_format == "mp3":
-                    export_params["bitrate"] = self.quality
-                elif self.output_format == "ogg":
-                    export_params["bitrate"] = self.quality
-
-                stereo_audio.export(str(output_path), format=self.output_format, **export_params)
-
-                self.progress.emit(f"  Converted: {output_filename}", "SUCCESS")
-                converted += 1
-
-                # Delete originals if requested
-                if self.delete_originals:
-                    for channel in ["l", "ls", "r", "rs"]:
-                        try:
-                            files[channel].unlink()
-                            self.progress.emit(f"  Deleted: {files[channel].name}", "INFO")
-                        except Exception as exc:
-                            self.progress.emit(
-                                f"  Failed to delete {files[channel].name}: {exc}",
-                                "WARNING",
-                            )
-
-            except Exception as exc:
-                self.progress.emit(f"  Error processing {base_name}: {exc}", "ERROR")
-                failed += 1
+        parallel_for_each(
+            items,
+            self._process_group,
+            max_workers=default_workers(),
+            should_stop=self.isInterruptionRequested,
+        )
 
         self.progress.emit("Conversion complete!", "SUCCESS")
-        self.finished.emit(converted, skipped, failed)
+        self.finished.emit(self._converted, self._skipped, self._failed)
+
+    # --- per-group conversion -----------------------------------------------
+
+    def _process_group(self, item: Tuple[str, Dict[str, Path]]) -> None:
+        if self.isInterruptionRequested():
+            return
+        base_name, files = item
+        output_filename = f"{base_name}.{self.output_format}"
+        output_path = self.output_folder / output_filename
+
+        try:
+            self.progress.emit(f"Processing: {base_name}", "INFO")
+
+            if output_path.exists() and not self.overwrite_existing:
+                self.progress.emit(f"  Skipped (file exists): {output_filename}", "WARNING")
+                with self._counter_lock:
+                    self._skipped += 1
+                return
+
+            self._mix_to_stereo(files, output_path)
+
+            self.progress.emit(f"  Converted: {output_filename}", "SUCCESS")
+            with self._counter_lock:
+                self._converted += 1
+
+            if self.delete_originals:
+                for channel in ("l", "ls", "r", "rs"):
+                    try:
+                        files[channel].unlink()
+                        self.progress.emit(f"  Deleted: {files[channel].name}", "INFO")
+                    except OSError as exc:
+                        self.progress.emit(
+                            f"  Failed to delete {files[channel].name}: {exc}",
+                            "WARNING",
+                        )
+
+        except Exception as exc:  # noqa: BLE001
+            self.progress.emit(f"  Error processing {base_name}: {exc}", "ERROR")
+            with self._counter_lock:
+                self._failed += 1
+
+    def _build_pan_filter(self) -> str:
+        """Return a `pan=` filter expression mixing 4 mono inputs to stereo.
+
+        Coefficients absorb the volume adjustment so we don't need a separate
+        volume filter. `c0..c3` correspond to the L, LS, R, RS inputs after
+        amerge.
+        """
+        v = self.volume_adjustment
+        if self.mix_mode == "balance":
+            # left = v*(L + LS), right = v*(R + RS) — matches the previous
+            # pydub overlay (additive without normalization).
+            return f"pan=stereo|c0={v}*c0+{v}*c1|c1={v}*c2+{v}*c3"
+        # downmix: every input contributes to both output channels.
+        return (
+            f"pan=stereo|"
+            f"c0={v}*c0+{v}*c1+{v}*c2+{v}*c3|"
+            f"c1={v}*c0+{v}*c1+{v}*c2+{v}*c3"
+        )
+
+    def _mix_to_stereo(self, files: Dict[str, Path], output_path: Path) -> None:
+        """One-shot ffmpeg run: 4 inputs → amerge → pan → encoded stereo file."""
+        filter_complex = (
+            "[0:a][1:a][2:a][3:a]amerge=inputs=4,"
+            f"{self._build_pan_filter()}[out]"
+        )
+
+        args: List[str] = [
+            "-y",
+            "-i", str(files["l"]),
+            "-i", str(files["ls"]),
+            "-i", str(files["r"]),
+            "-i", str(files["rs"]),
+            "-filter_complex", filter_complex,
+            "-map", "[out]",
+            # Truncate to the shortest input — matches the previous
+            # min_length trim done in pydub.
+            "-shortest",
+        ]
+
+        if self.output_format == "mp3":
+            args += ["-c:a", "libmp3lame", "-b:a", self.quality]
+        elif self.output_format == "ogg":
+            args += ["-c:a", "libvorbis", "-b:a", self.quality]
+        elif self.output_format == "wav":
+            args += ["-c:a", "pcm_s16le"]
+
+        args.append(str(output_path))
+        run_ffmpeg(args)
 
 
 class QuadToStereoTool(BaseTool):
