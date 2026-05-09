@@ -179,8 +179,6 @@ def build_command(args: argparse.Namespace) -> list[str]:
     # Dependencies that are frequently missed by static analysis or require
     # packaged resources/binaries.
     hidden_imports = [
-        "ffmpeg",         # ffmpeg-python (imported inside methods)
-        "pydub",          # imported lazily in audio tools
         "sourcepp.vtfpp", # native-backed module used for VTF work
     ]
     for module_name in hidden_imports:
@@ -203,14 +201,10 @@ def build_command(args: argparse.Namespace) -> list[str]:
 def print_runtime_warnings() -> None:
     warnings: list[str] = []
 
-    if not _has_module("pydub"):
+    if shutil.which("ffmpeg") is None:
         warnings.append(
-            "Optional package 'pydub' is not installed. OGG/Quad audio tools will be unavailable in the built app."
-        )
-
-    if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
-        warnings.append(
-            "ffmpeg/ffprobe executables were not found on PATH. Audio conversion tools may fail at runtime."
+            "ffmpeg executable was not found on PATH. Audio conversion tools (OGG converter, "
+            "loop point, quad-to-stereo) will fail at runtime."
         )
 
     if warnings:
