@@ -3,9 +3,8 @@ OGG Converter Tool
 Converts audio files to OGG format, skipping WAV files with loop points.
 """
 
-import struct
-import wave
 from pathlib import Path
+from threading import Lock
 from typing import List, Optional
 
 from PySide6.QtCore import QThread, Signal
@@ -22,6 +21,14 @@ from PySide6.QtWidgets import (
 )
 
 from app.tools.base_tool import BaseTool
+from app.utils.audio_runner import (
+    default_workers,
+    parallel_for_each,
+    run_ffmpeg,
+    wav_has_chunk,
+)
+
+AUDIO_EXTENSIONS = {".wav", ".mp3", ".ogg", ".flac", ".m4a", ".aac"}
 
 
 class OggConversionWorker(QThread):
@@ -44,117 +51,103 @@ class OggConversionWorker(QThread):
         self.quality = quality
         self.overwrite_existing = overwrite_existing
         self.delete_original = delete_original
+        self._counter_lock = Lock()
+        self._converted = 0
+        self._skipped = 0
+        self._failed = 0
 
     def run(self):
-        converted = 0
-        skipped = 0
-        failed = 0
         total = len(self.files)
+        if total == 0:
+            self.finished.emit(0, 0, 0, 0)
+            return
 
-        for src in self.files:
-            if self.isInterruptionRequested():
-                break
-            
+        # Pre-create destination folder once when a shared output is set.
+        if self.output_folder:
             try:
-                # Check if WAV file has loop points
-                if src.suffix.lower() == ".wav":
-                    if self._has_loop_points(src):
-                        self.progress.emit(
-                            f"Skipped {src.name} (has loop points)",
-                            "WARNING"
-                        )
-                        skipped += 1
-                        continue
+                self.output_folder.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                self.progress.emit(f"Could not create output folder: {exc}", "ERROR")
+                self.finished.emit(total, 0, 0, total)
+                return
 
-                # Determine output path
-                if self.output_folder:
-                    dest = self.output_folder / f"{src.stem}.ogg"
-                else:
-                    dest = src.with_suffix(".ogg")
+        parallel_for_each(
+            self.files,
+            self._process_one,
+            max_workers=default_workers(),
+            should_stop=self.isInterruptionRequested,
+        )
 
-                # Check if output exists
-                if dest.exists() and not self.overwrite_existing:
-                    self.progress.emit(
-                        f"Skipped {src.name} (output exists)",
-                        "WARNING"
-                    )
-                    skipped += 1
-                    continue
+        self.finished.emit(total, self._converted, self._skipped, self._failed)
 
-                # Convert to OGG
-                self._convert_to_ogg(src, dest)
-                converted += 1
-                self.progress.emit(f"Converted {src.name} → {dest.name}", "SUCCESS")
+    # --- per-file pipeline ----------------------------------------------------
 
-                # Remove original if requested
-                if self.delete_original and src.exists():
-                    try:
-                        src.unlink()
-                        self.progress.emit(f"Removed original {src.name}", "INFO")
-                    except Exception as exc:
-                        self.progress.emit(
-                            f"Could not remove {src.name}: {exc}",
-                            "WARNING"
-                        )
+    def _process_one(self, src: Path) -> None:
+        if self.isInterruptionRequested():
+            return
 
-            except Exception as exc:
-                failed += 1
-                self.progress.emit(f"Failed {src.name}: {exc}", "ERROR")
-
-        self.finished.emit(total, converted, skipped, failed)
-
-    def _has_loop_points(self, wav_path: Path) -> bool:
-        """Check if WAV file contains loop points (smpl chunk)."""
         try:
-            data = wav_path.read_bytes()
-            pos = 12  # Skip RIFF header (4 bytes ID, 4 size, 4 WAVE)
-            data_len = len(data)
-            
-            while pos + 8 <= data_len:
-                if pos + 4 > data_len:
-                    break
-                    
-                chunk_id = data[pos : pos + 4]
-                if len(chunk_id) < 4:
-                    break
-                    
-                if pos + 8 > data_len:
-                    break
-                    
-                chunk_size = int.from_bytes(data[pos + 4 : pos + 8], "little")
-                
-                # Found smpl chunk - has loop points
-                if chunk_id == b"smpl":
-                    return True
-                
-                pad = chunk_size % 2
-                pos = pos + 8 + chunk_size + pad
-                
-            return False
-        except Exception:
-            # If we can't read the file, assume no loop points
-            return False
+            if src.suffix.lower() == ".wav" and wav_has_chunk(src, b"smpl"):
+                self.progress.emit(f"Skipped {src.name} (has loop points)", "WARNING")
+                self._inc("skipped")
+                return
+
+            dest = (
+                self.output_folder / f"{src.stem}.ogg"
+                if self.output_folder
+                else src.with_suffix(".ogg")
+            )
+
+            if dest.exists() and not self.overwrite_existing:
+                self.progress.emit(f"Skipped {src.name} (output exists)", "WARNING")
+                self._inc("skipped")
+                return
+
+            if not self.output_folder:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+
+            self._convert_to_ogg(src, dest)
+            self._inc("converted")
+            self.progress.emit(f"Converted {src.name} → {dest.name}", "SUCCESS")
+
+            if self.delete_original:
+                try:
+                    src.unlink()
+                    self.progress.emit(f"Removed original {src.name}", "INFO")
+                except OSError as exc:
+                    self.progress.emit(
+                        f"Could not remove {src.name}: {exc}", "WARNING"
+                    )
+
+        except Exception as exc:  # noqa: BLE001
+            self._inc("failed")
+            self.progress.emit(f"Failed {src.name}: {exc}", "ERROR")
+
+    def _inc(self, kind: str) -> None:
+        with self._counter_lock:
+            if kind == "converted":
+                self._converted += 1
+            elif kind == "skipped":
+                self._skipped += 1
+            elif kind == "failed":
+                self._failed += 1
 
     def _convert_to_ogg(self, src: Path, dest: Path) -> None:
-        """Convert audio file to OGG using pydub."""
-        try:
-            from pydub import AudioSegment
-        except ImportError as exc:
-            raise RuntimeError(
-                "pydub is not installed. Please install it with: pip install pydub"
-            ) from exc
-
-        dest.parent.mkdir(parents=True, exist_ok=True)
-
-        # Load audio and convert to OGG
-        audio = AudioSegment.from_file(str(src))
-        
-        # Export with quality setting (0-10 scale for OGG)
-        audio.export(
-            str(dest),
-            format="ogg",
-            codec="libvorbis",
-            parameters=["-q:a", str(self.quality)]
+        """Convert audio to OGG/Vorbis via a single ffmpeg pass."""
+        # We've already gated on `dest.exists()` and `overwrite_existing`
+        # above, so passing -y here is safe and avoids ffmpeg prompting.
+        run_ffmpeg(
+            [
+                "-y",
+                "-i",
+                str(src),
+                "-vn",
+                "-c:a",
+                "libvorbis",
+                "-q:a",
+                str(self.quality),
+                str(dest),
+            ]
         )
 
 
@@ -318,10 +311,12 @@ class OggConverterTool(BaseTool):
                 self.log("Source folder does not exist.", "ERROR")
                 return
             
-            # Find all audio files
-            extensions = {".wav", ".mp3", ".ogg", ".flac", ".m4a", ".aac"}
-            for ext in extensions:
-                files_to_convert.extend(folder.rglob(f"*{ext}"))
+            # Single rglob pass, then filter by extension — much faster
+            # than running one rglob per extension on large trees.
+            files_to_convert = [
+                p for p in folder.rglob("*")
+                if p.is_file() and p.suffix.lower() in AUDIO_EXTENSIONS
+            ]
         else:
             self.log("Please select a folder or files first.", "ERROR")
             return
