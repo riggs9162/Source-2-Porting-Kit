@@ -8,11 +8,14 @@ Builds `main.py` into a Windows executable and bundles runtime resources.
 from __future__ import annotations
 
 import argparse
+import errno
 import importlib.util
 import os
 import shutil
+import stat
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 APP_NAME = "Source 2 Porting Kit"
@@ -59,11 +62,79 @@ def install_requirements() -> None:
     _run([sys.executable, "-m", "pip", "install", "-r", str(requirements_file)])
 
 
+def _on_rmtree_error(func, path, _exc):
+    """rmtree onexc handler that clears the read-only bit and retries.
+
+    PyInstaller's bundled `.pyd` and `.dll` files are sometimes written
+    read-only, which makes Windows refuse to delete them on the first try.
+    """
+    try:
+        os.chmod(path, stat.S_IWRITE)
+    except OSError:
+        pass
+    func(path)
+
+
+def _robust_rmtree(path: Path, *, retries: int = 5, delay: float = 0.5) -> None:
+    """Delete a directory tree on Windows, retrying transient lock errors.
+
+    File handles released by another process (or AV scanners) are typically
+    cleared within a second or two. If the path is still locked after
+    `retries` attempts, raise a clear error pointing at the locked file —
+    the most common cause is that a previous build of the EXE is still
+    running.
+    """
+    if not path.exists():
+        return
+
+    last_error: BaseException | None = None
+    for attempt in range(1, retries + 1):
+        try:
+            shutil.rmtree(path, onexc=_on_rmtree_error)
+            return
+        except PermissionError as exc:
+            last_error = exc
+            locked = exc.filename or path
+            print(
+                f"  Retry {attempt}/{retries}: could not delete {locked} "
+                f"(locked or in use). Waiting {delay:.1f}s..."
+            )
+            time.sleep(delay)
+            delay *= 2  # exponential backoff
+        except OSError as exc:
+            # ENOTEMPTY / similar — give the same retry treatment.
+            if exc.errno not in (errno.EACCES, errno.EBUSY, errno.ENOTEMPTY):
+                raise
+            last_error = exc
+            time.sleep(delay)
+            delay *= 2
+
+    locked = getattr(last_error, "filename", None) or path
+    raise RuntimeError(
+        f"Failed to delete {locked} after {retries} attempts.\n"
+        "This usually means a previous build of the app is still running, "
+        "or an antivirus is scanning the dist folder. Close any running "
+        f"'{APP_NAME}.exe' instances and try again."
+    ) from last_error
+
+
 def clean_build_outputs() -> None:
     for path in (SCRIPT_DIR / "build", SCRIPT_DIR / "dist"):
         if path.exists():
             print(f"Removing {path} ...")
-            shutil.rmtree(path)
+            _robust_rmtree(path)
+
+
+def clean_dist_only() -> None:
+    """Remove only the dist/ tree so PyInstaller can repopulate it.
+
+    Preserves build/work/ (PyInstaller's analysis cache), which makes
+    re-runs an order of magnitude faster.
+    """
+    dist = SCRIPT_DIR / "dist"
+    if dist.exists():
+        print(f"Removing {dist} ...")
+        _robust_rmtree(dist)
 
 
 def ensure_build_dirs() -> None:
