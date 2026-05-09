@@ -1,0 +1,54 @@
+---------------
+Parent file: S:\SteamLibrary\steamapps\common\Half-Life Alyx\game\hlvr\pak01_dir.vpk
+File: models\props\hazmat\hazmat_crate_lid.vmdl_c
+Exception: System.AggregateException: One or more errors occurred. (The process cannot access the file 'C:\Program Files (x86)\Steam\steamapps\common\GarrysMod\garrysmod\addons\Half-Life Alyx Ports\modelsrc\models\hazmat\models\props\hazmat\physics_prop.png' because it is being used by another process.)
+ ---> System.IO.IOException: The process cannot access the file 'C:\Program Files (x86)\Steam\steamapps\common\GarrysMod\garrysmod\addons\Half-Life Alyx Ports\modelsrc\models\hazmat\models\props\hazmat\physics_prop.png' because it is being used by another process.
+   at System.IO.Strategies.OSFileStreamStrategy..ctor(String path, FileMode mode, FileAccess access, FileShare share, FileOptions options, Int64 preallocationSize, Nullable`1 unixCreateMode)
+   at ValveResourceFormat.IO.GltfModelExporter.LinkAndSaveImage(Image image, Byte[] pngBytes) in /_/ValveResourceFormat/IO/GltfModelExporter.Material.cs:line 532
+   at ValveResourceFormat.IO.GltfModelExporter.AddPhysicsTexture(Image image, String surfaceProperty) in /_/ValveResourceFormat/IO/GltfModelExporter.Physics.cs:line 548
+   --- End of inner exception stack trace ---
+   at System.Threading.Tasks.Task.WaitAllCore(ReadOnlySpan`1 tasks, Int32 millisecondsTimeout, CancellationToken cancellationToken)
+   at System.Threading.Tasks.Task.WaitAll(IEnumerable`1 tasks, CancellationToken cancellationToken)
+   at ValveResourceFormat.IO.GltfModelExporter.WaitForTexturesToExport() in /_/ValveResourceFormat/IO/GltfModelExporter.Material.cs:line 544
+   at ValveResourceFormat.IO.GltfModelExporter.ExportToFile(String resourceName, String fileName, PhysAggregateData physAggregateData) in /_/ValveResourceFormat/IO/GltfModelExporter.cs:line 599
+   at ValveResourceFormat.IO.GltfModelExporter.ExportToFile(String resourceName, String fileName, Model model) in /_/ValveResourceFormat/IO/GltfModelExporter.cs:line 583
+   at ValveResourceFormat.IO.GltfModelExporter.<>c__DisplayClass48_0.<Export>b__0() in /_/ValveResourceFormat/IO/GltfModelExporter.cs:line 189
+   at ValveResourceFormat.IO.GltfModelExporter.RunExport(Action exportAction, String targetPath, CancellationToken cancellationToken) in /_/ValveResourceFormat/IO/GltfModelExporter.cs:line 155
+   at CLI.Decompiler.ProcessVPKEntries(String parentPath, Package package, IFileLoader fileLoader, String type, Dictionary`2 manifestData) in /_/CLI/Decompiler.cs:line 1339
+
+---------------
+Parent file: S:\SteamLibrary\steamapps\common\Half-Life Alyx\game\hlvr\pak01_dir.vpk
+File: models\props\hazmat\hazmat_crate_body.vmdl_c
+Exception: System.AggregateException: One or more errors occurred. (The process cannot access the file 'C:\Program Files (x86)\Steam\steamapps\common\GarrysMod\garrysmod\addons\Half-Life Alyx Ports\modelsrc\models\hazmat\models\props\hazmat\physics_prop.png' because it is being used by another process.)
+ ---> System.IO.IOException: The process cannot access the file 'C:\Program Files (x86)\Steam\steamapps\common\GarrysMod\garrysmod\addons\Half-Life Alyx Ports\modelsrc\models\hazmat\models\props\hazmat\physics_prop.png' because it is being used by another process.
+   at System.IO.Strategies.OSFileStreamStrategy..ctor(String path, FileMode mode, FileAccess access, FileShare share, FileOptions options, Int64 preallocationSize, Nullable`1 unixCreateMode)
+   at ValveResourceFormat.IO.GltfModelExporter.LinkAndSaveImage(Image image, Byte[] pngBytes) in /_/ValveResourceFormat/IO/GltfModelExporter.Material.cs:line 532
+   at ValveResourceFormat.IO.GltfModelExporter.AddPhysicsTexture(Image image, String surfaceProperty) in /_/ValveResourceFormat/IO/GltfModelExporter.Physics.cs:line 548
+   --- End of inner exception stack trace ---
+   at System.Threading.Tasks.Task.WaitAllCore(ReadOnlySpan`1 tasks, Int32 millisecondsTimeout, CancellationToken cancellationToken)
+   at System.Threading.Tasks.Task.WaitAll(IEnumerable`1 tasks, CancellationToken cancellationToken)
+   at ValveResourceFormat.IO.GltfModelExporter.WaitForTexturesToExport() in /_/ValveResourceFormat/IO/GltfModelExporter.Material.cs:line 544
+   at ValveResourceFormat.IO.GltfModelExporter.ExportToFile(String resourceName, String fileName, PhysAggregateData physAggregateData) in /_/ValveResourceFormat/IO/GltfModelExporter.cs:line 599
+   at ValveResourceFormat.IO.GltfModelExporter.ExportToFile(String resourceName, String fileName, Model model) in /_/ValveResourceFormat/IO/GltfModelExporter.cs:line 583
+   at ValveResourceFormat.IO.GltfModelExporter.<>c__DisplayClass48_0.<Export>b__0() in /_/ValveResourceFormat/IO/GltfModelExporter.cs:line 189
+   at ValveResourceFormat.IO.GltfModelExporter.RunExport(Action exportAction, String targetPath, CancellationToken cancellationToken) in /_/ValveResourceFormat/IO/GltfModelExporter.cs:line 155
+   at CLI.Decompiler.ProcessVPKEntries(String parentPath, Package package, IFileLoader fileLoader, String type, Dictionary`2 manifestData) in /_/CLI/Decompiler.cs:line 1339
+
+---------------
+Parent file: S:\SteamLibrary\steamapps\common\Half-Life Alyx\game\hlvr\pak01_dir.vpk
+File: models\props\hazmat\hazmat_crate_body.vmdl_c
+Exception: System.AggregateException: One or more errors occurred. (The process cannot access the file 'C:\Program Files (x86)\Steam\steamapps\common\GarrysMod\garrysmod\addons\Half-Life Alyx Ports\modelsrc\models\props\hazmat\physics_prop.png' because it is being used by another process.)
+ ---> System.IO.IOException: The process cannot access the file 'C:\Program Files (x86)\Steam\steamapps\common\GarrysMod\garrysmod\addons\Half-Life Alyx Ports\modelsrc\models\props\hazmat\physics_prop.png' because it is being used by another process.
+   at System.IO.Strategies.OSFileStreamStrategy..ctor(String path, FileMode mode, FileAccess access, FileShare share, FileOptions options, Int64 preallocationSize, Nullable`1 unixCreateMode)
+   at ValveResourceFormat.IO.GltfModelExporter.LinkAndSaveImage(Image image, Byte[] pngBytes) in /_/ValveResourceFormat/IO/GltfModelExporter.Material.cs:line 532
+   at ValveResourceFormat.IO.GltfModelExporter.AddPhysicsTexture(Image image, String surfaceProperty) in /_/ValveResourceFormat/IO/GltfModelExporter.Physics.cs:line 548
+   --- End of inner exception stack trace ---
+   at System.Threading.Tasks.Task.WaitAllCore(ReadOnlySpan`1 tasks, Int32 millisecondsTimeout, CancellationToken cancellationToken)
+   at System.Threading.Tasks.Task.WaitAll(IEnumerable`1 tasks, CancellationToken cancellationToken)
+   at ValveResourceFormat.IO.GltfModelExporter.WaitForTexturesToExport() in /_/ValveResourceFormat/IO/GltfModelExporter.Material.cs:line 544
+   at ValveResourceFormat.IO.GltfModelExporter.ExportToFile(String resourceName, String fileName, PhysAggregateData physAggregateData) in /_/ValveResourceFormat/IO/GltfModelExporter.cs:line 599
+   at ValveResourceFormat.IO.GltfModelExporter.ExportToFile(String resourceName, String fileName, Model model) in /_/ValveResourceFormat/IO/GltfModelExporter.cs:line 583
+   at ValveResourceFormat.IO.GltfModelExporter.<>c__DisplayClass48_0.<Export>b__0() in /_/ValveResourceFormat/IO/GltfModelExporter.cs:line 189
+   at ValveResourceFormat.IO.GltfModelExporter.RunExport(Action exportAction, String targetPath, CancellationToken cancellationToken) in /_/ValveResourceFormat/IO/GltfModelExporter.cs:line 155
+   at CLI.Decompiler.ProcessVPKEntries(String parentPath, Package package, IFileLoader fileLoader, String type, Dictionary`2 manifestData) in /_/CLI/Decompiler.cs:line 1339
+
