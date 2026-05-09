@@ -25,11 +25,6 @@ import numpy as np
 import trimesh
 from trimesh.resolvers import FilePathResolver
 
-try:
-    import pymeshlab
-    HAS_PYMESHLAB = True
-except ImportError:
-    HAS_PYMESHLAB = False
 
 from PySide6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFileDialog,
@@ -647,50 +642,6 @@ class MeshProcessor:
                 'damping': 0.05,
                 'rotdamping': 0.5
             }
-
-    @staticmethod
-    def force_smooth_normals_pymeshlab(mesh: trimesh.Trimesh) -> bool:
-        """Use PyMeshLab to force smooth (per-vertex) normals. Returns True if successful."""
-        if not HAS_PYMESHLAB:
-            return False
-        
-        try:
-            # Create a new MeshSet
-            ms = pymeshlab.MeshSet()
-            
-            # Add the trimesh as a pymeshlab mesh
-            # Convert trimesh to pymeshlab format
-            m = pymeshlab.Mesh(
-                vertex_matrix=mesh.vertices,
-                face_matrix=mesh.faces
-            )
-            ms.add_mesh(m)
-            
-            # Clear any existing per-face normals and wedge normals
-            # This forces the mesh to only have per-vertex normals
-            ms.clear_per_face_normals()
-            ms.clear_per_wedge_normals()
-            
-            # Compute smooth vertex normals
-            # This averages face normals at each vertex (Blender's "Shade Smooth")
-            ms.compute_normal_per_vertex()
-            
-            # Get the processed mesh back
-            processed_mesh = ms.current_mesh()
-            
-            # Update the original trimesh with smooth normals
-            # PyMeshLab stores normals in vertex_normal_matrix()
-            smooth_normals = processed_mesh.vertex_normal_matrix()
-            
-            # Force these normals into trimesh's cache
-            if not hasattr(mesh, '_cache'):
-                mesh._cache = trimesh.caching.Cache()
-            mesh._cache['vertex_normals'] = smooth_normals
-            
-            return True
-            
-        except Exception as e:
-            return False
 
 
 class SurfacepropDetector:

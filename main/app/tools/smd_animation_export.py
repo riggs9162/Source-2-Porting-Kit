@@ -30,10 +30,38 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import trimesh
-from scipy.spatial.transform import Rotation as R
 
 from srctools.math import Angle, Vec
 from srctools.smd import Bone, BoneFrame, Mesh, Triangle, Vertex
+
+
+def _quat_xyzw_to_zyx_euler_degrees(q_xyzw: np.ndarray) -> Tuple[float, float, float]:
+    """Quaternion (x, y, z, w) → ZYX intrinsic Euler angles (yaw, pitch, roll)
+    in degrees. Matches scipy's ``Rotation.from_quat(q).as_euler('ZYX', degrees=True)``.
+    """
+    x, y, z, w = float(q_xyzw[0]), float(q_xyzw[1]), float(q_xyzw[2]), float(q_xyzw[3])
+    # ZYX intrinsic = Z * Y * X. Closed-form extraction from a unit quaternion.
+    # yaw (Z): atan2(2(wz + xy), 1 - 2(y² + z²))
+    yaw = np.arctan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+    # pitch (Y): asin(2(wy - zx)), clamped to handle gimbal-lock / FP drift
+    sin_pitch = max(-1.0, min(1.0, 2.0 * (w * y - z * x)))
+    pitch = np.arcsin(sin_pitch)
+    # roll (X): atan2(2(wx + yz), 1 - 2(x² + y²))
+    roll = np.arctan2(2.0 * (w * x + y * z), 1.0 - 2.0 * (x * x + y * y))
+    return float(np.degrees(yaw)), float(np.degrees(pitch)), float(np.degrees(roll))
+
+
+def _rotate_vec3_by_quat_xyzw(v: np.ndarray, q_xyzw: np.ndarray) -> np.ndarray:
+    """Rotate a 3-vector by a quaternion stored as (x, y, z, w).
+
+    Equivalent to ``Rotation.from_quat(q).apply(v)``. Uses the
+    v + 2*w*(u×v) + 2*u×(u×v) formulation to avoid building a full matrix.
+    """
+    u = q_xyzw[:3]
+    w = float(q_xyzw[3])
+    cross1 = np.cross(u, v)
+    cross2 = np.cross(u, cross1)
+    return (v + 2.0 * w * cross1 + 2.0 * cross2).astype(v.dtype)
 
 from .gltf_animation import GltfClip, GltfSkin
 from .smd_export_helpers import pick_material, resolve_face_materials, resolve_uvs
@@ -73,15 +101,11 @@ def _quat_to_pyr_degrees(q_xyzw: np.ndarray) -> Tuple[float, float, float]:
 
     Source's ``Angle`` class stores (pitch, yaw, roll) where rotations are
     applied in order: roll around X, pitch around Y, yaw around Z (intrinsic).
-    Scipy's ``Rotation.as_euler('YZX')`` does NOT match this directly; we use
-    'ZYX' (yaw, pitch, roll) order which matches Source's convention when
-    interpreted as (yaw, pitch, roll).
+    We use 'ZYX' (yaw, pitch, roll) order which matches Source's convention
+    when interpreted as (yaw, pitch, roll).
     """
-    # scipy expects [x, y, z, w]
-    rot = R.from_quat(q_xyzw)
-    # Source's Angle.from_matrix uses Z(yaw) Y(pitch) X(roll) intrinsic.
-    yaw, pitch, roll = rot.as_euler('ZYX', degrees=True)
-    return float(pitch), float(yaw), float(roll)
+    yaw, pitch, roll = _quat_xyzw_to_zyx_euler_degrees(q_xyzw)
+    return pitch, yaw, roll
 
 
 def _smd_angle_from_pyr(pit: float, yaw: float, rol: float) -> Angle:
@@ -114,7 +138,7 @@ def _apply_coord_to_root_trs(t: np.ndarray, q: np.ndarray, coord: CoordinateMode
         q_out = _quat_mul(_AXIS_SWAP_QUAT, q)
         # Translation of root is rotated as well so children land in the right
         # parent-local frame after the swap is propagated through the chain.
-        t_out = R.from_quat(_AXIS_SWAP_QUAT).apply(t_out)
+        t_out = _rotate_vec3_by_quat_xyzw(t_out, _AXIS_SWAP_QUAT)
     else:
         q_out = q
     return t_out.astype(np.float32), q_out.astype(np.float32)
