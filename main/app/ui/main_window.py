@@ -27,6 +27,7 @@ from app.tools.vmat_pbr_tool import VmatPBRTool
 from app.tools.vtf_clamp_tool import VtfClampTool
 from app.tools.gltf_smd_batch_tool import GltfSmdBatchTool
 from app.tools.hotspot_editor_tool import HotspotEditorTool
+from app.tools.vrf_batch_export_tool import VrfBatchExportTool
 
 
 class MainWindow(QMainWindow):
@@ -120,6 +121,7 @@ class MainWindow(QMainWindow):
             "Models": [
                 ("Bone Backport", BoneBackportTool),
                 ("GLTF Batch SMD", GltfSmdBatchTool),
+                ("VRF Batch Export", VrfBatchExportTool),
             ],
             "Materials": [
                 ("Alpha Mask", AlphaMaskTool),
