@@ -1,6 +1,8 @@
+import shutil
 import struct
 import wave
 from pathlib import Path
+from threading import Lock
 from typing import List, Optional
 
 from PySide6.QtCore import QThread, Signal
@@ -16,6 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.tools.base_tool import BaseTool
+from app.utils.audio_runner import default_workers, parallel_for_each, run_ffmpeg
 
 SUPPORTED_EXTENSIONS = {".ogg", ".mp3", ".wav"}
 DEFAULT_KEYWORDS = ["_lp", "_loop", "_looped", "_looping"]
@@ -39,44 +42,59 @@ class LoopConversionWorker(QThread):
         self.overwrite_existing = overwrite_existing
         self.process_wav = process_wav
         self.delete_original = delete_original
+        self._counter_lock = Lock()
+        self._converted = 0
+        self._failed = 0
 
     def run(self):
-        converted = 0
-        failed = 0
         total = len(self.files)
+        if total == 0:
+            self.finished.emit(0, 0, 0)
+            return
 
-        for src in self.files:
-            if self.isInterruptionRequested():
-                break
-            try:
-                dest = self._compute_destination(src)
+        parallel_for_each(
+            self.files,
+            self._process_one,
+            max_workers=default_workers(),
+            should_stop=self.isInterruptionRequested,
+        )
 
-                if src.suffix.lower() != ".wav":
-                    self._convert_to_wav(src, dest)
-                elif self.process_wav and dest != src:
-                    # Copy WAV so we do not overwrite unless requested
-                    dest.write_bytes(src.read_bytes())
+        self.finished.emit(total, self._converted, self._failed)
 
-                if src.suffix.lower() == ".wav" and not self.process_wav:
-                    # Skipped because user opted out
-                    continue
+    def _process_one(self, src: Path) -> None:
+        if self.isInterruptionRequested():
+            return
+        try:
+            dest = self._compute_destination(src)
 
-                self._add_loop_points(dest)
-                converted += 1
-                self.progress.emit(f"Processed {src.name} → {dest.name}", "SUCCESS")
+            if src.suffix.lower() != ".wav":
+                self._convert_to_wav(src, dest)
+            elif self.process_wav and dest != src:
+                # Copy WAV so we do not overwrite unless requested.
+                # shutil.copyfile uses the OS fast-copy path on modern
+                # Python (~3x faster than read_bytes/write_bytes for large
+                # files since it never materializes the full payload in
+                # Python memory).
+                shutil.copyfile(src, dest)
 
-                # Remove original if requested and the output is different
-                if self.delete_original and src.exists() and src.resolve() != dest.resolve():
-                    try:
-                        src.unlink()
-                        self.progress.emit(f"Removed original {src.name}", "INFO")
-                    except Exception as exc:  # noqa: BLE001
-                        self.progress.emit(f"Could not remove {src.name}: {exc}", "WARNING")
-            except Exception as exc:  # noqa: BLE001
-                failed += 1
-                self.progress.emit(f"Failed {src.name}: {exc}", "ERROR")
+            if src.suffix.lower() == ".wav" and not self.process_wav:
+                return
 
-        self.finished.emit(total, converted, failed)
+            self._add_loop_points(dest)
+            with self._counter_lock:
+                self._converted += 1
+            self.progress.emit(f"Processed {src.name} → {dest.name}", "SUCCESS")
+
+            if self.delete_original and src.exists() and src.resolve() != dest.resolve():
+                try:
+                    src.unlink()
+                    self.progress.emit(f"Removed original {src.name}", "INFO")
+                except OSError as exc:
+                    self.progress.emit(f"Could not remove {src.name}: {exc}", "WARNING")
+        except Exception as exc:  # noqa: BLE001
+            with self._counter_lock:
+                self._failed += 1
+            self.progress.emit(f"Failed {src.name}: {exc}", "ERROR")
 
     def _compute_destination(self, src: Path) -> Path:
         if src.suffix.lower() == ".wav":
@@ -90,59 +108,48 @@ class LoopConversionWorker(QThread):
         return dest
 
     def _convert_to_wav(self, src: Path, dest: Path) -> None:
-        try:
-            import ffmpeg  # type: ignore
-        except ImportError as exc:
-            raise RuntimeError(
-                "ffmpeg-python is not installed. Please install dependencies from requirements.txt."
-            ) from exc
-
         dest.parent.mkdir(parents=True, exist_ok=True)
-
-        # Convert to 16-bit PCM WAV to maximize compatibility
-        stream = ffmpeg.input(str(src))
-        stream = ffmpeg.output(
-            stream,
-            str(dest),
-            format="wav",
-            acodec="pcm_s16le",
+        # Direct ffmpeg call avoids the ffmpeg-python wrapper overhead and
+        # the extra Python attribute/object plumbing — same single subprocess
+        # underneath, just less indirection.
+        run_ffmpeg(
+            [
+                "-y",
+                "-i",
+                str(src),
+                "-vn",
+                "-f",
+                "wav",
+                "-acodec",
+                "pcm_s16le",
+                str(dest),
+            ]
         )
-        ffmpeg.run(stream, overwrite_output=True, quiet=True)
 
     def _add_loop_points(self, wav_path: Path) -> None:
+        # Inspect the file via the wave module to read sample-rate and frame
+        # count without copying the audio payload into Python memory.
         with wave.open(str(wav_path), "rb") as wf:
-            params = wf.getparams()
-            frames = wf.readframes(wf.getnframes())
             sample_rate = wf.getframerate()
             frame_count = wf.getnframes()
 
         if frame_count <= 1:
             raise ValueError("Audio is too short to loop (needs more than 1 frame).")
 
-        loop_start = 0
-        loop_end = frame_count - 1
+        # Read the existing file once, strip any pre-existing smpl chunk,
+        # append the new one, and rewrite RIFF size — single read + single
+        # write. The previous implementation wrote a temp WAV, read it back,
+        # then wrote the final file (3 disk passes).
+        raw = wav_path.read_bytes()
+        stripped = self._strip_existing_smpl(raw)
+        smpl_chunk = self._build_smpl_chunk(sample_rate, 0, frame_count - 1)
 
-        temp_path = wav_path.with_suffix(".tmp_loop.wav")
-        try:
-            with wave.open(str(temp_path), "wb") as out:
-                out.setparams(params)
-                out.writeframes(frames)
+        updated = bytearray(stripped)
+        updated.extend(smpl_chunk)
+        # RIFF chunk size = total file size - 8
+        updated[4:8] = struct.pack("<I", len(updated) - 8)
 
-            raw = temp_path.read_bytes()
-            raw = self._strip_existing_smpl(raw)
-            smpl_chunk = self._build_smpl_chunk(sample_rate, loop_start, loop_end)
-
-            updated = bytearray(raw)
-            updated.extend(smpl_chunk)
-
-            # Update RIFF chunk size (bytes 4-8) = file size - 8
-            riff_size = len(updated) - 8
-            updated[4:8] = struct.pack("<I", riff_size)
-
-            wav_path.write_bytes(updated)
-        finally:
-            if temp_path.exists():
-                temp_path.unlink()
+        wav_path.write_bytes(bytes(updated))
 
     def _strip_existing_smpl(self, data: bytes) -> bytes:
         """Remove any existing smpl chunk to avoid duplicates."""
