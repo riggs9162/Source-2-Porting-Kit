@@ -19,7 +19,11 @@ class Settings:
         'window_width': 800,
         'window_height': 600,
         'window_maximized': False,
+        'vrf_cli_path': '',
+        'vrf_recent_runs': [],
     }
+
+    VRF_RECENT_RUNS_LIMIT = 10
     
     def __init__(self):
         self.settings_file = get_config_dir() / 'settings.json'
@@ -65,3 +69,29 @@ class Settings:
     def set_theme(self, theme: Theme):
         """Set the current theme"""
         self.set('theme', theme.value)
+
+    def get_vrf_cli_path(self) -> str:
+        """Path to the user's Source2Viewer-CLI.exe ('' if unset)."""
+        return self.get('vrf_cli_path', '') or ''
+
+    def set_vrf_cli_path(self, path: str):
+        """Persist the path to Source2Viewer-CLI.exe."""
+        self.set('vrf_cli_path', path)
+
+    def get_vrf_recent_runs(self) -> list:
+        """List of recent VRF export runs, most-recent first. May be empty."""
+        runs = self.get('vrf_recent_runs', [])
+        return runs if isinstance(runs, list) else []
+
+    def add_vrf_recent_run(self, run: dict):
+        """LRU-insert a run into recents. Dedupes by (input, output, vpk_path)."""
+        key = (run.get('input', ''), run.get('output', ''), run.get('vpk_path', ''))
+        runs = [
+            r for r in self.get_vrf_recent_runs()
+            if (r.get('input', ''), r.get('output', ''), r.get('vpk_path', '')) != key
+        ]
+        runs.insert(0, run)
+        self.set('vrf_recent_runs', runs[:self.VRF_RECENT_RUNS_LIMIT])
+
+    def clear_vrf_recent_runs(self):
+        self.set('vrf_recent_runs', [])
