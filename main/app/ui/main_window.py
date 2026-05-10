@@ -356,6 +356,6 @@ class MainWindow(QMainWindow):
         QMessageBox.about(
             self,
             "About Source 2 Porting Kit",
-            "Source 2 Porting Kit v2.0\n\n"
+            "Source 2 Porting Kit v2.1.2\n\n"
             "A tool for porting Source 2 content"
         )
