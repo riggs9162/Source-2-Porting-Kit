@@ -366,8 +366,12 @@ class VrfBatchExportTool(BaseTool):
     def _on_export_finished(self, rc: int):
         self.run_btn.setEnabled(True)
         self.run_btn.setText("Export")
+        # Save the run regardless of rc — VRF returns non-zero whenever any
+        # single file fails to decompile (common in multi-file VPK extracts),
+        # but the form state is still useful to recall and retry. The log
+        # tells the user whether it succeeded.
+        self._save_run_to_recent()
         if rc == 0:
-            self._save_run_to_recent()
             self.emit_status("VRF export finished")
         else:
             self.emit_status(f"VRF export failed (rc={rc})")
