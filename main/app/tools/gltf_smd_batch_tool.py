@@ -69,6 +69,17 @@ class AnimMeta:
 # ============================================================================
 
 @dataclass
+class SkinDef:
+    """One row of a Source 1 `$texturegroup`: a named skin variant whose
+    materials replace the default skin's materials column-for-column.
+    Loaded from the `<model>.skins.json` sidecar VRF Batch Export writes
+    when a Source 2 model has multiple `m_materialGroups`.
+    """
+    name: str
+    materials: List[str]
+
+
+@dataclass
 class ModelSet:
     """Source glTF model set with optional physics companion."""
     name: str
@@ -76,6 +87,7 @@ class ModelSet:
     render_path: Path
     physics_path: Optional[Path] = None
     warnings: List[str] = field(default_factory=list)
+    skins: List[SkinDef] = field(default_factory=list)
 
 
 @dataclass
@@ -177,15 +189,47 @@ class ModelSetScanner:
                 if physics_path and not physics_path.exists():
                     warnings.append("Physics file missing")
 
+                skins = ModelSetScanner._load_skin_sidecar(render_path)
+
                 sets.append(ModelSet(
                     name=name,
                     base_dir=base_path,
                     render_path=render_path,
                     physics_path=physics_path,
-                    warnings=warnings
+                    warnings=warnings,
+                    skins=skins,
                 ))
 
         return sets
+
+    @staticmethod
+    def _load_skin_sidecar(render_path: Path) -> List[SkinDef]:
+        """Load `<render_stem>.skins.json` if it exists. The sidecar is
+        written by VRF Batch Export when a Source 2 model has multiple
+        `m_materialGroups`. Silent no-op if missing or malformed — skins
+        are an optional enrichment, not a hard dependency.
+        """
+        sidecar = render_path.with_suffix(".skins.json")
+        if not sidecar.is_file():
+            return []
+        try:
+            payload = json.loads(sidecar.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return []
+        if not isinstance(payload, dict):
+            return []
+        out: List[SkinDef] = []
+        for entry in payload.get("skins", []):
+            if not isinstance(entry, dict):
+                continue
+            name = entry.get("name")
+            mats = entry.get("materials")
+            if not isinstance(name, str) or not isinstance(mats, list):
+                continue
+            mat_list = [m for m in mats if isinstance(m, str)]
+            if mat_list:
+                out.append(SkinDef(name=name, materials=mat_list))
+        return out
 
 
 def _is_source2_viewer_export(gltf_data: dict) -> bool:
@@ -697,6 +741,7 @@ class QcWriter:
         skin: Optional[GltfSkin] = None,
         coord: Optional[CoordinateMode] = None,
         animations: Optional[List[AnimMeta]] = None,
+        material_skins: Optional[List[SkinDef]] = None,
     ):
         """Write QC file with optional skeletal-animation block."""
         lines = []
@@ -707,6 +752,15 @@ class QcWriter:
 
         if surfaceprop:
             lines.append(f'$surfaceprop "{surfaceprop}"')
+
+        if material_skins and len(material_skins) > 1:
+            lines.append('')
+            lines.append('$texturegroup "skinfamilies"')
+            lines.append('{')
+            for s in material_skins:
+                row = ' '.join(f'"{m}"' for m in s.materials)
+                lines.append(f'    {{ {row} }} // {s.name}')
+            lines.append('}')
 
         if is_animated and skin is not None and coord is not None:
             # Skinned model with animations — drop $staticprop, declare bones
@@ -1274,6 +1328,7 @@ class BatchRunner(QThread):
                     skin=skin if is_animated else None,
                     coord=coord if is_animated else None,
                     animations=animations if is_animated else None,
+                    material_skins=model_set.skins or None,
                 )
 
             converted += 1
