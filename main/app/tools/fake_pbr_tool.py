@@ -84,6 +84,15 @@ class PBRInputs:
     selfillum: Optional[str] = None
     selfillum_tint: Optional[Tuple[float, float, float]] = None
     selfillum_brightness: Optional[float] = None
+    # Uniform RGBA tints for roles where the source vmat declared a Texture*
+    # value as a vector literal (e.g. `"TextureColor" "[1.0 1.0 1.0 0.0]"`)
+    # rather than a path. Only used when the corresponding texture path is
+    # absent — actual textures always win. Materialised as a 4×4 flat image
+    # at the same float32 RGBA layout as `load_image` returns.
+    color_constant: Optional[Tuple[float, float, float, float]] = None
+    ao_constant: Optional[Tuple[float, float, float, float]] = None
+    translucency_constant: Optional[Tuple[float, float, float, float]] = None
+    selfillum_constant: Optional[Tuple[float, float, float, float]] = None
 
 
 @dataclass
@@ -160,6 +169,20 @@ class FakePBRProcessor:
         print(message)
         if self.log_callback:
             self.log_callback(message)
+
+    @staticmethod
+    def _uniform_rgba_image(rgba: Tuple[float, float, float, float]) -> np.ndarray:
+        """Build a 4×4 RGBA float32 image filled with `rgba` (values in [0, 1]).
+
+        Same layout as `load_image` returns, so downstream resize / processing
+        treats a synthesised uniform identically to a 1×1 PNG that had been
+        decoded.
+        """
+        clamped = [float(np.clip(c, 0.0, 1.0)) for c in rgba]
+        return np.tile(
+            np.array([[clamped]], dtype=np.float32),
+            (4, 4, 1),
+        )
     
     def process_material(
         self,
@@ -187,6 +210,16 @@ class FakePBRProcessor:
             color_data = load_image(inputs.color)
             if color_data is not None:
                 self.log(f"  ✓ Loaded color map: {os.path.basename(inputs.color)}")
+            elif inputs.color_constant is not None:
+                # VRF emits `"TextureColor" "[r g b a]"` when the source vmdl
+                # used a solid colour input. Materialise the literal as a
+                # uniform image so downstream processing runs unchanged.
+                color_data = self._uniform_rgba_image(inputs.color_constant)
+                rgba = inputs.color_constant
+                self.log(
+                    f"  ✓ Synthesised uniform color from TextureColor literal "
+                    f"[{rgba[0]:.3f} {rgba[1]:.3f} {rgba[2]:.3f} {rgba[3]:.3f}]"
+                )
             self._check_cancel()
             
             normal_data = load_image(inputs.normal)
@@ -206,6 +239,12 @@ class FakePBRProcessor:
             ao_data = load_image(inputs.ao)
             if ao_data is not None:
                 self.log(f"  ✓ Loaded AO map: {os.path.basename(inputs.ao)}")
+            elif inputs.ao_constant is not None:
+                ao_data = self._uniform_rgba_image(inputs.ao_constant)
+                self.log(
+                    f"  ✓ Synthesised uniform AO from TextureAmbientOcclusion literal "
+                    f"= {inputs.ao_constant[0]:.3f}"
+                )
             else:
                 self.log("  ℹ No AO map provided (will use default)")
             self._check_cancel()
@@ -241,11 +280,25 @@ class FakePBRProcessor:
             translucency_data = load_image(inputs.translucency)
             if translucency_data is not None:
                 self.log(f"  ✓ Loaded translucency map: {os.path.basename(inputs.translucency)}")
+            elif inputs.translucency_constant is not None:
+                translucency_data = self._uniform_rgba_image(inputs.translucency_constant)
+                rgba = inputs.translucency_constant
+                self.log(
+                    f"  ✓ Synthesised uniform translucency from TextureTranslucency literal "
+                    f"(alpha = {rgba[3]:.3f})"
+                )
             self._check_cancel()
 
             selfillum_data = load_image(inputs.selfillum)
             if selfillum_data is not None:
                 self.log(f"  ✓ Loaded selfillum mask: {os.path.basename(inputs.selfillum)}")
+            elif inputs.selfillum_constant is not None:
+                selfillum_data = self._uniform_rgba_image(inputs.selfillum_constant)
+                rgba = inputs.selfillum_constant
+                self.log(
+                    f"  ✓ Synthesised uniform selfillum from TextureSelfIllumMask literal "
+                    f"[{rgba[0]:.3f} {rgba[1]:.3f} {rgba[2]:.3f}]"
+                )
             self._check_cancel()
 
             # Validate required inputs
@@ -413,7 +466,7 @@ class FakePBRProcessor:
                 #   emissiveblend — $EmissiveBlend* family, recommended when the
                 #                   material also uses $translucent / $phong /
                 #                   $alphatest, where $selfillum tends to break.
-                if inputs.selfillum is not None:
+                if inputs.selfillum is not None or inputs.selfillum_constant is not None:
                     glow_path = f"{material_path}/{material_name}_selfillum"
                     tint = inputs.selfillum_tint or (1.0, 1.0, 1.0)
                     brightness = inputs.selfillum_brightness if inputs.selfillum_brightness is not None else 1.0
