@@ -23,7 +23,7 @@ class Settings:
         'vrf_recent_runs': [],
     }
 
-    VRF_RECENT_RUNS_LIMIT = 10
+    VRF_RECENT_RUNS_LIMIT = 25
     
     def __init__(self):
         self.settings_file = get_config_dir() / 'settings.json'
