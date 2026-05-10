@@ -5,15 +5,17 @@ Wraps the VRF CLI to export a single .vmdl_c file or a folder of compiled
 Source 2 assets to GLTF/GLB plus a `materials/` tree (VMATs and their texture
 PNGs). Strips the few "stray" decoded image files VRF drops next to the .gltf.
 
-The desired end state per model is:
+The user picks a project/addon root as `-o`; the tool produces a Source 1
+sibling layout inside it:
 
-    output/
-      models/myprop/myprop.gltf            <- model (only this; no .vmdl text)
-      materials/models/myprop/myprop.vmat
-      materials/models/myprop/*.png
+    <project>/
+      modelsrc/models/myprop/myprop.gltf
+      materialsrc/models/myprop/myprop.vmat
+      materialsrc/models/myprop/*.png
 
-Image files sitting in the same folder as a .gltf/.glb are deleted; anything
-under `materials/` is left alone.
+Image files sitting in the same folder as a .gltf/.glb (VRF's stray decoded
+images) are deleted before reorganization; anything under `materials/` is
+left alone.
 
 This module is intentionally Qt-free so it can back both the GUI tool and the
 standalone CLI script.
@@ -21,17 +23,22 @@ standalone CLI script.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Callable, Iterable, List, Optional
+from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 
 IMAGE_SUFFIXES = {".png", ".tga", ".jpg", ".jpeg", ".exr", ".hdr"}
 GLTF_SUFFIXES = {".gltf", ".glb"}
+# Source 2 compiled-texture artifacts. Useless once the .png is decoded —
+# the Source 1 porting pipeline reads the .png and writes .vtf, so anything
+# in this set just clutters materialsrc/.
+COMPILED_TEXTURE_SUFFIXES = {".vtex", ".vtex_c"}
 LogFn = Callable[[str], None]
 
 # Match Source 2 resource paths in VRF's `-b RERL` stdout.
@@ -39,6 +46,15 @@ LogFn = Callable[[str], None]
 # not the compiled "_c" suffix.
 _RERL_PATH_RE = re.compile(
     r"([A-Za-z][\w./\-]*?/[\w./\-]+\.(?:vmat|vtex|vmdl|vmesh|vphys|vsnd|vsndevts))",
+    re.IGNORECASE,
+)
+
+# Capture any quoted path-shaped string in a .vmat that ends in an image or
+# vtex extension — covers both `"TextureColor" "...png"` and the `g_t*` keys
+# under the `"Compiled Textures"` block (whose values are hash-suffix .vtex
+# paths matching the actual on-disk filenames).
+_VMAT_TEXTURE_RE = re.compile(
+    r'"([^"\s][^"]*?\.(?:png|tga|jpg|jpeg|exr|hdr|vtex))"',
     re.IGNORECASE,
 )
 
@@ -136,18 +152,21 @@ def build_vrf_command(
     if gltf_format not in {"gltf", "glb"}:
         raise VrfRunnerError(f"gltf_format must be 'gltf' or 'glb' (got {gltf_format!r})")
 
-    # NOTE: deliberately NOT passing --gltf_export_materials. That flag pulls
-    # textures via VRF's glTF embedding pipeline, which writes:
-    #   - hash-suffix duplicates of every texture (e.g. `foo_color_png_<hash>.png`)
-    #   - glTF-adapted channel splits (e.g. `foo_<hash>_metal.png`)
-    # Our `-e vtex_c` already extracts the canonical PNGs, and the user's
-    # downstream pipeline reads materials from the .vmat files directly.
+    # `--gltf_export_materials` is required to get a `materials` array in the
+    # glTF with proper vmat names — without it VRF emits a mesh with no
+    # material reference at all, and the SMD converter falls back to a literal
+    # "material" name (which then breaks the downstream MDL's $cdmaterials
+    # lookup). The flag's downside is hash-suffix duplicate PNGs and channel-
+    # split textures dropped next to the .gltf — those get cleaned up by
+    # `purge_stray_images_next_to_gltf` post-extraction.
     args: List[str] = [
         str(vrf_exe),
         "-i", str(input_path),
         "-o", str(output_dir),
         "-d",
         "--gltf_export_format", gltf_format,
+        "--gltf_export_animations",
+        "--gltf_export_materials",
         "--threads", str(threads),
         "-e", "vmdl_c,vmat_c,vtex_c",
     ]
@@ -195,6 +214,171 @@ def _parent_dir(path: str) -> str:
     p = path.replace("\\", "/")
     idx = p.rfind("/")
     return p[: idx + 1] if idx >= 0 else ""
+
+
+# Per-file header in `-b DATA` stdout: `[2/3] models/.../foo.vmdl_c`.
+_DATA_FILE_HEADER_RE = re.compile(
+    r'^\[\d+/\d+\]\s+(\S+\.vmdl_c)\s*$',
+    re.MULTILINE,
+)
+# Each `m_materialGroups` entry: `m_name = "..."` followed shortly by
+# `m_materials = [ resource:"...", ... ]`. Greedy-but-bounded.
+_MATERIAL_GROUP_RE = re.compile(
+    r'm_name\s*=\s*"(?P<name>[^"]*)"[^{]*?'
+    r'm_materials\s*=\s*\[(?P<mats>[^\]]*)\]',
+    re.DOTALL,
+)
+_RESOURCE_REF_RE = re.compile(r'resource:"([^"]+)"')
+
+
+def _extract_material_groups_block(text: str) -> List[Tuple[str, List[str]]]:
+    """Find the `m_materialGroups = [...]` array in a single file's data
+    block and return the per-group `(name, [vmat_refs])` tuples.
+
+    Bracket-depth-aware so nested `m_materials = [...]` arrays don't fool
+    us into stopping early.
+    """
+    start = text.find("m_materialGroups")
+    if start < 0:
+        return []
+    bracket_start = text.find("[", start)
+    if bracket_start < 0:
+        return []
+    depth = 1
+    i = bracket_start + 1
+    while i < len(text) and depth > 0:
+        c = text[i]
+        if c == "[":
+            depth += 1
+        elif c == "]":
+            depth -= 1
+            if depth == 0:
+                break
+        i += 1
+    block = text[bracket_start + 1:i]
+    groups: List[Tuple[str, List[str]]] = []
+    for m in _MATERIAL_GROUP_RE.finditer(block):
+        name = m.group("name")
+        mats = _RESOURCE_REF_RE.findall(m.group("mats"))
+        groups.append((name, mats))
+    return groups
+
+
+def _parse_material_groups_per_file(text: str) -> Dict[str, List[Tuple[str, List[str]]]]:
+    """Split `-b DATA` multi-file stdout by `[N/M] <path>` headers and
+    extract material groups from each section. Paths are normalized to
+    forward slashes.
+    """
+    sections: Dict[str, str] = {}
+    cur_path: Optional[str] = None
+    buf: List[str] = []
+    for line in text.splitlines():
+        m = _DATA_FILE_HEADER_RE.match(line)
+        if m:
+            if cur_path is not None:
+                sections[cur_path] = "\n".join(buf)
+            cur_path = m.group(1).replace("\\", "/")
+            buf = []
+        elif cur_path is not None:
+            buf.append(line)
+    if cur_path is not None:
+        sections[cur_path] = "\n".join(buf)
+
+    result: Dict[str, List[Tuple[str, List[str]]]] = {}
+    for path, body in sections.items():
+        groups = _extract_material_groups_block(body)
+        if groups:
+            result[path] = groups
+    return result
+
+
+def dump_material_groups(
+    vrf_exe: Path,
+    input_path: Path,
+    vpk_filepath: str,
+    on_log: LogFn = print,
+) -> Dict[str, List[Tuple[str, List[str]]]]:
+    """Run VRF `-b DATA` on .vmdl_c entries matching the filter and parse
+    out each model's `m_materialGroups`. Returns a `{vmdl_path: groups}`
+    map where `groups` is `[(group_name, [vmat_refs]), ...]`. The first
+    group is always the default — Source 2 convention.
+
+    No-op-safe: returns `{}` on non-zero exit and logs the failure.
+    """
+    args = [
+        str(vrf_exe),
+        "-i", str(input_path),
+        "-f", vpk_filepath,
+        "-e", "vmdl_c",
+        "-b", "DATA",
+    ]
+    on_log("Dumping material groups via `-b DATA`...")
+    try:
+        proc = subprocess.run(
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+    except OSError as e:
+        on_log(f"Material-groups dump failed to launch: {e}")
+        return {}
+    if proc.returncode != 0:
+        on_log(f"Material-groups dump exited with code {proc.returncode}; continuing without skin info")
+        return {}
+    return _parse_material_groups_per_file(proc.stdout or "")
+
+
+def _vmat_stem(ref: str) -> str:
+    """Basename of a vmat reference without directory or `.vmat` extension."""
+    p = ref.replace("\\", "/").strip().rstrip("/")
+    sep = p.rfind("/")
+    if sep >= 0:
+        p = p[sep + 1:]
+    if p.lower().endswith(".vmat"):
+        p = p[:-5]
+    return p
+
+
+def write_skin_sidecars(
+    staging_dir: Path,
+    material_groups: Dict[str, List[Tuple[str, List[str]]]],
+    on_log: LogFn = print,
+) -> int:
+    """For each .vmdl_c with multiple material groups, write a JSON sidecar
+    at `<staging>/<vmdl_path_stem>.skins.json` — next to the .gltf VRF will
+    drop. Models with one or zero groups are skipped (no skins to declare).
+
+    Returns the number of sidecars written.
+    """
+    written = 0
+    for vmdl_path, groups in material_groups.items():
+        if len(groups) <= 1:
+            continue
+        base = vmdl_path
+        for ext in (".vmdl_c", ".vmdl"):
+            if base.lower().endswith(ext):
+                base = base[: -len(ext)]
+                break
+        sidecar = staging_dir / (base + ".skins.json")
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "schema": "skins.v1",
+            "skins": [
+                {
+                    "name": name,
+                    "materials": [_vmat_stem(m) for m in mats],
+                }
+                for name, mats in groups
+            ],
+        }
+        sidecar.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        written += 1
+    on_log(f"Wrote {written} skin sidecar(s)")
+    return written
 
 
 def dump_rerl(
