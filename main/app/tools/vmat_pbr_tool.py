@@ -40,6 +40,16 @@ class VmatTextures:
     metallic: Optional[Path] = None
     emissive: Optional[Path] = None
     translucency: Optional[Path] = None
+    # When the source vmat declared a Texture* value as a vector literal
+    # (e.g. `"TextureColor" "[1.0 1.0 1.0 0.0]"`) instead of a path, the
+    # parsed RGBA components live here as a 4-tuple. The processors
+    # materialise these as flat uniform images at process time when no
+    # actual texture file resolves for that role. Only populated for roles
+    # where a uniform tint is meaningful (color/ao/emissive/translucency).
+    color_constant: Optional[Tuple[float, float, float, float]] = None
+    ao_constant: Optional[Tuple[float, float, float, float]] = None
+    emissive_constant: Optional[Tuple[float, float, float, float]] = None
+    translucency_constant: Optional[Tuple[float, float, float, float]] = None
 
 
 @dataclass
@@ -172,6 +182,27 @@ class VmatParser:
     @staticmethod
     def _tokenize(stem: str) -> List[str]:
         return [token.lower() for token in re.split(r"[\s._-]+", stem) if token]
+
+    @staticmethod
+    def _parse_literal_rgba(raw_val: str) -> Optional[Tuple[float, float, float, float]]:
+        """Parse a bracketed vmat literal like `[1.0 1.0 1.0 0.0]` into RGBA.
+
+        VRF emits Texture* keys with vector literals when the source vmdl used
+        a solid colour input rather than a texture map. Three-component
+        literals are right-padded with alpha=1.0; anything beyond four
+        components is truncated.
+        """
+        inner = raw_val.strip().lstrip("[").rstrip("]")
+        parts = [p for p in inner.replace(",", " ").split() if p]
+        if len(parts) < 3:
+            return None
+        try:
+            floats = [float(p) for p in parts[:4]]
+        except ValueError:
+            return None
+        while len(floats) < 4:
+            floats.append(1.0)
+        return (floats[0], floats[1], floats[2], floats[3])
 
     @classmethod
     def _strip_role_tokens(cls, stem: str) -> str:
@@ -324,6 +355,13 @@ class VmatParser:
             warnings.append(f"Missing: {raw}")
             return None
 
+        # Roles that carry a meaningful uniform tint when the vmat declares a
+        # Texture* value as a vector literal instead of a path. Normal /
+        # roughness / metallic intentionally aren't here — there's no useful
+        # interpretation of an RGBA literal as a flat normal, and roughness /
+        # metallic already have dedicated `g_fl*` scalar fallbacks.
+        roles_with_constant = ("color", "ao", "emissive", "translucency")
+
         for role, keys in self.KEY_MAP.items():
             raw_val = None
             for key in keys:
@@ -343,20 +381,38 @@ class VmatParser:
                     sources[role] = "Same-folder auto-detect"
                     if raw_val and not raw_was_literal:
                         warnings.append(f"Using sibling {sibling.name} for {role}")
+            # When the vmat declared a literal RGBA and no texture (path or
+            # sibling) was found, capture the literal as a uniform tint so the
+            # processor can synthesise a flat image instead of reporting the
+            # role as missing. This is what VRF emits when the source vmdl
+            # used a solid colour input rather than a texture map — e.g.
+            # `"TextureColor" "[1.0 1.0 1.0 0.0]"`.
+            constant: Optional[Tuple[float, float, float, float]] = None
+            if raw_was_literal and resolved is None and role in roles_with_constant:
+                constant = self._parse_literal_rgba(raw_val)
+                if constant is not None:
+                    sources[role] = (
+                        f"VMAT literal "
+                        f"[{constant[0]:.3f} {constant[1]:.3f} {constant[2]:.3f} {constant[3]:.3f}]"
+                    )
             if role == "color":
                 textures.color = resolved
+                textures.color_constant = constant
             elif role == "normal":
                 textures.normal = resolved
             elif role == "ao":
                 textures.ao = resolved
+                textures.ao_constant = constant
             elif role == "roughness":
                 textures.roughness = resolved
             elif role == "metallic":
                 textures.metallic = resolved
             elif role == "emissive":
                 textures.emissive = resolved
+                textures.emissive_constant = constant
             elif role == "translucency":
                 textures.translucency = resolved
+                textures.translucency_constant = constant
             if raw_val:
                 raw_map[role] = raw_val
 
@@ -581,14 +637,17 @@ class VmatBatchRunner(QThread):
 
             row = self.row_indices[idx - 1] if idx - 1 < len(self.row_indices) else -1
             tex = entry.textures
-            # Color is always required (can't invent the diffuse). Normal is
-            # required UNLESS the user opted into blank-map synthesis, in
-            # which case the processor will materialise a flat tangent normal.
-            missing_required = tex.color is None or (
+            # Color is always required (can't invent the diffuse) — but a
+            # vmat-declared RGBA literal counts: the processor materialises it
+            # as a flat uniform image. Normal is required UNLESS the user
+            # opted into blank-map synthesis, in which case the processor
+            # will materialise a flat tangent normal.
+            has_color = tex.color is not None or tex.color_constant is not None
+            missing_required = (not has_color) or (
                 tex.normal is None and not self.synthesize_missing_maps
             )
             if missing_required:
-                if tex.color is None:
+                if not has_color:
                     reason = "missing color"
                 else:
                     reason = "missing normal (enable 'Synthesize missing maps' to bypass)"
@@ -639,8 +698,11 @@ class VmatBatchRunner(QThread):
                     selfillum_path = (
                         str(tex.emissive) if entry.selfillum and tex.emissive else None
                     )
+                    selfillum_constant = (
+                        tex.emissive_constant if entry.selfillum and not tex.emissive else None
+                    )
                     inputs = PBRInputs(
-                        color=str(tex.color),
+                        color=str(tex.color) if tex.color else None,
                         normal=str(tex.normal),
                         ao=str(tex.ao) if tex.ao else None,
                         roughness=str(tex.roughness) if tex.roughness else None,
@@ -651,6 +713,10 @@ class VmatBatchRunner(QThread):
                         selfillum=selfillum_path,
                         selfillum_tint=entry.selfillum_tint,
                         selfillum_brightness=entry.selfillum_brightness,
+                        color_constant=tex.color_constant,
+                        ao_constant=tex.ao_constant,
+                        translucency_constant=tex.translucency_constant,
+                        selfillum_constant=selfillum_constant,
                     )
                     try:
                         success, msg = processor.process_material(inputs, str(output_dir), material_name, mat_path)
@@ -671,7 +737,7 @@ class VmatBatchRunner(QThread):
                     )
                     processor = ExoPBRProcessor(options)
                     inputs = ExoPBRInputs(
-                        color=str(tex.color),
+                        color=str(tex.color) if tex.color else None,
                         normal=str(tex.normal),
                         ao=str(tex.ao) if tex.ao else None,
                         roughness=str(tex.roughness) if tex.roughness else None,
@@ -680,6 +746,10 @@ class VmatBatchRunner(QThread):
                         transparency_mask=str(tex.translucency) if tex.translucency else None,
                         metallic_constant=entry.metallic_constant,
                         roughness_constant=entry.roughness_constant,
+                        color_constant=tex.color_constant,
+                        ao_constant=tex.ao_constant,
+                        selfillum_constant=tex.emissive_constant,
+                        transparency_mask_constant=tex.translucency_constant,
                     )
                     try:
                         success, msg = processor.process_material(inputs, str(output_dir), material_name, mat_path)
@@ -1524,16 +1594,27 @@ class VmatPBRTool(BaseTool):
             def _set_cell(col: int, path: Optional[Path], raw_key: str):
                 raw = entry.raw_paths.get(raw_key)
                 source = entry.sources.get(raw_key)
+                # Vmat literal constants count as "available" — the processor
+                # synthesises a uniform image from them at runtime, so the
+                # cell shouldn't read "No" the way a truly missing role does.
+                constant = getattr(entry.textures, f"{raw_key}_constant", None)
                 if path:
-                    txt = "Yes"
-                    item = QTableWidgetItem(txt)
+                    item = QTableWidgetItem("Yes")
                     tooltip = str(path)
                     if source:
                         tooltip = f"{tooltip}\nSource: {source}"
                     item.setToolTip(tooltip)
+                elif constant is not None:
+                    item = QTableWidgetItem("Const")
+                    tooltip = (
+                        f"VMAT literal: "
+                        f"[{constant[0]:.3f} {constant[1]:.3f} {constant[2]:.3f} {constant[3]:.3f}]"
+                    )
+                    if source:
+                        tooltip = f"{tooltip}\nSource: {source}"
+                    item.setToolTip(tooltip)
                 else:
-                    txt = "No"
-                    item = QTableWidgetItem(txt)
+                    item = QTableWidgetItem("No")
                     if raw:
                         item.setToolTip(f"Missing: {raw}")
                 self.results_table.setItem(row, col, item)
@@ -1716,7 +1797,9 @@ class VmatPBRTool(BaseTool):
 
         Metallic/Roughness count as present when the VMAT carries a uniform
         scalar (g_flMetalness / g_flRoughness) since the processor synthesises
-        a flat map for those at runtime.
+        a flat map for those at runtime. Color/AO/Emissive/Translucency count
+        as present when the vmat declared a Texture* vector literal — the
+        processor materialises those into uniform images the same way.
         """
         tex = entry.textures
         path = getattr(tex, role, None)
@@ -1725,6 +1808,9 @@ class VmatPBRTool(BaseTool):
         if role == "metallic" and entry.metallic_constant is not None:
             return True
         if role == "roughness" and entry.roughness_constant is not None:
+            return True
+        constant = getattr(tex, f"{role}_constant", None)
+        if constant is not None:
             return True
         return False
 
