@@ -145,9 +145,12 @@ class VrfBatchExportTool(BaseTool):
         self._update_vpk_field_state(self.input_edit.text())
 
         # --- Output ------------------------------------------------------
-        output_group = QGroupBox("Output")
+        output_group = QGroupBox("Output (project root)")
         output_form = QFormLayout(output_group)
         self.output_edit = QLineEdit()
+        self.output_edit.setPlaceholderText(
+            "Project/addon folder; modelsrc/ and materialsrc/ will be created here"
+        )
         output_btn = QPushButton("Browse…")
         output_btn.clicked.connect(self._browse_output)
         output_row = QHBoxLayout()
