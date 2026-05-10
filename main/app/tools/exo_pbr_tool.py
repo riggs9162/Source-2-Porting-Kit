@@ -53,6 +53,14 @@ class ExoPBRInputs:
     # synthesises a flat single-value array.
     metallic_constant: Optional[float] = None
     roughness_constant: Optional[float] = None
+    # Uniform RGBA tints for roles where the source vmat declared a Texture*
+    # value as a vector literal (e.g. `"TextureColor" "[1.0 1.0 1.0 0.0]"`).
+    # Only applied when no texture path resolves for the role; actual
+    # textures always win.
+    color_constant: Optional[Tuple[float, float, float, float]] = None
+    ao_constant: Optional[Tuple[float, float, float, float]] = None
+    selfillum_constant: Optional[Tuple[float, float, float, float]] = None
+    transparency_mask_constant: Optional[Tuple[float, float, float, float]] = None
 
 
 @dataclass
@@ -90,7 +98,21 @@ class ExoPBRProcessor:
         print(message)
         if self.log_callback:
             self.log_callback(message)
-    
+
+    @staticmethod
+    def _uniform_rgba_image(rgba: Tuple[float, float, float, float]) -> np.ndarray:
+        """Build a 4×4 RGBA float32 image filled with `rgba` (values in [0, 1]).
+
+        Same layout as `load_image` returns — used to materialise vmat
+        Texture* vector literals into uniform images when no texture file
+        was authored for the role.
+        """
+        clamped = [float(np.clip(c, 0.0, 1.0)) for c in rgba]
+        return np.tile(
+            np.array([[clamped]], dtype=np.float32),
+            (4, 4, 1),
+        )
+
     def _channel_or_default(self, data: Optional[np.ndarray], default: float, h: int, w: int) -> np.ndarray:
         """Extract single channel or return default-filled array"""
         if data is None:
@@ -127,6 +149,13 @@ class ExoPBRProcessor:
             color_data = load_image(inputs.color)
             if color_data is not None:
                 self.log(f"  ✓ Loaded color map: {os.path.basename(inputs.color)}")
+            elif inputs.color_constant is not None:
+                color_data = self._uniform_rgba_image(inputs.color_constant)
+                rgba = inputs.color_constant
+                self.log(
+                    f"  ✓ Synthesised uniform color from TextureColor literal "
+                    f"[{rgba[0]:.3f} {rgba[1]:.3f} {rgba[2]:.3f} {rgba[3]:.3f}]"
+                )
             self._check_cancel()
             
             normal_data = load_image(inputs.normal)
@@ -137,6 +166,12 @@ class ExoPBRProcessor:
             ao_data = load_image(inputs.ao)
             if ao_data is not None:
                 self.log(f"  ✓ Loaded AO map: {os.path.basename(inputs.ao)}")
+            elif inputs.ao_constant is not None:
+                ao_data = self._uniform_rgba_image(inputs.ao_constant)
+                self.log(
+                    f"  ✓ Synthesised uniform AO from literal "
+                    f"= {inputs.ao_constant[0]:.3f}"
+                )
             else:
                 self.log("  ℹ No AO map provided (will use default: 1.0)")
             self._check_cancel()
@@ -166,6 +201,13 @@ class ExoPBRProcessor:
             selfillum_data = load_image(inputs.selfillum)
             if selfillum_data is not None:
                 self.log(f"  ✓ Loaded self-illum map: {os.path.basename(inputs.selfillum)}")
+            elif inputs.selfillum_constant is not None:
+                selfillum_data = self._uniform_rgba_image(inputs.selfillum_constant)
+                rgba = inputs.selfillum_constant
+                self.log(
+                    f"  ✓ Synthesised uniform self-illum from literal "
+                    f"[{rgba[0]:.3f} {rgba[1]:.3f} {rgba[2]:.3f}]"
+                )
             else:
                 self.log("  ℹ No self-illum map provided (base alpha unchanged)")
             self._check_cancel()
@@ -180,6 +222,13 @@ class ExoPBRProcessor:
             transparency_mask_data = load_image(inputs.transparency_mask)
             if transparency_mask_data is not None:
                 self.log(f"  ✓ Loaded transparency mask: {os.path.basename(inputs.transparency_mask)}")
+            elif inputs.transparency_mask_constant is not None:
+                transparency_mask_data = self._uniform_rgba_image(inputs.transparency_mask_constant)
+                rgba = inputs.transparency_mask_constant
+                self.log(
+                    f"  ✓ Synthesised uniform transparency mask from literal "
+                    f"(alpha = {rgba[3]:.3f})"
+                )
             else:
                 self.log("  ℹ No transparency mask provided (will use color alpha)")
             self._check_cancel()
