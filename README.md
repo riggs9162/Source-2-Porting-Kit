@@ -9,6 +9,7 @@ Port models, materials, sounds, and more from games like Half-Life: Alyx back to
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow.svg)](https://www.python.org/)
 [![Platform: Windows](https://img.shields.io/badge/Platform-Windows-lightgrey.svg)](#)
+[![Discord](https://img.shields.io/badge/Discord-Riggs'_Bike_Club-5865F2?logo=discord&logoColor=white)](https://discord.gg/H9wxnBHQpN)
 
 </div>
 
@@ -22,14 +23,19 @@ Port models, materials, sounds, and more from games like Half-Life: Alyx back to
 
 ### Models
 - **Bone Backport** — Backport bone data for Source 1 compatibility
-- **GLTF Batch SMD** — Batch convert GLTF models to SMD format
+- **GLTF Batch SMD** — Batch-convert GLTF models to SMD, with QC scaffolding and `$texturegroup` skin support
+- **VRF Batch Export** — Batch-extract `.vmdl_c` / `.vmat_c` / `.vtex_c` from VPKs via Source2Viewer-CLI, staged into a Source 1 sibling layout (`modelsrc/`, `materialsrc/`)
 
 ### Materials
 - **Alpha Mask** — Apply alpha mask operations to textures
 - **Hotspot Editor** — Edit `.rect` hotspot files for textures
-- **PBR Tool** — Convert PBR materials for Source 1
-- **Texture PBR Batch** — Batch process PBR textures
-- **VMAT PBR** — Convert VMAT PBR materials to VMT
+- **VTF Clamp** — Clamp / resize VTF textures to Source 1-friendly dimensions
+
+### Materials / PBR
+- **Fake PBR Reverse** — Reverse Source 1 "fake PBR" composites back into separate maps
+- **Manual PBR Converter** — Hands-on PBR-to-Source 1 conversion for individual materials
+- **Texture Folder PBR Batch** — Recursively batch-process PBR textures across a folder tree
+- **VMAT PBR Batch Converter** — Convert Source 2 `.vmat` PBR materials to Source 1 `.vmt`
 
 </td>
 <td width="50%" valign="top">
