@@ -505,44 +505,267 @@ def _move_tree_into(src_dir: Path, target_dir: Path, on_log: LogFn) -> int:
     return moved
 
 
-def reorganize_materials_to_sibling(
+def hoist_inner_materials_to_top(staging_dir: Path, on_log: LogFn = print) -> int:
+    """Move every `<staging>/models/<rest>/materials/<...>` tree up to
+    `<staging>/materials/models/<rest>/<...>`.
+
+    Some Source 2 games (Half-Life Alyx) ship materials inside each model's
+    own folder rather than the parallel `materials/<model_path>/` tree. VRF
+    extracts them where they live in the VPK, so they land under `models/`
+    in our staging dir. Without this hoist they'd either:
+      - end up under `modelsrc/.../materials/` (wrong tree), or
+      - get rmtree'd by `purge_inner_materials_dirs` (data loss).
+
+    Run this before reorganize so the existing materials-tree move picks them
+    up. Returns the number of files actually relocated.
+    """
+    models_root = staging_dir / "models"
+    if not models_root.is_dir():
+        return 0
+    materials_top = staging_dir / "materials"
+    targets = [p for p in models_root.rglob("materials") if p.is_dir()]
+    moved_total = 0
+    for src in targets:
+        # rel_parent is the model's path relative to staging, e.g.
+        # "models/props_combine/combine_lockers". The dest mirrors that under
+        # materials/, giving "<staging>/materials/models/props_combine/...".
+        rel_parent = src.parent.relative_to(staging_dir)
+        dest = materials_top / rel_parent
+        moved_total += _move_tree_into(src, dest, on_log)
+    if moved_total:
+        on_log(f"Hoisted {moved_total} file(s) from inner models/.../materials/ to top-level materials/")
+    return moved_total
+
+
+def reorganize_to_project_layout(
+    staging_dir: Path,
     output_dir: Path,
     on_log: LogFn = print,
-) -> Optional[Path]:
-    """Move `<output>/materials/<rest>` -> `<output>.parent/materialsrc/<rest>`.
+) -> None:
+    """Lay VRF's staged output out as a Source 1 addon project root:
 
-    Source 1 convention: model sources live under `modelsrc/`, materials live
-    under a sibling `materialsrc/`. VRF writes everything under `-o`, so we
-    relocate the materials tree post-extraction. The inner `materials/` level
-    is dropped — it's redundant under a folder already named `materialsrc/`.
+        <staging>/models/<rest>     -> <output>/modelsrc/<rest>
+        <staging>/materials/<rest>  -> <output>/materialsrc/<rest>
 
-    Merges into an existing `materialsrc/` if one is already there. No-op when
-    `<output>/materials/` doesn't exist.
+    Source and target are separate so we don't sweep up the user's existing
+    `<output>/models/` or `<output>/materials/` (compiled MDL/VTF/VMT trees
+    that live alongside their source counterparts in a Source 1 addon).
+
+    The inner `models/` and `materials/` levels are dropped — redundant under
+    folders already named `modelsrc/` and `materialsrc/`. Merges into existing
+    target folders if they're already there.
     """
-    src = output_dir / "materials"
-    if not src.is_dir():
+    models_src = staging_dir / "models"
+    if models_src.is_dir():
+        target = output_dir / "modelsrc"
+        moved = _move_tree_into(models_src, target, on_log)
+        on_log(f"Reorganized {moved} model file(s) -> {target}")
+    else:
+        on_log("No models/ directory to reorganize")
+
+    materials_src = staging_dir / "materials"
+    if materials_src.is_dir():
+        target = output_dir / "materialsrc"
+        moved = _move_tree_into(materials_src, target, on_log)
+        on_log(f"Reorganized {moved} material file(s) -> {target}")
+    else:
         on_log("No materials/ directory to reorganize")
-        return None
-
-    target = output_dir.parent / "materialsrc"
-    moved = _move_tree_into(src, target, on_log)
-    on_log(f"Reorganized {moved} material file(s) -> {target}")
-    return target
 
 
-def flatten_models_root(output_dir: Path, on_log: LogFn = print) -> bool:
-    """Move `<output>/models/<rest>` -> `<output>/<rest>`.
+def purge_inner_materials_dirs(modelsrc_dir: Path, on_log: LogFn = print) -> int:
+    """Recursively rmtree any folder literally named `materials` under
+    `modelsrc_dir`. VRF sometimes writes a per-model `materials/` next to
+    each .gltf — those are duplicates of the canonical materials tree we've
+    already moved to `materialsrc/`, so they're pure noise.
 
-    Drops the redundant `models/` level when the output is already named like
-    `modelsrc/`. No-op when `<output>/models/` doesn't exist.
+    Returns the number of directories removed.
     """
-    src = output_dir / "models"
-    if not src.is_dir():
-        on_log("No models/ directory to flatten")
-        return False
-    moved = _move_tree_into(src, output_dir, on_log)
-    on_log(f"Flattened {moved} model file(s) into {output_dir}")
-    return True
+    if not modelsrc_dir.is_dir():
+        return 0
+    targets = [p for p in modelsrc_dir.rglob("materials") if p.is_dir()]
+    removed = 0
+    for d in targets:
+        try:
+            shutil.rmtree(d)
+            removed += 1
+        except OSError as e:
+            on_log(f"Could not remove {d}: {e}")
+    on_log(f"Removed {removed} stray materials/ folder(s) inside {modelsrc_dir.name}/")
+    return removed
+
+
+def _normalize_vmat_ref(ref: str) -> Optional[Tuple[str, str]]:
+    """Convert a vmat texture reference to a `(dir, stem)` tuple lowercase,
+    matching the layout of files in `materialsrc/`.
+
+    Strips every `materials/` segment from the path: the leading one for
+    parallel-tree references like `materials/models/x/foo.vtex`, and any
+    mid-path one for Alyx-style inline references like
+    `models/x/y/materials/foo.png` (the hoist drops that segment when moving
+    files into `materialsrc/`). The extension is dropped so a `.vtex`
+    reference matches the `.png` VRF actually decoded.
+
+    Returns None for unusable inputs.
+    """
+    p = ref.replace("\\", "/").strip().strip('"').lower().lstrip("/")
+    # Repeatedly strip `materials/` wherever it appears as a path segment.
+    while True:
+        if p.startswith("materials/"):
+            p = p[len("materials/"):]
+        elif "/materials/" in p:
+            p = p.replace("/materials/", "/", 1)
+        else:
+            break
+    dot = p.rfind(".")
+    if dot > 0:
+        p = p[:dot]
+    if not p:
+        return None
+    sep = p.rfind("/")
+    if sep < 0:
+        return ("", p)
+    return (p[:sep], p[sep + 1:])
+
+
+def _collect_vmat_references(materialsrc: Path) -> Set[Tuple[str, str]]:
+    """Walk every .vmat under `materialsrc`, regex out the `Texture*` paths,
+    return the set of (dir, stem) keys (relative to materialsrc, lowercased).
+    """
+    refs: Set[Tuple[str, str]] = set()
+    for vmat in materialsrc.rglob("*.vmat"):
+        if not vmat.is_file():
+            continue
+        try:
+            text = vmat.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for raw in _VMAT_TEXTURE_RE.findall(text):
+            key = _normalize_vmat_ref(raw)
+            if key is not None:
+                refs.add(key)
+    return refs
+
+
+def purge_unreferenced_textures(materialsrc_dir: Path, on_log: LogFn = print) -> int:
+    """Delete image files under `materialsrc_dir` that aren't referenced by
+    any .vmat in the same tree.
+
+    Match key is `(relative_dir, stem)` lowercase — extension-agnostic, so
+    a vmat reference to `foo.vtex` matches a `foo.png` on disk (VRF decodes
+    the texture format on extraction). .vmat files themselves are never
+    deleted — only image files (`IMAGE_SUFFIXES`).
+
+    Returns the number of files deleted. No-op when the dir has no .vmat
+    files (treats empty reference set as "unknown, don't delete anything").
+    """
+    if not materialsrc_dir.is_dir():
+        return 0
+    refs = _collect_vmat_references(materialsrc_dir)
+    if not refs:
+        on_log("No .vmat references found; skipping unreferenced-texture purge")
+        return 0
+    deleted = 0
+    for img in materialsrc_dir.rglob("*"):
+        if not img.is_file():
+            continue
+        if img.suffix.lower() not in IMAGE_SUFFIXES:
+            continue
+        rel = img.relative_to(materialsrc_dir).as_posix().lower()
+        dot = rel.rfind(".")
+        stem_path = rel[:dot] if dot > 0 else rel
+        sep = stem_path.rfind("/")
+        key = (stem_path[:sep], stem_path[sep + 1:]) if sep >= 0 else ("", stem_path)
+        if key in refs:
+            continue
+        try:
+            img.unlink()
+            deleted += 1
+        except OSError as e:
+            on_log(f"Could not delete {img}: {e}")
+    on_log(f"Removed {deleted} unreferenced texture file(s) from {materialsrc_dir.name}/")
+    return deleted
+
+
+_COMPILED_TEXTURES_BLOCK_RE = re.compile(
+    r'"Compiled Textures"\s*\{([^{}]*)\}',
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def purge_compiled_texture_images(materialsrc_dir: Path, on_log: LogFn = print) -> int:
+    """Delete the image files referenced by each .vmat's `"Compiled Textures"`
+    block. Those entries point at hash-suffix `.vtex` paths (the compiled
+    form), which VRF decodes to hash-suffix `.png` files alongside the clean-
+    name versions referenced by `Texture*` keys. Both PNGs decode from the
+    same vtex_c, so the hash-suffix copies are duplicates of the canonical
+    textures the Source 1 pipeline actually consumes.
+
+    Returns the number of files deleted.
+    """
+    if not materialsrc_dir.is_dir():
+        return 0
+    targets: Set[Tuple[str, str]] = set()
+    for vmat in materialsrc_dir.rglob("*.vmat"):
+        if not vmat.is_file():
+            continue
+        try:
+            text = vmat.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for block in _COMPILED_TEXTURES_BLOCK_RE.findall(text):
+            for raw in _VMAT_TEXTURE_RE.findall(block):
+                key = _normalize_vmat_ref(raw)
+                if key is not None:
+                    targets.add(key)
+    if not targets:
+        on_log("No 'Compiled Textures' references found")
+        return 0
+    deleted = 0
+    for img in materialsrc_dir.rglob("*"):
+        if not img.is_file():
+            continue
+        if img.suffix.lower() not in IMAGE_SUFFIXES:
+            continue
+        rel = img.relative_to(materialsrc_dir).as_posix().lower()
+        dot = rel.rfind(".")
+        stem_path = rel[:dot] if dot > 0 else rel
+        sep = stem_path.rfind("/")
+        key = (stem_path[:sep], stem_path[sep + 1:]) if sep >= 0 else ("", stem_path)
+        if key not in targets:
+            continue
+        try:
+            img.unlink()
+            deleted += 1
+        except OSError as e:
+            on_log(f"Could not delete {img}: {e}")
+    on_log(f"Deleted {deleted} image file(s) referenced in 'Compiled Textures' blocks")
+    return deleted
+
+
+def purge_compiled_textures(materialsrc_dir: Path, on_log: LogFn = print) -> int:
+    """Delete `.vtex` / `.vtex_c` files anywhere under `materialsrc_dir`.
+
+    These are the compiled-texture descriptors vmats reference (e.g.
+    `"TextureColor" "materials/.../foo.vtex"`). The Source 1 porting pipeline
+    consumes the decoded `.png` instead, so these are dead weight.
+
+    Returns the number of files deleted.
+    """
+    if not materialsrc_dir.is_dir():
+        return 0
+    deleted = 0
+    for f in materialsrc_dir.rglob("*"):
+        if not f.is_file():
+            continue
+        if f.suffix.lower() not in COMPILED_TEXTURE_SUFFIXES:
+            continue
+        try:
+            f.unlink()
+            deleted += 1
+        except OSError as e:
+            on_log(f"Could not delete {f}: {e}")
+    on_log(f"Removed {deleted} compiled-texture file(s) from {materialsrc_dir.name}/")
+    return deleted
 
 
 def run_vrf_export(
@@ -572,28 +795,58 @@ def run_vrf_export(
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # VRF gets its own staging folder under the project root so it never
+    # touches the user's existing `<output>/models/` or `<output>/materials/`
+    # (compiled MDL/VTF/VMT trees in a Source 1 addon). Same filesystem as the
+    # final destination, so the post-extraction moves are O(1) renames.
+    staging_dir = output_dir / ".vrf_staging"
+    if staging_dir.exists():
+        shutil.rmtree(staging_dir, ignore_errors=True)
+    staging_dir.mkdir(parents=True, exist_ok=True)
+
     extra_filters: List[str] = []
     if is_vpk(input_path) and vpk_filepath:
         on_log("Resolving model references via `-b RERL`...")
-        refs = dump_rerl(
+        first_refs = dump_rerl(
             vrf_exe=vrf_exe,
             input_path=input_path,
             vpk_filepath=expand_vpk_filter(vpk_filepath),
             entity_filter="vmdl_c",
             on_log=on_log,
         )
-        if refs:
-            on_log(f"Found {len(refs)} referenced resource(s):")
-            for r in refs:
+        # Recurse one level: RERL each discovered .vmat to find its .vtex
+        # textures by exact path. Without this, we'd have to fall back to
+        # parent-dir filters and accidentally pull every unrelated texture
+        # sharing the .vmat's folder.
+        vmat_refs = [r for r in first_refs if r.lower().endswith(".vmat")]
+        second_refs: List[str] = []
+        if vmat_refs:
+            on_log(f"Resolving texture references from {len(vmat_refs)} material(s)...")
+            second_refs = dump_rerl(
+                vrf_exe=vrf_exe,
+                input_path=input_path,
+                vpk_filepath=",".join(vmat_refs),
+                entity_filter="vmat_c",
+                on_log=on_log,
+            )
+        seen: set = set()
+        all_refs: List[str] = []
+        for r in first_refs + second_refs:
+            if r not in seen:
+                seen.add(r)
+                all_refs.append(r)
+        if all_refs:
+            on_log(f"Found {len(all_refs)} referenced resource(s):")
+            for r in all_refs:
                 on_log(f"  - {r}")
-            extra_filters = sorted({_parent_dir(r) for r in refs if _parent_dir(r)})
+            extra_filters = all_refs
         else:
             on_log("No references resolved; falling back to parallel-path filter only.")
 
     args = build_vrf_command(
         vrf_exe=vrf_exe,
         input_path=input_path,
-        output_dir=output_dir,
+        output_dir=staging_dir,
         gltf_format=gltf_format,
         recursive=recursive,
         threads=threads,
@@ -606,10 +859,33 @@ def run_vrf_export(
         return rc
 
     if not keep_stray_images:
-        purge_stray_images_next_to_gltf(output_dir, on_log)
+        purge_stray_images_next_to_gltf(staging_dir, on_log)
     else:
         on_log("Skipping stray-image cleanup (keep_stray_images=True)")
 
-    reorganize_materials_to_sibling(output_dir, on_log)
-    flatten_models_root(output_dir, on_log)
+    # Source 2 material groups → Source 1 $texturegroup. Dump them now (while
+    # still operating against the VPK) and write JSON sidecars next to each
+    # .gltf in staging so reorganize carries them into modelsrc/ for the SMD
+    # batch tool to consume.
+    if is_vpk(input_path) and vpk_filepath:
+        mg = dump_material_groups(
+            vrf_exe=vrf_exe,
+            input_path=input_path,
+            vpk_filepath=expand_vpk_filter(vpk_filepath),
+            on_log=on_log,
+        )
+        if mg:
+            write_skin_sidecars(staging_dir, mg, on_log)
+
+    # Half-Life Alyx-style materials live inside each model's folder; route
+    # them into the top-level materials/ before reorganize so they end up in
+    # materialsrc/ instead of being purged with the stray inner materials/.
+    hoist_inner_materials_to_top(staging_dir, on_log)
+    reorganize_to_project_layout(staging_dir, output_dir, on_log)
+    shutil.rmtree(staging_dir, ignore_errors=True)
+
+    purge_inner_materials_dirs(output_dir / "modelsrc", on_log)
+    purge_unreferenced_textures(output_dir / "materialsrc", on_log)
+    purge_compiled_texture_images(output_dir / "materialsrc", on_log)
+    purge_compiled_textures(output_dir / "materialsrc", on_log)
     return rc
