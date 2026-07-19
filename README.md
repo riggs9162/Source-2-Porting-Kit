@@ -9,7 +9,7 @@ Port models, materials, sounds, and more from games like Half-Life: Alyx back to
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow.svg)](https://www.python.org/)
 [![Platform: Windows](https://img.shields.io/badge/Platform-Windows-lightgrey.svg)](#)
-[![Discord](https://img.shields.io/badge/Discord-Riggs'_Bike_Club-5865F2?logo=discord&logoColor=white)](https://discord.gg/H9wxnBHQpN)
+[![Discord](https://img.shields.io/badge/Discord-Riggs'_Bike_Club-5865F2?logo=discord&logoColor=white)](https://discord.gg/MpWHkcqzyB)
 
 </div>
 
