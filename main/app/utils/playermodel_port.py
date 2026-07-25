@@ -37,8 +37,12 @@ from .glb_skin_io import (LogFn, _acc, _mat_to_euler_xyz, _q2m,  # noqa: F401
 # (grunt worst edge 4.75u -> 3.86u) while weights only travel this many edges,
 # so a low count keeps finger and elbow definition crisp.
 _WEIGHT_RELAX_PASSES = 3
+from ..core.bone_maps import valvebiped_name
+from ..tools.ragdoll_physics import (conformed_s2_constraint_rows,
+                                     hulls_from_point_clouds, load_phys_dump,
+                                     phys_part_point_clouds)
 from .mdl_bones import read_mdl_bones
-from .ragdoll_port import build_ragdoll_collision
+from .ragdoll_port import build_ragdoll_collision, discover_sidecars
 from .studiomdl_run import compile_qc
 
 
@@ -179,6 +183,38 @@ def port_playermodel(
     if valvebiped_only:
         skin = _prune_to_mapped(skin, donor_names, all_arrays, log)
 
+    # Real Source 2 collision, if the model ships a PHYS sidecar. The authored
+    # Rubikon shapes live in the ORIGINAL bind space, so they cannot simply be
+    # dropped in — they ride through conform_to_donor as extra vertex arrays
+    # (one bone each, weight 1) and come out in donor bind space with the mesh.
+    phys_clouds: List[Tuple[int, np.ndarray]] = []
+    phys_arrays: List[dict] = []
+    phys_obj = None
+    if ragdoll_collision:
+        _physics_glb, phys_dump = discover_sidecars(glb_path)
+        if phys_dump is not None:
+            try:
+                phys_obj = load_phys_dump(phys_dump,
+                                          on_log=lambda m: log(m, "INFO"))
+                present = {j.name for j in skin.joints}
+
+                def _rename(n: str) -> str:
+                    return n if n in present else valvebiped_name(n)
+
+                phys_clouds = phys_part_point_clouds(phys_obj, skin, _rename)
+                for ji, pts in phys_clouds:
+                    vj = np.zeros((len(pts), 4), dtype=np.int64)
+                    vw = np.zeros((len(pts), 4))
+                    vj[:, 0] = ji
+                    vw[:, 0] = 1.0
+                    phys_arrays.append(dict(vertices=pts.copy(), vj=vj, vw=vw))
+                log(f"PHYS sidecar: {len(phys_clouds)} collision part(s) "
+                    f"from {phys_dump.name}", "INFO")
+            except Exception as exc:  # noqa: BLE001 - fall back to weight hulls
+                log(f"PHYS sidecar unusable ({exc}); using weight-derived "
+                    "collision hulls", "WARNING")
+                phys_clouds, phys_arrays, phys_obj = [], [], None
+
     total_bones = len(skin.joints) + 2      # + Anim_Attachment helpers
     if total_bones > 128:
         log(f"{total_bones} compiled bones (>128): expect trouble in GMod's "
@@ -187,7 +223,22 @@ def port_playermodel(
 
     res = conform_to_donor(skin, None, None, None, donor_mdl,
                            on_log=lambda m: log(m, "INFO"),
-                           extra_meshes=all_arrays)
+                           extra_meshes=all_arrays + phys_arrays)
+    # phys_arrays were transformed in place alongside the render mesh, so the
+    # collision points are now in the same donor bind space as the verts.
+    phys_hulls = hulls_from_point_clouds(
+        [(ji, np.asarray(a["vertices"]))
+         for (ji, _p), a in zip(phys_clouds, phys_arrays)],
+        on_log=lambda m: log(m, "INFO")) if phys_arrays else []
+    # This model's OWN joint limits, re-expressed in the conformed bone frames,
+    # in preference to Valve's generic humanoid table.
+    phys_rows: Optional[List[str]] = None
+    if phys_hulls and phys_obj is not None:
+        present = {j.name for j in skin.joints}
+        phys_rows = conformed_s2_constraint_rows(
+            phys_obj, skin,
+            lambda n: n if n in present else valvebiped_name(n),
+            res.anat_rotations, on_log=lambda m: log(m, "INFO"))
 
     # SMDs -------------------------------------------------------------------
     name_base = glb_path.stem
@@ -291,11 +342,15 @@ def port_playermodel(
         # geometry (original S2 bind space) would attach hulls at wrong
         # offsets, while build_ragdoll's ValveBiped preset constraints are
         # exactly the valid set for the conformed rig.
+        # The rig is conformed to the donor, so its bones carry true ValveBiped
+        # orientations and Valve's anatomical constraints apply — elbows and
+        # knees become hinges rather than free in all three axes.
         coll_lines, _hbox, cerr = build_ragdoll_collision(
             skin=skin, all_arrays=all_arrays, out_dir=out_dir,
             name_base=name_base, phys_data=None, physics_glb=None,
-            total_mass=total_mass, phys_smd_name="pm_physics.smd",
-            on_log=log)
+            prebuilt_hulls=phys_hulls or None, constraint_rows=phys_rows,
+            total_mass=total_mass, constraint_source="valvebiped_donor",
+            phys_smd_name="pm_physics.smd", on_log=log)
         if coll_lines:
             L.extend(coll_lines)
             collision = True
