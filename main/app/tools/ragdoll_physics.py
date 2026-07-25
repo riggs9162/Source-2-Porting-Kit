@@ -592,6 +592,134 @@ def _mat33_to_quat(m: np.ndarray) -> np.ndarray:
                      0.25 * s, (m[1, 0] - m[0, 1]) / s], dtype=np.float32)
 
 
+def conformed_s2_constraint_rows(
+    phys: "PhysData",
+    skin: "GltfSkin",
+    rename: Callable[[str], str],
+    anat_rotations: Dict[int, np.ndarray],
+    *,
+    widen: float = 1.35,
+    on_log: LogFn = print,
+) -> List[str]:
+    """``$jointconstrain`` rows from the REAL Source 2 joint limits, re-expressed
+    in a CONFORMED skeleton's bone frames.
+
+    ``joint_constraint_rows_v2`` emits rows about the child bone's LOCAL axes,
+    read from the joint's bone-local ``frame2_quat``. After a conform the bones
+    carry donor orientations, so those rows would constrain the wrong axes.
+
+    Carrying the axis across is NOT a matter of preserving its coordinates: the
+    Source 2 and Source 1 model spaces differ by a global yaw (the S2 rig is
+    lateral-Y, ValveBiped lateral-X) on top of each bone's own axis convention,
+    so an unchanged vector silently turns a knee hinge into a sideways one.
+    ``anat_rotations[i]`` is the per-bone rotation the re-skin applied, mapping
+    a direction in the source model space to the conformed one — the same
+    transform the flesh went through. With the bone's source world rotation
+    ``Ro`` and conformed ``Rn``, a joint frame ``F`` becomes
+    ``Rn^T @ A @ Ro @ F``.
+    """
+    import dataclasses
+
+    by_name = {j.name: i for i, j in enumerate(skin.joints)}
+    world: Dict[int, np.ndarray] = {}
+
+    def fk(i: int) -> np.ndarray:
+        if i in world:
+            return world[i]
+        j = skin.joints[i]
+        m = np.eye(4)
+        m[:3, :3] = _quat_to_mat33(j.rest_rotation)
+        m[:3, 3] = np.asarray(j.rest_translation, dtype=np.float64)
+        p = j.parent_joint_idx
+        world[i] = m if p is None else fk(p) @ m
+        return world[i]
+
+    rows: List[str] = []
+    converted = 0
+    for jt in phys.joints:
+        parent, child = phys.parts[jt.body1], phys.parts[jt.body2]
+        pn, cn = rename(parent.bone), rename(child.bone)
+        pi, ci = by_name.get(pn), by_name.get(cn)
+        if pi is None or ci is None:
+            continue
+        Rn_p = fk(pi)[:3, :3]
+        Rn_c = fk(ci)[:3, :3]
+        Ro_p = np.asarray(parent.bind_pose, dtype=np.float64)[:3, :3]
+        Ro_c = np.asarray(child.bind_pose, dtype=np.float64)[:3, :3]
+        A_p = anat_rotations.get(pi)
+        A_c = anat_rotations.get(ci)
+        if A_p is None or A_c is None:
+            continue
+        reframed = dataclasses.replace(
+            jt,
+            frame1_quat=_mat33_to_quat(
+                Rn_p.T @ A_p @ Ro_p
+                @ _quat_to_mat33(jt.frame1_quat)).astype(float),
+            frame2_quat=_mat33_to_quat(
+                Rn_c.T @ A_c @ Ro_c
+                @ _quat_to_mat33(jt.frame2_quat)).astype(float),
+        )
+        for axis, lo, hi in joint_constraint_rows_v2(
+                reframed, Rn_p, Rn_c, widen=widen):
+            rows.append(f'    $jointconstrain "{cn}" {axis} limit '
+                        f'{lo:.2f} {hi:.2f} 1.00')
+        converted += 1
+    on_log(f"  constraints: {converted} joint(s) converted from real Source 2 "
+           "limits, re-expressed in the conformed bone frames")
+    return rows
+
+
+def phys_part_point_clouds(
+    phys: "PhysData",
+    skin: "GltfSkin",
+    rename: Callable[[str], str],
+) -> List[Tuple[int, np.ndarray]]:
+    """Per-part model-space PHYS points, before they are hulled.
+
+    Same transform ``build_hulls_from_phys_parts`` applies (bone-local shape
+    points through the part's bind pose), but stopping short of the convex
+    hull so the caller can put the points through a re-skin first. The
+    playermodel path needs this: its mesh is conformed into the donor's bind,
+    so authored Rubikon shapes left in Source 2 bind space would attach at the
+    wrong offsets.
+    """
+    by_name = {j.name: i for i, j in enumerate(skin.joints)}
+    out: List[Tuple[int, np.ndarray]] = []
+    for part in phys.parts:
+        ji = by_name.get(rename(part.bone))
+        if ji is None:
+            continue
+        pts = np.vstack([shape_points(s) for s in part.shapes])
+        h = np.hstack([pts, np.ones((len(pts), 1))])
+        out.append((ji, (part.bind_pose @ h.T).T[:, :3]))
+    return out
+
+
+def hulls_from_point_clouds(
+    clouds: List[Tuple[int, np.ndarray]],
+    *,
+    on_log: LogFn = print,
+) -> List[Tuple[int, trimesh.Trimesh]]:
+    """Convex-hull each ``(joint_index, points)`` cloud, dropping degenerates."""
+    backend = hull_backend_error()
+    if backend is not None:
+        on_log(f"  {backend}")
+        return []
+    hulls: List[Tuple[int, trimesh.Trimesh]] = []
+    for ji, pts in clouds:
+        if len(pts) < 4:
+            continue
+        try:
+            hull = trimesh.Trimesh(vertices=pts, process=False).convex_hull
+        except Exception as e:  # noqa: BLE001 - qhull on degenerate input
+            on_log(f"  hull failed for joint {ji}: {e}")
+            continue
+        if hull is None or len(hull.faces) == 0 or float(hull.volume) <= 1e-6:
+            continue
+        hulls.append((ji, hull))
+    return hulls
+
+
 def build_hulls_from_phys_parts(
     phys: "PhysData",
     skin: "GltfSkin",
