@@ -4,18 +4,16 @@ Converts Source 2 soundscapes to Source 1 format
 """
 
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
-    QPushButton, QFileDialog, QTextEdit, QGroupBox, QComboBox,
-    QProgressBar, QCheckBox
+    QLabel, QPushButton, QTextEdit, QComboBox, QCheckBox
 )
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import QThread, Signal
 from PySide6.QtGui import QFont
 from pathlib import Path
 from app.tools.base_tool import BaseTool
+from app.ui import widgets
 import re
 import json
 from typing import Dict, List, Tuple, Optional
-from datetime import datetime
 
 
 class SoundscapeParser:
@@ -617,190 +615,140 @@ class SoundscapePorterWorker(QThread):
         self.finished.emit(True, f"Converted {len(event_names)} sound events")
 
 
-class SoundscapePorterTab(QWidget):
-    """GUI tab for soundscape porter"""
-    
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.hla_dir = Path()
-        self.current_soundscape = None
-        self.current_conversion = None
-        self.setup_ui()
-    
-    def setup_ui(self):
-        """Setup the user interface"""
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(10)
-        
-        # Directory selection section
-        dir_group = QGroupBox("Half-Life Alyx Directory")
-        dir_layout = QHBoxLayout(dir_group)
-        
-        self.dir_input = QLineEdit()
-        self.dir_input.setPlaceholderText("Select Half-Life Alyx directory...")
-        dir_layout.addWidget(self.dir_input)
-        
-        self.dir_button = QPushButton("Browse...")
-        self.dir_button.clicked.connect(self.browse_directory)
-        dir_layout.addWidget(self.dir_button)
-        
-        layout.addWidget(dir_group)
-        
-        # Soundscape selection section
-        soundscape_group = QGroupBox("Soundscape Selection")
-        soundscape_layout = QHBoxLayout(soundscape_group)
-        
-        soundscape_layout.addWidget(QLabel("Soundscape:"))
-        
+class SoundscapePorterTool(BaseTool):
+    """Soundscape Porter Tool"""
+
+    def __init__(self) -> None:
+        super().__init__("Soundscape Porter")
+        self.hla_dir: Path = Path()
+        self.current_soundscape: Optional[str] = None
+        self.current_conversion: Optional[Dict] = None
+        self._setup_tool_ui()
+        # This tool has its own Output Preview pane, so the shared log is unused.
+        self.set_log_visible(False)
+
+    def _setup_tool_ui(self) -> None:
+        """Build the tool UI on top of the shared BaseTool chrome."""
+        # Directory picker — auto-refreshes the soundscape list on each pick.
+        self.dir_picker = self.create_picker(
+            "dir", "HLA directory",
+            placeholder="Select Half-Life Alyx directory...",
+            dialog_title="Select Half-Life Alyx Directory")
+        self.dir_picker.changed.connect(self._on_dir_changed)
+        self.add_group("Half-Life Alyx Directory", self.dir_picker)
+
+        # Soundscape selection row.
         self.soundscape_combo = QComboBox()
         self.soundscape_combo.setEditable(True)
         self.soundscape_combo.currentTextChanged.connect(self.on_soundscape_changed)
-        soundscape_layout.addWidget(self.soundscape_combo)
-        
         self.refresh_button = QPushButton("Refresh List")
         self.refresh_button.clicked.connect(self.refresh_soundscape_list)
         self.refresh_button.setMaximumWidth(120)
-        soundscape_layout.addWidget(self.refresh_button)
-        
-        layout.addWidget(soundscape_group)
-        
-        # Info button
+        self.add_group(
+            "Soundscape Selection",
+            widgets.hbox(QLabel("Soundscape:"), self.soundscape_combo,
+                         self.refresh_button))
+
+        # Info button.
         self.info_button = QPushButton("Get Info")
         self.info_button.clicked.connect(self.get_soundscape_info)
-        layout.addWidget(self.info_button)
-        
-        # Options section
-        options_group = QGroupBox("Conversion Options")
-        options_layout = QVBoxLayout(options_group)
-        
+        self.content_layout.addWidget(self.info_button)
+
+        # Conversion options.
         self.include_events_checkbox = QCheckBox("Include sound events in output")
         self.include_events_checkbox.setChecked(True)
-        options_layout.addWidget(self.include_events_checkbox)
-        
-        layout.addWidget(options_group)
-        
-        # Conversion button — canonical label for batch/converter tools.
+        self.add_group("Conversion Options", self.include_events_checkbox)
+
+        # Convert button — canonical label for batch/converter tools.
         self.convert_button = QPushButton("Convert")
         self.convert_button.setStyleSheet("font-weight: bold;")
         self.convert_button.clicked.connect(self.convert_soundscape)
-        layout.addWidget(self.convert_button)
-        
-        # Progress bar
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setVisible(False)
-        layout.addWidget(self.progress_bar)
-        
-        # Output section
-        output_group = QGroupBox("Output Preview")
-        output_layout = QVBoxLayout(output_group)
-        
+        self.content_layout.addWidget(self.convert_button)
+
+        # Output preview — this tool logs into its OWN pane, not the base log.
         self.output_text = QTextEdit()
         self.output_text.setReadOnly(True)
         self.output_text.setFont(QFont("Courier", 9))
         self.output_text.setMaximumHeight(300)
-        output_layout.addWidget(self.output_text)
-        
-        # Export button
-        export_layout = QHBoxLayout()
-        
         self.export_json_button = QPushButton("Export as JSON")
         self.export_json_button.clicked.connect(self.export_json)
-        export_layout.addWidget(self.export_json_button)
-        
         self.export_text_button = QPushButton("Export as Text")
         self.export_text_button.clicked.connect(self.export_text)
-        export_layout.addWidget(self.export_text_button)
-        
-        export_layout.addStretch()
-        output_layout.addLayout(export_layout)
-        
-        layout.addWidget(output_group)
-        layout.addStretch()
-    
-    def browse_directory(self):
-        """Browse for Half-Life Alyx directory"""
-        dir_path = QFileDialog.getExistingDirectory(
-            self,
-            "Select Half-Life Alyx Directory",
-            str(Path.home())
-        )
-        
-        if dir_path:
-            self.hla_dir = Path(dir_path)
-            self.dir_input.setText(dir_path)
-            self.refresh_soundscape_list()
-    
-    def refresh_soundscape_list(self):
+        export_row = widgets.hbox(self.export_json_button, self.export_text_button,
+                                  stretch_after=True)
+        self.add_group("Output Preview", self.output_text, export_row)
+
+        self.content_layout.addStretch()
+
+    def _on_dir_changed(self, path: str) -> None:
+        """Remember the picked HLA directory and refresh the soundscape list."""
+        self.hla_dir = Path(path)
+        self.refresh_soundscape_list()
+
+    def refresh_soundscape_list(self) -> None:
         """Refresh the list of available soundscapes"""
         if not self.hla_dir.exists():
             self.show_message("Please select a valid directory first", "WARNING")
             return
-        
+
         self.soundscape_combo.clear()
         self.soundscape_combo.addItem("Loading soundscapes...")
-        
-        self.worker = SoundscapePorterWorker(self.hla_dir, "", mode='list')
-        self.worker.soundscape_list.connect(self.on_soundscape_list_received)
-        self.worker.finished.connect(self.on_worker_finished)
-        self.worker.progress.connect(self.on_worker_progress)
-        self.worker.start()
-    
-    def on_soundscape_list_received(self, soundscapes: List[str]):
+
+        worker = SoundscapePorterWorker(self.hla_dir, "", mode='list')
+        # soundscape_list is an extra signal, connected before start_worker.
+        worker.soundscape_list.connect(self.on_soundscape_list_received)
+        self.start_worker(
+            worker, self.on_worker_finished,
+            progress_slot=self.on_worker_progress, clear_log=False)
+
+    def on_soundscape_list_received(self, soundscapes: List[str]) -> None:
         """Handle received soundscape list"""
         self.soundscape_combo.clear()
         self.soundscape_combo.addItems(soundscapes)
-    
-    def on_soundscape_changed(self, text: str):
+
+    def on_soundscape_changed(self, text: str) -> None:
         """Handle soundscape selection change"""
         self.current_soundscape = text
-    
-    def get_soundscape_info(self):
+
+    def get_soundscape_info(self) -> None:
         """Get information about the selected soundscape"""
         if not self.hla_dir.exists():
             self.show_message("Please select a directory first", "WARNING")
             return
-        
+
         if not self.current_soundscape:
             self.show_message("Please select a soundscape first", "WARNING")
             return
-        
+
         self.output_text.clear()
-        self.info_button.setEnabled(False)
-        
-        self.worker = SoundscapePorterWorker(
-            self.hla_dir,
-            self.current_soundscape,
-            mode='info'
-        )
-        self.worker.finished.connect(self.on_worker_finished)
-        self.worker.progress.connect(self.on_worker_progress)
-        self.worker.start()
-    
-    def convert_soundscape(self):
+
+        worker = SoundscapePorterWorker(
+            self.hla_dir, self.current_soundscape, mode='info')
+        self.start_worker(
+            worker, self.on_worker_finished,
+            progress_slot=self.on_worker_progress,
+            busy_widgets=(self.info_button,), clear_log=False)
+
+    def convert_soundscape(self) -> None:
         """Convert the selected soundscape"""
         if not self.hla_dir.exists():
             self.show_message("Please select a directory first", "WARNING")
             return
-        
+
         if not self.current_soundscape:
             self.show_message("Please select a soundscape first", "WARNING")
             return
-        
+
         self.output_text.clear()
-        self.convert_button.setEnabled(False)
-        self.progress_bar.setVisible(True)
-        
-        self.worker = SoundscapePorterWorker(
-            self.hla_dir,
-            self.current_soundscape,
-            mode='convert'
-        )
-        self.worker.finished.connect(self.on_worker_finished)
-        self.worker.progress.connect(self.on_worker_progress)
-        self.worker.start()
-    
-    def on_worker_progress(self, message: str, level: str):
+
+        worker = SoundscapePorterWorker(
+            self.hla_dir, self.current_soundscape, mode='convert')
+        self.start_worker(
+            worker, self.on_worker_finished,
+            progress_slot=self.on_worker_progress,
+            busy_widgets=(self.convert_button,), clear_log=False)
+
+    def on_worker_progress(self, message: str, level: str) -> None:
         """Handle worker progress messages"""
         color_map = {
             "INFO": "#d4d4d4",
@@ -809,33 +757,29 @@ class SoundscapePorterTab(QWidget):
             "SUCCESS": "#4ec9b0"
         }
         color = color_map.get(level, "#d4d4d4")
-        
+
         formatted_message = f'<span style="color: {color};">[{level}]</span> {message}'
         self.output_text.append(formatted_message)
-    
-    def on_worker_finished(self, success: bool, message: str):
+
+    def on_worker_finished(self, success: bool, message: str) -> None:
         """Handle worker completion"""
-        self.info_button.setEnabled(True)
-        self.convert_button.setEnabled(True)
-        self.progress_bar.setVisible(False)
-        
         if success and hasattr(self.worker, 'result'):
             self.current_conversion = self.worker.result
             self.show_conversion_preview()
-        
+
         self.show_message(message, "SUCCESS" if success else "ERROR")
-    
-    def show_conversion_preview(self):
+
+    def show_conversion_preview(self) -> None:
         """Show a preview of the converted soundscape"""
         if not self.current_conversion:
             return
-        
+
         preview = "\n=== CONVERTED SOUNDSCAPE (Source 1 Format) ===\n\n"
         soundscape = self.current_conversion
-        
+
         preview += f"Name: {soundscape.get('name', 'Unknown')}\n\n"
         preview += "Rules:\n"
-        
+
         for i, rule in enumerate(soundscape.get('rules', []), 1):
             rule_type = rule.get('type', 'unknown')
             wave = rule.get('wave', 'unknown')
@@ -847,22 +791,20 @@ class SoundscapePorterTab(QWidget):
                 preview += f"   Pitch: {rule['pitch']}\n"
             if 'comment' in rule:
                 preview += f"   {rule['comment']}\n"
-        
+
         self.output_text.append(preview)
-    
-    def export_json(self):
+
+    def export_json(self) -> None:
         """Export converted soundscape as JSON"""
         if not self.current_conversion:
             self.show_message("No converted soundscape to export", "WARNING")
             return
-        
-        file_path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Export as JSON",
-            str(Path.home() / f"{self.current_soundscape}_converted.json"),
-            "JSON Files (*.json)"
-        )
-        
+
+        file_path = widgets.browse_save_file(
+            self, "Export as JSON", file_filter="JSON Files (*.json)",
+            settings=self.settings, remember_key=f"{self.tool_name}/export",
+            fallback=str(Path.home() / f"{self.current_soundscape}_converted.json"))
+
         if file_path:
             try:
                 with open(file_path, 'w', encoding='utf-8') as f:
@@ -870,19 +812,18 @@ class SoundscapePorterTab(QWidget):
                 self.show_message(f"Exported to {file_path}", "SUCCESS")
             except Exception as e:
                 self.show_message(f"Export failed: {e}", "ERROR")
-    def export_text(self):
+
+    def export_text(self) -> None:
         """Export converted soundscape as text (Source 1 format)"""
         if not self.current_conversion:
             self.show_message("No converted soundscape to export", "WARNING")
             return
-        
-        file_path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Export as Text",
-            str(Path.home() / f"{self.current_soundscape}_converted.txt"),
-            "Text Files (*.txt)"
-        )
-        
+
+        file_path = widgets.browse_save_file(
+            self, "Export as Text", file_filter="Text Files (*.txt)",
+            settings=self.settings, remember_key=f"{self.tool_name}/export",
+            fallback=str(Path.home() / f"{self.current_soundscape}_converted.txt"))
+
         if file_path:
             try:
                 content = self._generate_source1_format()
@@ -891,16 +832,16 @@ class SoundscapePorterTab(QWidget):
                 self.show_message(f"Exported to {file_path}", "SUCCESS")
             except Exception as e:
                 self.show_message(f"Export failed: {e}", "ERROR")
-    
+
     def _generate_source1_format(self) -> str:
         """Generate Source 1 soundscape format from conversion"""
         if not self.current_conversion:
             return ""
-        
+
         converter = SoundscapeConverter(self.hla_dir)
         return converter.generate_source1_text(self.current_conversion)
-    
-    def show_message(self, message: str, level: str = "INFO"):
+
+    def show_message(self, message: str, level: str = "INFO") -> None:
         """Show a message in the output"""
         color_map = {
             "INFO": "#d4d4d4",
@@ -909,16 +850,6 @@ class SoundscapePorterTab(QWidget):
             "SUCCESS": "#4ec9b0"
         }
         color = color_map.get(level, "#d4d4d4")
-        
+
         formatted_message = f'<span style="color: {color};">[{level}]</span> {message}'
         self.output_text.append(formatted_message)
-
-
-class SoundscapePorterTool(BaseTool):
-    """Soundscape Porter Tool"""
-    
-    def __init__(self):
-        super().__init__("Soundscape Porter")
-        # Add the soundscape porter tab to the content layout
-        tab = SoundscapePorterTab()
-        self.content_layout.addWidget(tab)

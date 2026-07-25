@@ -29,8 +29,9 @@ import re
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 
 IMAGE_SUFFIXES = {".png", ".tga", ".jpg", ".jpeg", ".exr", ".hdr"}
@@ -40,6 +41,13 @@ GLTF_SUFFIXES = {".gltf", ".glb"}
 # in this set just clutters materialsrc/.
 COMPILED_TEXTURE_SUFFIXES = {".vtex", ".vtex_c"}
 LogFn = Callable[[str], None]
+
+# Windows caps a CreateProcess command line at 32767 chars. RERL-derived
+# filter lists can massively exceed that on multi-subtree exports (a 4-path
+# Alyx xen port resolves ~1500 refs -> WinError 206 at Popen), so filter
+# lists are pruned against their covering prefixes and, as a last resort,
+# split across several VRF invocations.
+_MAX_CMDLINE = 30000
 
 # Match Source 2 resource paths in VRF's `-b RERL` stdout.
 # References are written with their source extension (e.g. ".vmat", ".vtex"),
@@ -131,6 +139,134 @@ def expand_vpk_filter(vpk_filepath: str) -> str:
     return ",".join(paths)
 
 
+def expand_vpk_filters(vpk_filepaths: Iterable[str]) -> List[str]:
+    """Expand and dedupe several internal VPK paths into one `-f` token list.
+
+    Each `models/...` path also pulls its parallel `materials/...` subtree
+    (see `expand_vpk_filter`). Empty/whitespace entries are dropped. Order of
+    first appearance is preserved.
+    """
+    expanded = [expand_vpk_filter(fp) for fp in vpk_filepaths if fp and fp.strip()]
+    return _merge_filters(expanded)
+
+
+@dataclass
+class ExportJob:
+    """One VRF invocation: a single `-i` input archive/file/folder plus the
+    internal VPK path filters to pull from it.
+
+    `vpk_filepaths` is empty for loose `.vmdl_c`/folder inputs (no `-f`) and
+    for a whole-archive `.vpk` input. Multiple entries are merged into one
+    `-f` filter so VRF opens the archive only once.
+    """
+    input_path: Path
+    vpk_filepaths: List[str] = field(default_factory=list)
+
+
+def parse_vrf_copy_url(text: str) -> Optional[Tuple[str, str]]:
+    """Parse VRF's right-click "Copy URL" string into `(vpk_path, internal)`.
+
+    The format is `vpk:<vpk_path>:<internal_resource_path>`, e.g.::
+
+        vpk:S:/SteamLibrary/.../hlvr/pak01_dir.vpk:models/props/foo.vmdl_c
+
+    The archive path itself contains a drive-letter colon (`S:`), so the split
+    is anchored on the `.vpk:` boundary rather than the first colon. Returns
+    `None` if `text` isn't a (well-formed) VRF URL — the internal path is
+    normalised to forward slashes with any leading slash stripped.
+    """
+    s = text.strip().strip('"').strip()
+    if s[:4].lower() != "vpk:":
+        return None
+    body = s[4:]
+    idx = body.lower().find(".vpk:")
+    if idx < 0:
+        return None
+    vpk_path = body[:idx + 4]                      # include the ".vpk"
+    internal = body[idx + 5:].strip().replace("\\", "/").lstrip("/")
+    if not vpk_path or not internal:
+        return None
+    return (vpk_path, internal)
+
+
+def _vpk_key(p: Path) -> str:
+    """Case/separator-normalised key for grouping entries that name the same
+    `.vpk` archive (Windows paths are case-insensitive)."""
+    return os.path.normcase(os.path.normpath(str(p)))
+
+
+def build_export_jobs(
+    entries: Iterable[str],
+    default_input: Optional[Path] = None,
+) -> Tuple[List[ExportJob], List[str]]:
+    """Resolve a batch list of path-ish strings into deduped `ExportJob`s.
+
+    Each entry may be one of:
+
+    * a VRF copy-URL `vpk:<vpk>:<internal>` — grouped under that archive;
+    * a bare internal path `models/...` — paired with `default_input` when
+      that input is a `.vpk` (the archive the path lives in);
+    * a filesystem path to a `.vmdl_c` (or other) file, a `.vpk`, or a folder.
+
+    Entries naming the same `.vpk` are merged into a single job (their filters
+    combined) so the archive is opened once. Blank lines and `#` comments are
+    ignored. Returns `(jobs, warnings)`; `warnings` collects entries that
+    couldn't be resolved (e.g. a bare internal path with no VPK context).
+    """
+    jobs: List[ExportJob] = []
+    warnings: List[str] = []
+    vpk_jobs: Dict[str, ExportJob] = {}
+    default_is_vpk = default_input is not None and is_vpk(default_input)
+
+    def _vpk_job(vpk_path: Path) -> ExportJob:
+        key = _vpk_key(vpk_path)
+        job = vpk_jobs.get(key)
+        if job is None:
+            job = ExportJob(input_path=vpk_path)
+            vpk_jobs[key] = job
+            jobs.append(job)
+        return job
+
+    def _add_filter(job: ExportJob, internal: str):
+        if internal and internal not in job.vpk_filepaths:
+            job.vpk_filepaths.append(internal)
+
+    for raw in entries:
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+
+        parsed = parse_vrf_copy_url(line)
+        if parsed is not None:
+            vpk_path, internal = parsed
+            _add_filter(_vpk_job(Path(vpk_path)), internal)
+            continue
+        if line[:4].lower() == "vpk:":
+            warnings.append(f"Malformed VRF URL (expected vpk:<archive>.vpk:<path>): {line}")
+            continue
+
+        candidate = line.strip('"')
+        p = Path(candidate)
+        if is_vpk(p):
+            _vpk_job(p)                       # whole-archive job, no filter
+            continue
+        if p.exists():
+            jobs.append(ExportJob(input_path=p))   # loose file or folder
+            continue
+
+        # Not a URL and not an on-disk path: treat as a bare internal VPK path
+        # and pair it with the default input archive if we have one.
+        norm = candidate.replace("\\", "/").lstrip("/")
+        if default_is_vpk and "/" in norm:
+            assert default_input is not None
+            _add_filter(_vpk_job(default_input), norm)
+            continue
+
+        warnings.append(f"Could not resolve entry (no matching file or VPK context): {line}")
+
+    return jobs, warnings
+
+
 def build_vrf_command(
     vrf_exe: Path,
     input_path: Path,
@@ -138,48 +274,72 @@ def build_vrf_command(
     gltf_format: str = "glb",
     recursive: bool = True,
     threads: int = 4,
-    vpk_filepath: Optional[str] = None,
+    vpk_filepath: Optional[Union[str, List[str]]] = None,
     extra_filters: Optional[List[str]] = None,
+    mode: str = "models",
 ) -> List[str]:
     """Compose the Source2Viewer-CLI argv. Pure function — easy to unit-test.
 
     `vpk_filepath` is the VRF `-f` filter — a path prefix inside the VPK
-    (e.g. "models/props_c17/"). Only meaningful when `input_path` is a .vpk.
+    (e.g. "models/props_c17/"), or a list of them to extract several models
+    from one archive in a single pass. Only meaningful when `input_path` is a
+    .vpk.
 
     `extra_filters` is a list of additional path prefixes to merge into `-f`
     (e.g. parent dirs of references discovered via a `-b RERL` pre-pass).
-    """
-    if gltf_format not in {"gltf", "glb"}:
-        raise VrfRunnerError(f"gltf_format must be 'gltf' or 'glb' (got {gltf_format!r})")
 
-    # `--gltf_export_materials` is required to get a `materials` array in the
-    # glTF with proper vmat names — without it VRF emits a mesh with no
-    # material reference at all, and the SMD converter falls back to a literal
-    # "material" name (which then breaks the downstream MDL's $cdmaterials
-    # lookup). The flag's downside is hash-suffix duplicate PNGs and channel-
-    # split textures dropped next to the .gltf — those get cleaned up by
-    # `purge_stray_images_next_to_gltf` post-extraction.
+    `mode` selects what gets iterated as primary targets:
+      * "models" — .vmdl_c to GLTF/GLB plus their vmats + textures (the
+        `--gltf_export_*` flags and `gltf_format` only apply here);
+      * "vmats"  — .vmat_c materials plus their vtex textures, no GLTF.
+    """
+    if mode not in {"models", "vmats"}:
+        raise VrfRunnerError(f"mode must be 'models' or 'vmats' (got {mode!r})")
+
     args: List[str] = [
         str(vrf_exe),
         "-i", str(input_path),
         "-o", str(output_dir),
         "-d",
-        "--gltf_export_format", gltf_format,
-        "--gltf_export_animations",
-        "--gltf_export_materials",
+    ]
+    if mode == "models":
+        if gltf_format not in {"gltf", "glb"}:
+            raise VrfRunnerError(f"gltf_format must be 'gltf' or 'glb' (got {gltf_format!r})")
+        # `--gltf_export_materials` is required to get a `materials` array in
+        # the glTF with proper vmat names — without it VRF emits a mesh with no
+        # material reference at all, and the SMD converter falls back to a
+        # literal "material" name (which then breaks the downstream MDL's
+        # $cdmaterials lookup). The flag's downside is hash-suffix duplicate
+        # PNGs and channel-split textures dropped next to the .gltf — those get
+        # cleaned up by `purge_stray_images_next_to_gltf` post-extraction.
+        args += [
+            "--gltf_export_format", gltf_format,
+            "--gltf_export_animations",
+            "--gltf_export_materials",
+        ]
+        entities = "vmdl_c,vmat_c,vtex_c"
+    else:
+        # VMAT-only port: iterate materials + their textures. No .vmdl_c, so no
+        # GLTF is written and there are no stray images next to a .gltf.
+        entities = "vmat_c,vtex_c"
+    args += [
         "--threads", str(threads),
-        "-e", "vmdl_c,vmat_c,vtex_c",
+        "-e", entities,
     ]
     if recursive and input_path.is_dir():
         args.append("--recursive")
     if is_vpk(input_path) and vpk_filepath:
-        merged = _merge_filters([expand_vpk_filter(vpk_filepath)], extra_filters or [])
-        args += ["-f", ",".join(merged)]
+        paths = [vpk_filepath] if isinstance(vpk_filepath, str) else list(vpk_filepath)
+        merged = _merge_filters(expand_vpk_filters(paths), extra_filters or [])
+        if merged:
+            args += ["-f", ",".join(merged)]
     return args
 
 
 def _merge_filters(*filter_groups: Iterable[str]) -> List[str]:
-    """Flatten + dedupe `-f` filter strings, preserving first-seen order."""
+    """Flatten + dedupe `-f` filter strings, preserving first-seen order.
+    Tokens covered by another token's prefix are dropped (see
+    `_prune_covered_filters`)."""
     seen: set = set()
     out: List[str] = []
     for group in filter_groups:
@@ -189,7 +349,73 @@ def _merge_filters(*filter_groups: Iterable[str]) -> List[str]:
                 if t and t not in seen:
                     seen.add(t)
                     out.append(t)
+    return _prune_covered_filters(out)
+
+
+def _prune_covered_filters(filters: List[str]) -> List[str]:
+    """Drop `-f` tokens made redundant by another token in the list.
+
+    VRF's filter is a starts-with match, so a token that itself starts with
+    another token can never widen the matched set — an exact
+    `models/props/xen/foo.vmdl` next to `models/props/xen/` adds nothing.
+    This is what keeps RERL-derived ref lists (1500+ entries on a xen-scale
+    port) off the Windows command-line length limit. Case-insensitive
+    (Source 2 resource paths are compiled lowercase, and this module keys
+    VPK paths case-insensitively too); order-preserving.
+    """
+    lowered = [f.lower() for f in filters]
+    out: List[str] = []
+    for i, tok in enumerate(filters):
+        covered = False
+        for j, other in enumerate(lowered):
+            if j == i:
+                continue
+            if lowered[i].startswith(other) and (len(other) < len(lowered[i]) or j < i):
+                covered = True
+                break
+        if not covered:
+            out.append(tok)
     return out
+
+
+def _split_filters_for_cmdline(
+    base_args: List[str],
+    filters: List[str],
+    limit: int = _MAX_CMDLINE,
+) -> List[List[str]]:
+    """Split `-f` tokens into chunks so each `base_args + ["-f", <joined>]`
+    command line stays under `limit` characters. One chunk in the common
+    case; [] for an empty filter list.
+    """
+    if not filters:
+        return []
+    budget = limit - len(subprocess.list2cmdline(base_args + ["-f", ""]))
+    chunks: List[List[str]] = []
+    cur: List[str] = []
+    cur_len = 0
+    for tok in filters:
+        added = len(tok) + (1 if cur else 0)   # +1 joining comma
+        if cur and cur_len + added > budget:
+            chunks.append(cur)
+            cur, cur_len = [], 0
+            added = len(tok)
+        cur.append(tok)
+        cur_len += added
+    if cur:
+        chunks.append(cur)
+    return chunks
+
+
+def _refs_outside_filters(refs: List[str], filters: List[str]) -> List[str]:
+    """Keep only refs not already matched by one of the `-f` filters.
+
+    A ref under a requested path gets pulled by that prefix filter anyway,
+    so listing it individually just bloats the command line — only
+    out-of-tree refs (shared textures like materials/xen/tile/) need their
+    own entry.
+    """
+    lowered = [f.lower() for f in filters]
+    return [r for r in refs if not any(r.lower().startswith(f) for f in lowered)]
 
 
 def _parse_rerl_paths(stdout: str) -> List[str]:
@@ -292,6 +518,60 @@ def _parse_material_groups_per_file(text: str) -> Dict[str, List[Tuple[str, List
     return result
 
 
+def _run_block_dump(
+    vrf_exe: Path,
+    input_path: Path,
+    vpk_filepath: str,
+    entity_filter: str,
+    block: str,
+    on_log: LogFn,
+) -> Optional[str]:
+    """Run VRF `-b <block>` over the filtered entries and return the combined
+    stdout, splitting the filter list across several VRF processes when a
+    single command line would exceed the Windows length limit.
+
+    Returns None when nothing could be dumped (failed to launch, or every
+    pass exited non-zero); partial output from a multi-pass run is still
+    returned, with the failed passes logged.
+    """
+    filters = [t.strip() for t in vpk_filepath.split(",") if t.strip()]
+    base = [
+        str(vrf_exe),
+        "-i", str(input_path),
+        "-e", entity_filter,
+        "-b", block,
+    ]
+    chunks = _split_filters_for_cmdline(base, filters)
+    if len(chunks) > 1:
+        on_log(f"Filter list needs {len(chunks)} `-b {block}` passes (command-line length limit)")
+    outs: List[str] = []
+    failed = 0
+    for chunk in chunks:
+        args = base + ["-f", ",".join(chunk)]
+        on_log("Pre-pass: " + " ".join(_quote(a) for a in args))
+        try:
+            proc = subprocess.run(
+                args,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+        except OSError as e:
+            on_log(f"`-b {block}` dump failed to launch: {e}")
+            return None
+        if proc.returncode != 0:
+            failed += 1
+            on_log(f"`-b {block}` pass exited with code {proc.returncode}")
+            continue
+        outs.append(proc.stdout or "")
+    if failed and not outs:
+        return None
+    return "\n".join(outs)
+
+
 def dump_material_groups(
     vrf_exe: Path,
     input_path: Path,
@@ -303,33 +583,79 @@ def dump_material_groups(
     map where `groups` is `[(group_name, [vmat_refs]), ...]`. The first
     group is always the default — Source 2 convention.
 
-    No-op-safe: returns `{}` on non-zero exit and logs the failure.
+    No-op-safe: returns `{}` when the dump fails and logs the failure.
     """
-    args = [
-        str(vrf_exe),
-        "-i", str(input_path),
-        "-f", vpk_filepath,
-        "-e", "vmdl_c",
-        "-b", "DATA",
-    ]
     on_log("Dumping material groups via `-b DATA`...")
-    try:
-        proc = subprocess.run(
-            args,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
-        )
-    except OSError as e:
-        on_log(f"Material-groups dump failed to launch: {e}")
+    out = _run_block_dump(vrf_exe, input_path, vpk_filepath, "vmdl_c", "DATA", on_log)
+    if out is None:
+        on_log("Material-groups dump failed; continuing without skin info")
         return {}
-    if proc.returncode != 0:
-        on_log(f"Material-groups dump exited with code {proc.returncode}; continuing without skin info")
+    return _parse_material_groups_per_file(out)
+
+
+def dump_phys_blocks(
+    vrf_exe: Path,
+    input_path: Path,
+    vpk_filepath: str,
+    on_log: LogFn = print,
+) -> Dict[str, str]:
+    """Run VRF `-b PHYS` on .vmdl_c entries matching the filter and return
+    `{vmdl_path: kv3_text}` for models that actually carry physics parts.
+
+    The PHYS block is the lossless physics source for ragdoll back-porting:
+    per-bone shapes, bind poses and Rubikon joints with real limits (see
+    `utils/phys_kv3.py`). No-op-safe: returns `{}` on failure.
+    """
+    on_log("Dumping physics (PHYS) blocks via `-b PHYS`...")
+    out = _run_block_dump(vrf_exe, input_path, vpk_filepath, "vmdl_c", "PHYS", on_log)
+    if out is None:
+        on_log("PHYS dump failed; continuing without physics data")
         return {}
-    return _parse_material_groups_per_file(proc.stdout or "")
+
+    sections: Dict[str, str] = {}
+    cur_path: Optional[str] = None
+    buf: List[str] = []
+    for line in out.splitlines():
+        m = _DATA_FILE_HEADER_RE.match(line)
+        if m:
+            if cur_path is not None:
+                sections[cur_path] = "\n".join(buf)
+            cur_path = m.group(1).replace("\\", "/")
+            buf = []
+        elif cur_path is not None:
+            buf.append(line)
+    if cur_path is not None:
+        sections[cur_path] = "\n".join(buf)
+
+    # keep only models with real parts (props without physics print nothing
+    # useful; empty PHYS blocks would just confuse the SMD batch tool)
+    return {p: t for p, t in sections.items() if "m_parts" in t and "m_flMass" in t}
+
+
+def write_phys_sidecars(
+    staging_dir: Path,
+    phys_blocks: Dict[str, str],
+    on_log: LogFn = print,
+) -> int:
+    """Write each model's PHYS KV3 text as `<stem>_phys.txt` next to the
+    .gltf VRF drops, so reorganize carries it into modelsrc/ where the SMD
+    batch tool's scanner picks it up for ragdoll/jointed collision builds.
+
+    Returns the number of sidecars written.
+    """
+    written = 0
+    for vmdl_path, text in phys_blocks.items():
+        base = vmdl_path
+        for ext in (".vmdl_c", ".vmdl"):
+            if base.lower().endswith(ext):
+                base = base[: -len(ext)]
+                break
+        sidecar = staging_dir / (base + "_phys.txt")
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+        sidecar.write_text(text, encoding="utf-8")
+        written += 1
+    on_log(f"Wrote {written} physics sidecar(s)")
+    return written
 
 
 def _vmat_stem(ref: str) -> str:
@@ -392,47 +718,34 @@ def dump_rerl(
     entries inside a VPK. Returns deduped reference paths (with source
     extensions like `.vmat`, not `.vmat_c`).
 
-    No-op-safe: returns [] on non-zero exit and logs the failure.
+    No-op-safe: returns [] when the dump fails and logs the failure.
     """
-    args = [
-        str(vrf_exe),
-        "-i", str(input_path),
-        "-f", vpk_filepath,
-        "-e", entity_filter,
-        "-b", "RERL",
-    ]
-    on_log("Pre-pass: " + " ".join(_quote(a) for a in args))
+    out = _run_block_dump(vrf_exe, input_path, vpk_filepath, entity_filter, "RERL", on_log)
+    if out is None:
+        on_log("RERL pre-pass failed; continuing without references")
+        return []
+    return _parse_rerl_paths(out)
+
+
+def _stream_subprocess(args: List[str], on_log: LogFn) -> int:
+    """Run a subprocess and forward each stdout line to on_log. Returns rc.
+
+    Launch failures surface as VrfRunnerError so a batch worker fails the
+    one job and moves on, instead of aborting the whole run.
+    """
+    on_log("Running: " + " ".join(_quote(a) for a in args))
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             args,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            bufsize=1,
             encoding="utf-8",
             errors="replace",
-            check=False,
         )
     except OSError as e:
-        on_log(f"RERL pre-pass failed to launch: {e}")
-        return []
-    if proc.returncode != 0:
-        on_log(f"RERL pre-pass exited with code {proc.returncode}; continuing without references")
-        return []
-    return _parse_rerl_paths(proc.stdout or "")
-
-
-def _stream_subprocess(args: List[str], on_log: LogFn) -> int:
-    """Run a subprocess and forward each stdout line to on_log. Returns rc."""
-    on_log("Running: " + " ".join(_quote(a) for a in args))
-    proc = subprocess.Popen(
-        args,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-        encoding="utf-8",
-        errors="replace",
-    )
+        raise VrfRunnerError(f"Failed to launch VRF: {e}") from e
     assert proc.stdout is not None
     for line in proc.stdout:
         on_log(line.rstrip())
@@ -572,6 +885,165 @@ def reorganize_to_project_layout(
         on_log("No materials/ directory to reorganize")
 
 
+def detect_nested_package_dirs(staging_dir: Path) -> List[str]:
+    """Identify Source 2 "addon package" layouts in the staging tree: a
+    package dir under `models/` that contains BOTH a `models/` and a
+    `materials/` subdir, e.g. `models/combine_horseman/{models,materials}/`.
+
+    Garry's Mod workshop ports commonly pack a whole Source 1 addon tree
+    verbatim under the Source 2 `models/` root, so the model lives at
+    `models/<pkg>/models/<model>.vmdl_c` and references its materials at
+    `models/<pkg>/materials/<rest>/<mat>.vmat`. The generic Alyx hoist would
+    route those materials to `materialsrc/models/<pkg>/...` while the model
+    stays at `modelsrc/<pkg>/models/...`, leaving the two trees structurally
+    incoherent (the `models` and `<pkg>` segments end up in swapped order).
+
+    Returned values are package paths relative to `models/` (forward-slash,
+    e.g. "combine_horseman"). Detection runs on the staging tree *before* the
+    hoist mangles it; the paths drive the final `flatten_nested_packages`
+    step so each package collapses to a clean `<pkg>/` root shared by model
+    and materials.
+
+    The Alyx case (materials are a direct sibling of the model *file*, with
+    no inner `models/` dir) is deliberately not matched here — it has no
+    redundant nesting to flatten and stays on the existing hoist path.
+    """
+    models_root = staging_dir / "models"
+    if not models_root.is_dir():
+        return []
+    out: List[str] = []
+    seen: set = set()
+    for mats_dir in models_root.rglob("materials"):
+        if not mats_dir.is_dir():
+            continue
+        pkg_dir = mats_dir.parent
+        if (pkg_dir / "models").is_dir():
+            rel = pkg_dir.relative_to(models_root).as_posix()
+            if rel and rel not in seen:
+                seen.add(rel)
+                out.append(rel)
+    return out
+
+
+def flatten_nested_packages(
+    output_dir: Path,
+    packages: Iterable[str],
+    on_log: LogFn = print,
+) -> int:
+    """Collapse the nested addon-package layout to a clean Source 1 root for
+    each package identified by `detect_nested_package_dirs`.
+
+    Runs as the *final* step — after reorganize and all texture purges — so
+    the ref-matching purges operate on the `models/`-prefixed layout they
+    understand (`_normalize_vmat_ref` keeps the `models/` prefix, so flatten-
+    ing earlier would make every texture look unreferenced and get deleted).
+    This is a pure directory relocation:
+
+        modelsrc/<pkg>/models/<rest>    -> modelsrc/<pkg>/<rest>
+        materialsrc/models/<pkg>/<rest> -> materialsrc/<pkg>/<rest>
+
+    leaving model and materials sharing the `<pkg>/` root with no redundant
+    `models/` or `materials/` wrapper (so `$cdmaterials "<pkg>/<rest>"` lines
+    up). Returns the number of packages flattened.
+    """
+    modelsrc = output_dir / "modelsrc"
+    materialsrc = output_dir / "materialsrc"
+    flattened = 0
+    for raw in packages:
+        rel = str(raw).strip().strip("/")
+        if not rel:
+            continue
+        moved_any = False
+        inner_models = modelsrc / Path(rel) / "models"
+        if inner_models.is_dir():
+            _move_tree_into(inner_models, modelsrc / Path(rel), on_log)
+            moved_any = True
+        pkg_materials = materialsrc / "models" / Path(rel)
+        if pkg_materials.is_dir():
+            _move_tree_into(pkg_materials, materialsrc / Path(rel), on_log)
+            moved_any = True
+        if moved_any:
+            flattened += 1
+    # Drop a now-empty `materialsrc/models/` wrapper left behind when every
+    # material under it belonged to a flattened package. Leave it in place if
+    # normal (non-package) models still live there.
+    leftover = materialsrc / "models"
+    if leftover.is_dir() and not any(leftover.iterdir()):
+        try:
+            leftover.rmdir()
+        except OSError:
+            pass
+    if flattened:
+        on_log(f"Flattened {flattened} nested package layout(s) to clean <pkg>/ roots")
+    return flattened
+
+
+def _prune_empty_dirs(root: Path, on_log: LogFn = print) -> None:
+    """Remove empty subdirectories under `root`, bottom-up. `root` itself is
+    left in place even if it ends up empty."""
+    dirs = sorted(
+        (p for p in root.rglob("*") if p.is_dir()),
+        key=lambda p: len(p.parts),
+        reverse=True,
+    )
+    for d in dirs:
+        try:
+            if not any(d.iterdir()):
+                d.rmdir()
+        except OSError:
+            pass
+
+
+def flatten_materials_to_root(output_dir: Path, on_log: LogFn = print) -> int:
+    """Move every exported image and `.vmat` file into the root of
+    `materialsrc/`, collapsing the nested directory structure into a flat pile.
+
+    Pulls from both `modelsrc/` (VRF's stray images sitting next to each .gltf)
+    and `materialsrc/` (the parallel materials tree), so every texture and
+    material ends up directly under `materialsrc/`. This is why it overrides
+    the stray-image option: the strays are swept into the root rather than
+    kept-in-place or purged. Overwrites on name collision — mirrors the
+    `_move_tree_into` convention and keeps duplicate strays from piling up
+    (the canonical `materialsrc/` copy is moved last, so it wins). Empty
+    subfolders left behind are pruned.
+
+    Returns the number of files moved.
+    """
+    materialsrc = output_dir / "materialsrc"
+    materialsrc.mkdir(parents=True, exist_ok=True)
+
+    flatten_suffixes = IMAGE_SUFFIXES | {".vmat"}
+    # (source root, suffixes to sweep). modelsrc yields images only; process it
+    # first so a same-named canonical material texture overwrites the stray.
+    sources: List[Tuple[Path, Set[str]]] = []
+    modelsrc = output_dir / "modelsrc"
+    if modelsrc.is_dir():
+        sources.append((modelsrc, set(IMAGE_SUFFIXES)))
+    sources.append((materialsrc, flatten_suffixes))
+
+    moved = 0
+    for src_root, suffixes in sources:
+        for f in list(src_root.rglob("*")):
+            if not f.is_file():
+                continue
+            if f.suffix.lower() not in suffixes:
+                continue
+            if f.parent == materialsrc:
+                continue  # already at the root
+            dest = materialsrc / f.name
+            try:
+                if dest.exists():
+                    dest.unlink()
+                shutil.move(str(f), str(dest))
+                moved += 1
+            except OSError as e:
+                on_log(f"Could not move {f}: {e}")
+
+    _prune_empty_dirs(materialsrc, on_log)
+    on_log(f"Flattened {moved} image/vmat file(s) into {materialsrc.name}/ root")
+    return moved
+
+
 def purge_inner_materials_dirs(modelsrc_dir: Path, on_log: LogFn = print) -> int:
     """Recursively rmtree any folder literally named `materials` under
     `modelsrc_dir`. VRF sometimes writes a per-model `materials/` next to
@@ -630,6 +1102,15 @@ def _normalize_vmat_ref(ref: str) -> Optional[Tuple[str, str]]:
 def _collect_vmat_references(materialsrc: Path) -> Set[Tuple[str, str]]:
     """Walk every .vmat under `materialsrc`, regex out the `Texture*` paths,
     return the set of (dir, stem) keys (relative to materialsrc, lowercased).
+
+    Each referenced stem is also keyed against the vmat's OWN directory:
+    VRF decodes a vmat's textures next to the .vmat regardless of the
+    authored reference path, which can point into a different model's tree
+    entirely (e.g. HLA's bodybag_cleanup.vmat lives under props/hazmat/ but
+    references models/props/quarantine/materials/ textures). Without the
+    same-folder key those decoded files would look unreferenced and be
+    purged — orphaning the vmat. This mirrors the basename-in-vmat-folder
+    fallback the VMAT parser uses when resolving textures.
     """
     refs: Set[Tuple[str, str]] = set()
     for vmat in materialsrc.rglob("*.vmat"):
@@ -639,10 +1120,14 @@ def _collect_vmat_references(materialsrc: Path) -> Set[Tuple[str, str]]:
             text = vmat.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
+        vmat_dir = vmat.parent.relative_to(materialsrc).as_posix().lower()
+        if vmat_dir == ".":
+            vmat_dir = ""
         for raw in _VMAT_TEXTURE_RE.findall(text):
             key = _normalize_vmat_ref(raw)
             if key is not None:
                 refs.add(key)
+                refs.add((vmat_dir, key[1]))
     return refs
 
 
@@ -776,22 +1261,45 @@ def run_vrf_export(
     recursive: bool = True,
     threads: int = 4,
     keep_stray_images: bool = False,
-    vpk_filepath: Optional[str] = None,
+    flatten_materials_root: bool = False,
+    mode: str = "models",
+    vpk_filepath: Optional[Union[str, List[str]]] = None,
     on_log: LogFn = print,
 ) -> int:
     """
     Run a full export: GLTF + materials/ tree, then optionally clean up stray
     image files next to the .gltf outputs.
 
-    `vpk_filepath` is a path prefix inside a VPK (e.g. "models/props_c17/")
-    — only used when `input_path` is a .vpk file.
+    `mode` picks the port type:
+      * "models" — .vmdl_c to GLTF/GLB plus their materials tree (the default);
+      * "vmats"  — .vmat_c materials plus their textures only, no GLTF. Model-
+        only steps (GLTF stray-image purge, skin sidecars) are skipped.
+
+    `vpk_filepath` is a path prefix inside a VPK (e.g. "models/props_c17/"),
+    or a list of them to extract several models from one archive in a single
+    pass — only used when `input_path` is a .vpk file.
+
+    `flatten_materials_root` moves every exported image and .vmat into a flat
+    `materialsrc/` root as a final step; it overrides `keep_stray_images`
+    (the strays are swept into the root instead of being kept or purged).
 
     Returns the VRF process exit code (0 on success).
     """
+    if mode not in {"models", "vmats"}:
+        raise VrfRunnerError(f"mode must be 'models' or 'vmats' (got {mode!r})")
     if not vrf_exe.is_file():
         raise VrfRunnerError(f"VRF executable not found: {vrf_exe}")
     if not input_path.exists():
         raise VrfRunnerError(f"Input path does not exist: {input_path}")
+
+    # Normalise the filter to a list so the single- and multi-path callers
+    # share one code path below.
+    if not vpk_filepath:
+        vpk_filepaths: List[str] = []
+    elif isinstance(vpk_filepath, str):
+        vpk_filepaths = [vpk_filepath]
+    else:
+        vpk_filepaths = [p for p in vpk_filepath if p and p.strip()]
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -805,19 +1313,23 @@ def run_vrf_export(
     staging_dir.mkdir(parents=True, exist_ok=True)
 
     extra_filters: List[str] = []
-    if is_vpk(input_path) and vpk_filepath:
+    if is_vpk(input_path) and vpk_filepaths and mode == "models":
+        prefix_filters = expand_vpk_filters(vpk_filepaths)
         on_log("Resolving model references via `-b RERL`...")
         first_refs = dump_rerl(
             vrf_exe=vrf_exe,
             input_path=input_path,
-            vpk_filepath=expand_vpk_filter(vpk_filepath),
+            vpk_filepath=",".join(prefix_filters),
             entity_filter="vmdl_c",
             on_log=on_log,
         )
         # Recurse one level: RERL each discovered .vmat to find its .vtex
         # textures by exact path. Without this, we'd have to fall back to
         # parent-dir filters and accidentally pull every unrelated texture
-        # sharing the .vmat's folder.
+        # sharing the .vmat's folder. Materials under the user's own filter
+        # paths are already dump targets via the prefixes, so only
+        # out-of-tree vmats are named individually — that keeps this
+        # command line off the Windows length limit too.
         vmat_refs = [r for r in first_refs if r.lower().endswith(".vmat")]
         second_refs: List[str] = []
         if vmat_refs:
@@ -825,7 +1337,7 @@ def run_vrf_export(
             second_refs = dump_rerl(
                 vrf_exe=vrf_exe,
                 input_path=input_path,
-                vpk_filepath=",".join(vmat_refs),
+                vpk_filepath=",".join(_merge_filters(prefix_filters, vmat_refs)),
                 entity_filter="vmat_c",
                 on_log=on_log,
             )
@@ -836,10 +1348,41 @@ def run_vrf_export(
                 seen.add(r)
                 all_refs.append(r)
         if all_refs:
-            on_log(f"Found {len(all_refs)} referenced resource(s):")
-            for r in all_refs:
-                on_log(f"  - {r}")
-            extra_filters = all_refs
+            # In-tree refs are extracted by the prefix filters anyway; only
+            # out-of-tree refs need their own -f entry (and are worth logging).
+            extra_filters = _refs_outside_filters(all_refs, prefix_filters)
+            on_log(
+                f"Found {len(all_refs)} referenced resource(s); "
+                f"{len(all_refs) - len(extra_filters)} already inside the requested paths"
+            )
+            if extra_filters:
+                on_log(f"Adding {len(extra_filters)} out-of-tree reference(s):")
+                for r in extra_filters:
+                    on_log(f"  - {r}")
+        else:
+            on_log("No references resolved; falling back to parallel-path filter only.")
+    elif is_vpk(input_path) and vpk_filepaths and mode == "vmats":
+        # VMAT port: the material is the primary target, so we only need one
+        # RERL level — resolve each .vmat's .vtex textures by exact path.
+        prefix_filters = expand_vpk_filters(vpk_filepaths)
+        on_log("Resolving texture references via `-b RERL`...")
+        refs = dump_rerl(
+            vrf_exe=vrf_exe,
+            input_path=input_path,
+            vpk_filepath=",".join(prefix_filters),
+            entity_filter="vmat_c",
+            on_log=on_log,
+        )
+        if refs:
+            extra_filters = _refs_outside_filters(refs, prefix_filters)
+            on_log(
+                f"Found {len(refs)} referenced resource(s); "
+                f"{len(refs) - len(extra_filters)} already inside the requested paths"
+            )
+            if extra_filters:
+                on_log(f"Adding {len(extra_filters)} out-of-tree reference(s):")
+                for r in extra_filters:
+                    on_log(f"  - {r}")
         else:
             on_log("No references resolved; falling back to parallel-path filter only.")
 
@@ -850,32 +1393,79 @@ def run_vrf_export(
         gltf_format=gltf_format,
         recursive=recursive,
         threads=threads,
-        vpk_filepath=vpk_filepath,
+        vpk_filepath=vpk_filepaths,
         extra_filters=extra_filters,
+        mode=mode,
     )
-    rc = _stream_subprocess(args, on_log)
+    # A huge filter list can still push one command line past the Windows
+    # 32k limit (WinError 206 at Popen). Split the -f tokens across several
+    # VRF passes into the same staging dir — outputs are per-file, so the
+    # passes compose.
+    export_cmds = [args]
+    if "-f" in args:
+        f_idx = args.index("-f")
+        base_args = args[:f_idx] + args[f_idx + 2:]
+        tokens = args[f_idx + 1].split(",")
+        chunks = _split_filters_for_cmdline(base_args, tokens)
+        if len(chunks) > 1:
+            on_log(
+                f"{len(tokens)} filter path(s) exceed one command line; "
+                f"splitting the export into {len(chunks)} passes"
+            )
+            export_cmds = [base_args + ["-f", ",".join(c)] for c in chunks]
+    rc = 0
+    for i, cmd in enumerate(export_cmds, start=1):
+        if len(export_cmds) > 1:
+            on_log(f"Export pass {i}/{len(export_cmds)}")
+        pass_rc = _stream_subprocess(cmd, on_log)
+        rc = rc or pass_rc
     if rc != 0:
         on_log(f"VRF exited with code {rc}")
         return rc
 
-    if not keep_stray_images:
-        purge_stray_images_next_to_gltf(staging_dir, on_log)
-    else:
-        on_log("Skipping stray-image cleanup (keep_stray_images=True)")
+    # Stray-image cleanup only applies in model mode (VMAT mode writes no
+    # .gltf, so there are no strays sitting next to one).
+    if mode == "models":
+        if flatten_materials_root:
+            on_log(
+                "Flatten-to-root enabled: stray images will be swept into "
+                "materialsrc/ root (stray-image option overridden)"
+            )
+        elif not keep_stray_images:
+            purge_stray_images_next_to_gltf(staging_dir, on_log)
+        else:
+            on_log("Skipping stray-image cleanup (keep_stray_images=True)")
 
     # Source 2 material groups → Source 1 $texturegroup. Dump them now (while
     # still operating against the VPK) and write JSON sidecars next to each
     # .gltf in staging so reorganize carries them into modelsrc/ for the SMD
-    # batch tool to consume.
-    if is_vpk(input_path) and vpk_filepath:
+    # batch tool to consume. Skins are a model concept — skip in VMAT mode.
+    if mode == "models" and is_vpk(input_path) and vpk_filepaths:
         mg = dump_material_groups(
             vrf_exe=vrf_exe,
             input_path=input_path,
-            vpk_filepath=expand_vpk_filter(vpk_filepath),
+            vpk_filepath=",".join(expand_vpk_filters(vpk_filepaths)),
             on_log=on_log,
         )
         if mg:
             write_skin_sidecars(staging_dir, mg, on_log)
+        # Physics ground truth for ragdolls/jointed props: the PHYS block has
+        # the real per-bone shapes and joint limits that the merged
+        # `_physics.glb` loses. Saved as `<stem>_phys.txt` beside the glTF.
+        pb = dump_phys_blocks(
+            vrf_exe=vrf_exe,
+            input_path=input_path,
+            vpk_filepath=",".join(expand_vpk_filters(vpk_filepaths)),
+            on_log=on_log,
+        )
+        if pb:
+            write_phys_sidecars(staging_dir, pb, on_log)
+
+    # Detect Source 2 addon-package layouts (models/<pkg>/{models,materials}/)
+    # now, while staging still reflects the VPK structure — the hoist below is
+    # about to move the inner materials/ trees up and erase the signature. The
+    # actual flatten is deferred to the very end (after the purges).
+    nested_packages = detect_nested_package_dirs(staging_dir)
 
     # Half-Life Alyx-style materials live inside each model's folder; route
     # them into the top-level materials/ before reorganize so they end up in
@@ -888,4 +1478,16 @@ def run_vrf_export(
     purge_unreferenced_textures(output_dir / "materialsrc", on_log)
     purge_compiled_texture_images(output_dir / "materialsrc", on_log)
     purge_compiled_textures(output_dir / "materialsrc", on_log)
+
+    # Final cosmetic pass: collapse the nested addon-package layout to a clean
+    # <pkg>/ root. Deferred to here so the ref-matching purges above ran on the
+    # `models/`-prefixed layout they understand.
+    if nested_packages:
+        flatten_nested_packages(output_dir, nested_packages, on_log)
+
+    # Optional final layout: collapse every image + .vmat into a flat
+    # materialsrc/ root. Runs dead last, after all purges and package flattening
+    # so it sweeps up whatever survived (plus the strays under modelsrc/).
+    if flatten_materials_root:
+        flatten_materials_to_root(output_dir, on_log)
     return rc

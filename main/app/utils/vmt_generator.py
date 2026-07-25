@@ -102,10 +102,32 @@ def generate_fakepbr_vmt(
     envmap: str = "env_cubemap",
     stats: Optional[Any] = None,
     has_envmap_mask: bool = True,
+    emit_phong: bool = True,
+    emit_envmap: bool = True,
+    emit_bumpmap: bool = True,
     custom_params: Optional[Dict[str, Any]] = None,
-    tint_mode_used: str = "off"
+    tint_mode_used: str = "off",
+    surfaceprop: str = "",
+    tintable: bool = False,
 ) -> bool:
-    """Generate a stock-shader Fake PBR VMT using Phong + envmap fakery."""
+    """Generate a stock-shader Fake PBR VMT using Phong + envmap fakery.
+
+    `emit_phong` / `emit_envmap` / `emit_bumpmap` gate the corresponding
+    shader-parameter blocks. Set to False when the source material had no
+    roughness/metallic signal (phong/envmap) or shipped a flat normal
+    (bumpmap) — the caller should also be skipping the matching VTFs so
+    the VMT doesn't reference files that don't exist.
+
+    `tintable` enables the colorable-prop block ($blendtintbybasealpha):
+    the caller must have baked the Source 2 tint mask into the basetexture
+    alpha (white = tinted). The entity's render color (GMod Color tool /
+    Hammer rendercolor) then tints only the masked regions — no material
+    proxy needed; the engine feeds render color into VertexLitGeneric's
+    diffuse modulation on its own. Silently skipped when the target branch
+    lacks the parameter, the shader isn't VertexLitGeneric, or the VMT
+    carries a conflicting param ($selfillum / $translucent / $alphatest all
+    break the shader combo — see the VDC $blendtintbybasealpha bug list).
+    """
     caps = _capabilities_for(target_branch)
     is_vertex_lit = shader == "VertexLitGeneric"
     is_lightmapped = shader == "LightmappedGeneric"
@@ -134,10 +156,11 @@ def generate_fakepbr_vmt(
 
     params: Dict[str, Any] = {
         "\"$basetexture\"": base_texture,
-        "\"$bumpmap\"": bumpmap,
     }
+    if emit_bumpmap:
+        params["\"$bumpmap\""] = bumpmap
 
-    if is_vertex_lit or (is_lightmapped and caps.get("lightmapped_phong", False)):
+    if emit_phong and (is_vertex_lit or (is_lightmapped and caps.get("lightmapped_phong", False))):
         params.update({
             "\"$phong\"": "1",
             "\"$phongexponenttexture\"": phong_texture,
@@ -151,14 +174,18 @@ def generate_fakepbr_vmt(
         if caps.get("phong_exponent_factor", False):
             params["\"$phongexponentfactor\""] = "90"
 
-    if not b_is_rough_dielectric:
+    if emit_envmap and not b_is_rough_dielectric:
         params.update({
             "\"$envmap\"": envmap,
             "\"$envmaptint\"": _format_vec3([envmaptint_scalar] * 3),
             "\"$envmapcontrast\"": "0.5",
             "\"$envmapsaturation\"": "0.8",
-            "\"$normalmapalphaenvmapmask\"": "1",
         })
+        # $normalmapalphaenvmapmask reads the bumpmap's alpha; only set it
+        # when a bumpmap is actually emitted, otherwise the engine logs a
+        # missing-texture lookup and the mask path is dead.
+        if emit_bumpmap:
+            params["\"$normalmapalphaenvmapmask\""] = "1"
         if has_envmap_mask:
             params["\"$envmapmask\""] = envmask
         if caps.get("envmap_fresnel_float", False):
@@ -176,14 +203,43 @@ def generate_fakepbr_vmt(
             "\"$model\"": "1",
         })
 
+    if surfaceprop and str(surfaceprop).strip():
+        params["\"$surfaceprop\""] = str(surfaceprop).strip()
+
     if custom_params:
         params.update(custom_params)
+
+    # Tintable-prop block. Evaluated after the custom-params merge so the
+    # conflict checks see the final param set.
+    tint_status = ""
+    if tintable:
+        conflicts = [
+            key for key in ('"$selfillum"', '"$translucent"', '"$alphatest"')
+            if str(params.get(key, "0")).strip() == "1"
+        ]
+        if not caps.get("blend_tint_by_base_alpha", False):
+            tint_status = f"skipped (target '{target_branch}' lacks $blendtintbybasealpha)"
+        elif not is_vertex_lit:
+            tint_status = f"skipped (shader '{shader}' — $blendtintbybasealpha is VertexLitGeneric-only)"
+        elif conflicts:
+            # $selfillum / $translucent / $alphatest all break the
+            # $blendtintbybasealpha shader combo (VDC bug list). The prop
+            # still tints uniformly via render color at runtime.
+            tint_status = f"skipped (conflicts with {', '.join(c.strip(chr(34)) for c in conflicts)})"
+        else:
+            # $color2 white + coloroverbase 0 are engine defaults, written
+            # out so the tint contract is visible (and tweakable) in the VMT.
+            params['"$color2"'] = "[1 1 1]"
+            params['"$blendtintbybasealpha"'] = "1"
+            params['"$blendtintcoloroverbase"'] = "0"
+            tint_status = "on (mask in basetexture alpha; white = tinted)"
 
     section_order = [
         ("Textures", ["\"$basetexture\"", "\"$bumpmap\"", "\"$phongexponenttexture\""]),
         ("Phong", ["\"$phong\"", "\"$phongboost\"", "\"$phongexponentfactor\"", "\"$phongtint\"", "\"$phongalbedotint\"", "\"$phongfresnelranges\""]),
         ("Environment Map", ["\"$envmap\"", "\"$envmapmask\"", "\"$envmaptint\"", "\"$envmapcontrast\"", "\"$envmapsaturation\"", "\"$envmapfresnel\"", "\"$normalmapalphaenvmapmask\"", "\"$envmaplightscale\""]),
         ("Rimlight", ["\"$rimlight\"", "\"$rimlightexponent\"", "\"$rimlightboost\"", "\"$rimmask\""]),
+        ("Tint (colorable prop)", ["\"$color2\"", "\"$blendtintbybasealpha\"", "\"$blendtintcoloroverbase\""]),
         ("Self-Illumination", ["\"$selfillum\"", "\"$selfillummask\"", "\"$selfillumtint\"", "\"$selfillummaskscale\""]),
         ("Emissive Blend", [
             "\"$EmissiveBlendEnabled\"",
@@ -194,7 +250,7 @@ def generate_fakepbr_vmt(
             "\"$EmissiveBlendTint\"",
             "\"$EmissiveBlendScrollVector\"",
         ]),
-        ("Surface", ["\"$halflambert\"", "\"$model\""]),
+        ("Surface", ["\"$surfaceprop\"", "\"$halflambert\"", "\"$model\""]),
     ]
 
     emitted = set()
@@ -204,6 +260,7 @@ def generate_fakepbr_vmt(
         f"// Target: {target_branch}; Shader: {shader}",
         f"// Fake-PBR approximation: metallic={avg_metallic:.3f}; roughness={avg_roughness:.3f}; not energy-conserving",
         f"// Phong tint mode: {tint_mode_used}",
+        *([f"// Tintable prop: {tint_status}"] if tint_status else []),
         f"// Date: {datetime.utcnow().isoformat(timespec='seconds')}Z",
         "",
         f'"{shader}"',

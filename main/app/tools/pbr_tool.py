@@ -5,13 +5,12 @@ This tool centralizes Exo PBR and Fake PBR into a single UI with a simple
 dropdown to choose the processing mode. Default mode is Fake PBR.
 """
 
-from PySide6.QtWidgets import (
-    QWidget, QHBoxLayout, QLabel, QComboBox, QStackedWidget, QSplitter
-)
+from PySide6.QtWidgets import QComboBox, QLabel, QStackedWidget
 
 from .base_tool import BaseTool
 from .exo_pbr_tool import ExoPBRTool
 from .fake_pbr_tool import FakePBRTool
+from app.ui import widgets
 
 
 class PBRTool(BaseTool):
@@ -20,31 +19,22 @@ class PBRTool(BaseTool):
     def __init__(self):
         super().__init__("PBR Tool")
         self._build_ui()
-        self._hide_base_log()
+        # Child tools provide their own log panes, so hide the shared one.
+        self.set_log_visible(False)
 
     def _build_ui(self):
-        header = QWidget()
-        header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(0, 0, 0, 0)
-
-        label = QLabel("PBR Mode:")
         self.mode_combo = QComboBox()
         self.mode_combo.addItem("Fake PBR")
         self.mode_combo.addItem("Exo PBR")
         self.mode_combo.setCurrentIndex(0)
-
-        header_layout.addWidget(label)
-        header_layout.addWidget(self.mode_combo)
-        header_layout.addStretch()
-
-        self.content_layout.addWidget(header)
+        self.content_layout.addLayout(
+            widgets.hbox(QLabel("PBR Mode:"), self.mode_combo, stretch_after=True))
 
         self.stack = QStackedWidget()
         self.fake_tool = FakePBRTool()
         self.exo_tool = ExoPBRTool()
         self.stack.addWidget(self.fake_tool)
         self.stack.addWidget(self.exo_tool)
-
         self.content_layout.addWidget(self.stack)
 
         self.mode_combo.currentIndexChanged.connect(self._on_mode_changed)
@@ -55,18 +45,6 @@ class PBRTool(BaseTool):
 
         # Default to Fake PBR
         self._on_mode_changed(0)
-
-    def _hide_base_log(self):
-        """Hide BaseTool logger since child tools provide their own logs."""
-        try:
-            logger_widget = self.log_output.parentWidget()
-            if logger_widget:
-                logger_widget.setVisible(False)
-            splitter = self.findChild(QSplitter)
-            if splitter:
-                splitter.setSizes([1, 0])
-        except Exception:
-            pass
 
     def _on_mode_changed(self, index: int):
         self.stack.setCurrentIndex(index)

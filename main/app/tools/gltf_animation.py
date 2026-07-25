@@ -80,11 +80,44 @@ class GltfClip:
 # Buffer + accessor reading
 # ---------------------------------------------------------------------------
 
-def load_buffer_bytes(gltf_data: dict, base_dir: Path) -> Optional[bytes]:
-    """Load buffer 0's bytes. Returns None for GLB or unresolvable buffers.
+# GLB binary container magic ("glTF") and chunk type tags.
+_GLB_MAGIC = 0x46546C67
+_GLB_CHUNK_BIN = 0x004E4942
 
-    Supports external .bin files and data URIs. GLB-embedded buffers
-    (the chunk after the JSON) are not supported by this first pass.
+
+def _read_glb_bin_chunk(glb_path: Path) -> Optional[bytes]:
+    """Return the BIN chunk bytes from a binary .glb container, or None.
+
+    A GLB is a 12-byte header followed by length-prefixed chunks; buffer 0's
+    bytes for a GLB-embedded buffer are the first BIN chunk (the one after
+    the JSON chunk). Reading it lets the skin / animation pipeline work for
+    .glb exactly as it does for .gltf + external .bin.
+    """
+    try:
+        with open(glb_path, 'rb') as f:
+            magic, _ver, _length = struct.unpack('<III', f.read(12))
+            if magic != _GLB_MAGIC:
+                return None
+            while True:
+                header = f.read(8)
+                if len(header) < 8:
+                    return None
+                chunk_len, chunk_type = struct.unpack('<II', header)
+                data = f.read(chunk_len)
+                if chunk_type == _GLB_CHUNK_BIN:
+                    return data
+                # Otherwise it's the JSON chunk (or padding); keep scanning.
+    except Exception:
+        return None
+
+
+def load_buffer_bytes(gltf_data: dict, base_dir: Path,
+                      glb_path: Optional[Path] = None) -> Optional[bytes]:
+    """Load buffer 0's bytes. Returns None for unresolvable buffers.
+
+    Supports external .bin files, base64 data URIs, and — when ``glb_path``
+    is given — the BIN chunk embedded in a binary .glb container (buffer 0
+    has no ``uri`` in that case).
     """
     buffers = gltf_data.get('buffers') or []
     if not buffers:
@@ -92,7 +125,9 @@ def load_buffer_bytes(gltf_data: dict, base_dir: Path) -> Optional[bytes]:
     buf = buffers[0]
     uri = buf.get('uri')
     if not uri:
-        # GLB-embedded buffer; out of scope for animation in this pass.
+        # GLB-embedded buffer: bytes live in the container's BIN chunk.
+        if glb_path is not None:
+            return _read_glb_bin_chunk(Path(glb_path))
         return None
     if uri.startswith('data:'):
         # data:application/octet-stream;base64,XXXX

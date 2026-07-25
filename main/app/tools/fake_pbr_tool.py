@@ -12,11 +12,12 @@ import numpy as np
 from pathlib import Path
 import json
 from datetime import datetime
+from PIL import Image
 
 from PySide6.QtWidgets import (
-    QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFileDialog,
+    QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QLineEdit, QGroupBox, QSlider, QDoubleSpinBox, QCheckBox,
-    QProgressBar, QFormLayout, QWidget, QComboBox, QTabWidget,
+    QFormLayout, QWidget, QComboBox, QTabWidget,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
     QSpinBox, QSplitter, QScrollArea, QSizePolicy, QGridLayout,
 )
@@ -25,6 +26,9 @@ from PySide6.QtGui import QColor, QBrush
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Event
 
+
+# Shared file-dialog filter for the single-material image pickers.
+IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.tga *.bmp);;All Files (*.*)"
 
 _ROW_OK_BRUSH = QBrush(QColor(76, 175, 80, 90))
 _ROW_FAIL_BRUSH = QBrush(QColor(244, 67, 54, 90))
@@ -41,9 +45,14 @@ def _paint_table_row(table, row: int, success: bool) -> None:
             item.setBackground(brush)
 
 from .base_tool import BaseTool
+from ..core.tool_defaults import (
+    default_generate_mipmaps,
+    default_material_path,
+    default_max_parallel,
+)
 from ..utils.vtf_encoder import VTFEncoder, VTFEncoderError
 from ..utils.helpers import get_config_dir
-from ..utils.image_processing import load_image, resize_to_match, to_uint8
+from ..utils.image_processing import load_image, load_scalar_image, resize_to_match, to_uint8
 from ..utils.pbr_processing import (
     process_fakepbr_base_texture,
     pack_normal_with_phong_mask,
@@ -93,6 +102,15 @@ class PBRInputs:
     ao_constant: Optional[Tuple[float, float, float, float]] = None
     translucency_constant: Optional[Tuple[float, float, float, float]] = None
     selfillum_constant: Optional[Tuple[float, float, float, float]] = None
+    # Model-tint mask (Source 2 TextureTintMask): single channel, white =
+    # the pixel takes the entity's render color. Baked into the basetexture
+    # alpha so the VMT can enable $blendtintbybasealpha (GMod colorable
+    # props). Ignored when transparency already owns the alpha channel.
+    tintmask: Optional[str] = None
+    # Source 2 g_flModelTintAmount — scales the mask before baking (S2
+    # defaults to 1.0 when absent). 0 disables tinting entirely, which the
+    # vmat-side parser already treats as "not tintable".
+    model_tint_amount: Optional[float] = None
 
 
 @dataclass
@@ -106,6 +124,9 @@ class ProcessingOptions:
     target_branch: str = "gmod"
     shader: str = "VertexLitGeneric"
     envmap: str = "env_cubemap"
+    # Optional $surfaceprop written into the generated VMT (e.g. "metal",
+    # "concrete", "flesh"). Empty = omit the parameter entirely.
+    surfaceprop: str = ""
     metal_diffuse_suppression: float = 0.7
     envmask_gamma: float = 1.5
     invert_green: bool = False
@@ -127,22 +148,33 @@ class ProcessingOptions:
     translucent: bool = False
     alphatest: bool = False
     # Glow technique used when a selfillum mask is supplied via PBRInputs.
-    # "selfillum"     — emit $selfillum 1 / $selfillummask. Standard, but
-    #                   incompatible with $translucent on some branches and
-    #                   may collide with $phong on bumped materials.
-    # "emissiveblend" — emit $EmissiveBlend* family. Plays nicely with
-    #                   $translucent and $phong and is the recommended
-    #                   technique on L4D2 / Alyx-port targets.
+    # "selfillum"              — emit $selfillum 1 / $selfillummask. Standard,
+    #                            but incompatible with $translucent on some
+    #                            branches and may collide with $phong.
+    # "emissiveblend"          — emit $EmissiveBlend* family with the dedicated
+    #                            _selfillum map as the emission source. Plays
+    #                            nicely with $translucent / $phong and is the
+    #                            recommended technique on L4D2 / Alyx targets.
+    # "emissiveblend_basecolor"— same EmissiveBlend path, but the emission
+    #                            color is the base _color map (like $selfillum
+    #                            glows the diffuse) while the _selfillum map
+    #                            acts as the where-it-glows mask. Use when the
+    #                            emission should match the diffuse color but
+    #                            needs EmissiveBlend's stronger output.
     glow_mode: str = "selfillum"
-    # When True, missing normal/roughness/metallic maps are filled in with
-    # blank "neutral" data instead of failing the conversion. Useful for
-    # quick-and-dirty ports of vmats that ship only a colour map.
-    #   Normal     → flat tangent-space (0.5, 0.5, 1.0)
-    #   Roughness  → uniform 0.5 (mid)
-    #   Metallic   → uniform 0.0 (dielectric)
-    # The vmat's g_flMetalness / g_flRoughness scalars still take priority
-    # over the blank fallback when present.
+    # When True, a missing normal map is filled with a flat tangent-space
+    # (0.5, 0.5, 1.0) so the conversion doesn't hard-error on vmats that
+    # ship only a colour map. Roughness/metallic are NOT auto-synthesised:
+    # if the vmat is silent on them, the phong/envmap pipeline is skipped
+    # entirely (see emit_phong/emit_envmap below) — emitting flat-default
+    # specular maps just bloats disk and fakes a response that the source
+    # material never asked for.
     synthesize_missing_maps: bool = False
+    # Maximum working-resolution edge in pixels. When > 0, any input whose
+    # longest side exceeds clamp_size is scaled down (aspect preserved)
+    # before the PBR math runs. 0 = off (use native resolution). Only
+    # downsizes — textures already at or below the cap pass through.
+    clamp_size: int = 0
 
 
 class FakePBRProcessor:
@@ -155,6 +187,11 @@ class FakePBRProcessor:
         self.encoder = VTFEncoder()
         self.log_callback = None  # Set by ProcessingThread for GUI logging
         self._cancel_cb: Optional[Callable[[], bool]] = None
+        # Per-output clamps from global Preferences. Computed once per
+        # processor — re-reading settings on every encode would dominate
+        # the cost on small inputs. Empty dict when the user hasn't enabled
+        # overrides (so the per-tool Clamp Size combo still applies).
+        self._per_output_clamps = self._load_per_output_clamps()
 
     def set_canceller(self, cb: Optional[Callable[[], bool]]):
         """Provide a callback that returns True when a cancellation is requested."""
@@ -169,6 +206,151 @@ class FakePBRProcessor:
         print(message)
         if self.log_callback:
             self.log_callback(message)
+
+    @staticmethod
+    def _load_per_output_clamps() -> Dict[str, int]:
+        """Read the FakePBR per-output clamp overrides from global Preferences.
+
+        Returns an empty dict when the user hasn't enabled overrides — the
+        caller treats that as "fall through to the per-tool Clamp Size."
+        Wrapped in try/except so a corrupted settings file can't break
+        conversions (we just silently fall through).
+        """
+        try:
+            from app.core.settings import Settings
+            return Settings().get_fakepbr_overrides()
+        except Exception:
+            return {}
+
+    @staticmethod
+    def _clamp_output_array(arr: Optional[np.ndarray], max_edge: int) -> Optional[np.ndarray]:
+        """Downscale a uint8 output array so its longest edge ≤ max_edge.
+
+        Aspect ratio preserved; arrays already at or below the cap pass
+        through unchanged. Handles 2-D grayscale, 3-D RGB, and 3-D RGBA
+        uint8 inputs — anything else is returned as-is on the theory that
+        we'd rather skip the clamp than corrupt the channel layout.
+
+        RGBA inputs are split into RGB + A and resized independently, then
+        recombined. PIL's BILINEAR resize on a combined RGBA buffer
+        premultiplies RGB by alpha during interpolation — for our normal
+        maps that pack the phong mask into alpha, flat dielectric areas
+        (alpha = 0) lose their RGB normal data entirely and decode as
+        pure black. Splitting the channels avoids that destruction.
+        """
+        if arr is None or max_edge <= 0:
+            return arr
+        h, w = arr.shape[:2]
+        long_edge = max(h, w)
+        if long_edge <= max_edge:
+            return arr
+        scale = max_edge / float(long_edge)
+        new_h = max(1, int(round(h * scale)))
+        new_w = max(1, int(round(w * scale)))
+        if arr.ndim == 2:
+            img = Image.fromarray(arr, mode="L").resize(
+                (new_w, new_h), Image.Resampling.BILINEAR
+            )
+            return np.asarray(img, dtype=arr.dtype).copy()
+        if arr.ndim == 3 and arr.shape[2] == 3:
+            img = Image.fromarray(arr, mode="RGB").resize(
+                (new_w, new_h), Image.Resampling.BILINEAR
+            )
+            return np.asarray(img, dtype=arr.dtype).copy()
+        if arr.ndim == 3 and arr.shape[2] == 4:
+            rgb = Image.fromarray(arr[:, :, :3], mode="RGB").resize(
+                (new_w, new_h), Image.Resampling.BILINEAR
+            )
+            alpha = Image.fromarray(arr[:, :, 3], mode="L").resize(
+                (new_w, new_h), Image.Resampling.BILINEAR
+            )
+            rgb_arr = np.asarray(rgb, dtype=arr.dtype)
+            alpha_arr = np.asarray(alpha, dtype=arr.dtype)[:, :, np.newaxis]
+            return np.concatenate([rgb_arr, alpha_arr], axis=2).copy()
+        return arr
+
+    def _working_cap_from_outputs(
+        self,
+        emit_phong: bool,
+        emit_envmap: bool,
+        b_has_selfillum: bool,
+    ) -> int:
+        """Largest per-output cap among the outputs this run will actually emit.
+
+        Everything we compute is downscaled to its per-output cap immediately
+        before encoding, so running the PBR math above the largest of those caps
+        buys nothing and costs the square of the ratio in both memory and time —
+        a 4K source with 2048 caps burns 4x the RAM to produce byte-comparable
+        output. Returns 0 ("no cap, use native resolution") when overrides are
+        off or when any emitted output is individually uncapped, since that
+        output would genuinely lose detail.
+        """
+        caps = self._per_output_clamps
+        if not caps:
+            return 0
+
+        # 'normal' is always included: whether the bumpmap survives the
+        # flat-normal check isn't known yet, and over-including a cap can only
+        # raise the working resolution, never lower it below what's needed.
+        keys = ["color", "normal"]
+        if emit_phong:
+            keys.append("phong")
+        if emit_envmap:
+            keys.append("envmask")
+        if b_has_selfillum:
+            keys.append("selfillum")
+
+        values = [int(caps.get(key, 0) or 0) for key in keys]
+        if any(value <= 0 for value in values):
+            return 0
+        return max(values)
+
+    def _load_cap(self, inputs: PBRInputs) -> int:
+        """Longest-edge cap to apply while the inputs are still 8-bit PIL data.
+
+        The working resolution is bounded by the tool's Clamp Size and by the
+        per-output caps, and both are known before a single pixel is decoded —
+        so there is no reason to ever materialise a 4096² float32 buffer for a
+        material that will be computed at 2048². Presence of a texture path or
+        vmat constant is enough to predict the emit flags here; a path that
+        later fails to load only makes this cap more generous, never tighter,
+        because the caps combine with max().
+        """
+        b_has_roughness = inputs.roughness is not None or inputs.roughness_constant is not None
+        b_has_metallic = inputs.metallic is not None or inputs.metallic_constant is not None
+        output_cap = self._working_cap_from_outputs(
+            emit_phong=b_has_roughness or b_has_metallic,
+            emit_envmap=b_has_metallic,
+            b_has_selfillum=inputs.selfillum is not None or inputs.selfillum_constant is not None,
+        )
+        caps = [cap for cap in (output_cap, int(self.options.clamp_size or 0)) if cap > 0]
+        return min(caps) if caps else 0
+
+    def _apply_output_clamp(
+        self,
+        arr: Optional[np.ndarray],
+        output_key: str,
+    ) -> Optional[np.ndarray]:
+        """Apply the per-output clamp for `output_key` ('color', 'normal',
+        'phong', 'envmask') and emit a log line when downscaling happens.
+
+        No-op when overrides are disabled or this output's cap is 0.
+        """
+        if arr is None or not self._per_output_clamps:
+            return arr
+        cap = int(self._per_output_clamps.get(output_key, 0) or 0)
+        if cap <= 0:
+            return arr
+        h, w = arr.shape[:2]
+        if max(h, w) <= cap:
+            return arr
+        clamped = self._clamp_output_array(arr, cap)
+        if clamped is not None:
+            self.log(
+                f"  → Per-output override: {output_key} {w}x{h} → "
+                f"{clamped.shape[1]}x{clamped.shape[0]} (cap {cap})"
+            )
+        return clamped
 
     @staticmethod
     def _uniform_rgba_image(rgba: Tuple[float, float, float, float]) -> np.ndarray:
@@ -207,7 +389,10 @@ class FakePBRProcessor:
             self._check_cancel()
             # Load all inputs
             self.log("[FakePBR] Loading input textures...")
-            color_data = load_image(inputs.color)
+            load_cap = self._load_cap(inputs)
+            if load_cap > 0:
+                self.log(f"  → Decoding inputs at ≤{load_cap}px longest edge (working-resolution cap)")
+            color_data = load_image(inputs.color, max_edge=load_cap)
             if color_data is not None:
                 self.log(f"  ✓ Loaded color map: {os.path.basename(inputs.color)}")
             elif inputs.color_constant is not None:
@@ -222,7 +407,7 @@ class FakePBRProcessor:
                 )
             self._check_cancel()
             
-            normal_data = load_image(inputs.normal)
+            normal_data = load_image(inputs.normal, max_edge=load_cap)
             if normal_data is not None:
                 self.log(f"  ✓ Loaded normal map: {os.path.basename(inputs.normal)}")
             elif self.options.synthesize_missing_maps:
@@ -236,7 +421,11 @@ class FakePBRProcessor:
                 self.log("  ✓ Synthesised blank flat normal (no bump, full opacity)")
             self._check_cancel()
 
-            ao_data = load_image(inputs.ao)
+            # Scalar roles (AO / roughness / metallic / translucency / tint) are
+            # read as single-channel maps: every consumer takes channel 0, and
+            # expanding them to RGBA float32 costs 4x the memory for nothing —
+            # 256 MiB instead of 64 MiB per map at 4K.
+            ao_data = load_scalar_image(inputs.ao, max_edge=load_cap)
             if ao_data is not None:
                 self.log(f"  ✓ Loaded AO map: {os.path.basename(inputs.ao)}")
             elif inputs.ao_constant is not None:
@@ -249,35 +438,41 @@ class FakePBRProcessor:
                 self.log("  ℹ No AO map provided (will use default)")
             self._check_cancel()
 
-            roughness_data = load_image(inputs.roughness)
+            # Roughness / metallic are *only* synthesised when the source
+            # material explicitly supplied a value (texture path or vmat scalar
+            # constant). Without a real signal we leave the data None and skip
+            # the phong/envmap pipeline below — emitting fake specular maps
+            # from arbitrary defaults invents reflective behaviour the source
+            # never authored.
+            roughness_data = load_scalar_image(inputs.roughness, max_edge=load_cap)
             if roughness_data is not None:
                 self.log(f"  ✓ Loaded roughness map: {os.path.basename(inputs.roughness)}")
             elif inputs.roughness_constant is not None:
                 value = float(np.clip(inputs.roughness_constant, 0.0, 1.0))
                 roughness_data = np.full((4, 4, 1), value, dtype=np.float32)
                 self.log(f"  ✓ Synthesised uniform roughness from g_flRoughness = {value:.3f}")
-            elif self.options.synthesize_missing_maps:
-                roughness_data = np.full((4, 4, 1), 0.5, dtype=np.float32)
-                self.log("  ✓ Synthesised blank roughness (uniform 0.5)")
             else:
-                self.log("  ℹ No roughness map provided (will use default: 0.5)")
+                self.log("  ℹ No roughness signal — phong path will be evaluated against metallic only")
             self._check_cancel()
 
-            metallic_data = load_image(inputs.metallic)
+            metallic_data = load_scalar_image(inputs.metallic, max_edge=load_cap)
             if metallic_data is not None:
                 self.log(f"  ✓ Loaded metallic map: {os.path.basename(inputs.metallic)}")
             elif inputs.metallic_constant is not None:
                 value = float(np.clip(inputs.metallic_constant, 0.0, 1.0))
                 metallic_data = np.full((4, 4, 1), value, dtype=np.float32)
                 self.log(f"  ✓ Synthesised uniform metallic from g_flMetalness = {value:.3f}")
-            elif self.options.synthesize_missing_maps:
-                metallic_data = np.full((4, 4, 1), 0.0, dtype=np.float32)
-                self.log("  ✓ Synthesised blank metallic (uniform 0.0 dielectric)")
             else:
-                self.log("  ℹ No metallic map provided (will use dielectric)")
+                self.log("  ℹ No metallic signal — envmap path will be skipped")
             self._check_cancel()
 
-            translucency_data = load_image(inputs.translucency)
+            # Decide which optional output paths to emit. "Real" means the
+            # vmat (or manual input) supplied the data; defaults / synth do
+            # not count. Phong wants any specular signal; envmap wants metal.
+            emit_phong = roughness_data is not None or metallic_data is not None
+            emit_envmap = metallic_data is not None
+
+            translucency_data = load_scalar_image(inputs.translucency, max_edge=load_cap)
             if translucency_data is not None:
                 self.log(f"  ✓ Loaded translucency map: {os.path.basename(inputs.translucency)}")
             elif inputs.translucency_constant is not None:
@@ -289,7 +484,22 @@ class FakePBRProcessor:
                 )
             self._check_cancel()
 
-            selfillum_data = load_image(inputs.selfillum)
+            tintmask_data = load_scalar_image(inputs.tintmask, max_edge=load_cap)
+            if tintmask_data is not None:
+                self.log(f"  ✓ Loaded tint mask: {os.path.basename(inputs.tintmask)}")
+                # Transparency owns the basetexture alpha channel —
+                # $blendtintbybasealpha and $translucent/$alphatest both read
+                # it and Source 1 can't honor both. Transparency wins; the
+                # prop still tints uniformly via render color at runtime.
+                if self.options.translucent or self.options.alphatest:
+                    tintmask_data = None
+                    self.log(
+                        "  ↷ Material is transparent — dropping tint mask "
+                        "(basetexture alpha is owned by $translucent/$alphatest)"
+                    )
+            self._check_cancel()
+
+            selfillum_data = load_image(inputs.selfillum, max_edge=load_cap)
             if selfillum_data is not None:
                 self.log(f"  ✓ Loaded selfillum mask: {os.path.basename(inputs.selfillum)}")
             elif inputs.selfillum_constant is not None:
@@ -310,37 +520,53 @@ class FakePBRProcessor:
 
             # Determine target resolution: use LARGEST dimension from all inputs
             # This prevents downsampling high-res textures
-            all_inputs = [color_data, normal_data, ao_data, roughness_data, metallic_data, translucency_data, selfillum_data]
+            all_inputs = [color_data, normal_data, ao_data, roughness_data, metallic_data, translucency_data, selfillum_data, tintmask_data]
             max_height = max(img.shape[0] for img in all_inputs if img is not None)
             max_width = max(img.shape[1] for img in all_inputs if img is not None)
             height, width = max_height, max_width
-            
+
+            clamp = int(self.options.clamp_size or 0)
+            # A per-output cap is also an upper bound on useful working
+            # resolution — see _working_cap_from_outputs. Whichever bound is
+            # tighter wins.
+            output_cap = self._working_cap_from_outputs(
+                emit_phong, emit_envmap, selfillum_data is not None
+            )
+            b_capped_by_outputs = output_cap > 0 and (clamp <= 0 or output_cap < clamp)
+            if b_capped_by_outputs:
+                clamp = output_cap
+            if clamp > 0 and max(height, width) > clamp:
+                scale = clamp / float(max(height, width))
+                height = max(1, int(round(height * scale)))
+                width = max(1, int(round(width * scale)))
+                reason = "largest per-output cap" if b_capped_by_outputs else "max edge"
+                self.log(f"[FakePBR] Clamping working resolution to {width}x{height} ({reason} {clamp})")
+
             self.log(f"[FakePBR] Processing at resolution: {width}x{height}")
+            if self._per_output_clamps:
+                caps_summary = ", ".join(
+                    f"{name}={cap}" if cap > 0 else f"{name}=off"
+                    for name, cap in self._per_output_clamps.items()
+                )
+                self.log(f"[FakePBR] Per-output caps active (Preferences): {caps_summary}")
             self.log(f"[FakePBR] AO Strength: {self.options.ao_strength:.2f}")
             self.log(f"[FakePBR] Gloss Gamma: {self.options.gloss_gamma:.2f}")
             self.log(f"[FakePBR] Target Branch: {self.options.target_branch}")
             self._check_cancel()
             
-            # Resize all inputs to match target resolution
-            color_data = resize_to_match(color_data, height, width, "color")
-            normal_data = resize_to_match(normal_data, height, width, "normal")
-            ao_data = resize_to_match(ao_data, height, width, "AO")
-            roughness_data = resize_to_match(roughness_data, height, width, "roughness")
-            metallic_data = resize_to_match(metallic_data, height, width, "metallic")
-            translucency_data = resize_to_match(translucency_data, height, width, "translucency")
-            selfillum_data = resize_to_match(selfillum_data, height, width, "selfillum")
-            self._check_cancel()
+            # Heavy per-pixel work (resize + buffer generation + VTF encoding)
+            # only matters when we're actually emitting VTFs. When VTF output
+            # is disabled the user is almost always iterating on the VMT alone
+            # (e.g. tuning emission / glow) against an already-exported texture
+            # set, so skip the expensive computation entirely and drive the
+            # VMT's emit flags + material stats from input *presence* alone.
+            # This turns VMT-only re-runs from seconds into milliseconds.
+            compute_buffers = self.options.generate_vtf
 
-            stats = compute_fakepbr_material_stats(roughness_data, metallic_data, height, width)
-
-            # Process base texture
-            self.log(f"[FakePBR] Processing base texture...")
-            self.log(f"  → Baking AO with power curve (strength: {self.options.ao_strength:.2f})")
-            self.log(f"  → Darkening metallic diffuse regions")
-            if translucency_data is not None:
-                self.log(f"  → Baking opacity into base texture alpha")
             # Determine whether the target VMT will emit $phongalbedotint, in
-            # which case we run the matching tint-aware mask compensation.
+            # which case the bakes run the matching tint-aware mask compensation.
+            # Cheap (dict lookup) and also stamped into the VMT header, so it is
+            # computed on both the full and VMT-only paths.
             from ..utils.vmt_generator import SOURCE1_TARGET_CAPABILITIES as _S1_CAPS
             target_caps = _S1_CAPS.get(self.options.target_branch, _S1_CAPS.get("hl2", {}))
             tint_mode_active = self.options.phong_tint_mode if target_caps.get("phong_albedo_tint", False) else "off"
@@ -350,93 +576,237 @@ class FakePBRProcessor:
                     f"phong tint mode forced off."
                 )
 
-            base_texture = process_fakepbr_base_texture(
-                color_data,
-                ao_data,
-                metallic_data,
-                self.options.ao_strength,
-                self.options.metal_diffuse_suppression,
-                translucency=translucency_data,
-                colored_metal_relief=self.options.colored_metal_relief if tint_mode_active != "off" else 0.0,
+            # Detect a flat tangent-space normal (RGB ≈ 128, 128, 255). When the
+            # source vmat doesn't author bump detail — or synth filled in the
+            # default flat — there's no point referencing a $bumpmap. This drives
+            # emit_bumpmap and is resolution-independent, so it runs regardless of
+            # whether the buffers below get built.
+            normal_rgb_check = np.clip(normal_data[:, :, :3], 0.0, 1.0)
+            flat_target = np.array([0.5, 0.5, 1.0], dtype=np.float32)
+            normal_is_flat = bool(
+                np.abs(normal_rgb_check - flat_target).max() < (2.0 / 255.0)
             )
-            self.log(f"  ✓ Base texture processed")
-            self._check_cancel()
 
-            # Process normal map
-            self.log(f"[FakePBR] Packing normal map...")
-            self.log(f"  → Preserving RGB normal channels")
-            self.log(f"  → Computing bump alpha Phong mask (tint mode: {tint_mode_active})")
-            normal_texture = pack_normal_with_phong_mask(
-                normal_data,
-                ao_data,
-                metallic_data,
-                roughness_data,
-                self.options.invert_green,
-                phong_strength=self.options.phong_strength,
-                color=color_data if tint_mode_active != "off" else None,
-                tint_mode=tint_mode_active,
-                metal_diffuse_suppression=self.options.metal_diffuse_suppression,
-                colored_metal_relief=self.options.colored_metal_relief if tint_mode_active != "off" else 0.0,
-            )
-            self.log(f"  ✓ Normal map packed with Phong mask in alpha")
-            self._check_cancel()
+            # Stats feed the VMT's phong/envmap heuristics. compute_* only reads
+            # channel means, so it is valid on the un-resized inputs too.
+            stats = compute_fakepbr_material_stats(roughness_data, metallic_data, height, width)
 
-            # Process phong/gloss map
-            self.log(f"[FakePBR] Computing phong exponent texture...")
-            self.log(f"  → Converting roughness to gloss: (1-r)^{self.options.gloss_gamma:.2f}")
-            self.log(f"  → Packing R=exponent, G=metallic, A=rim")
-            phong_texture = create_phong_exponent_texture(
-                roughness_data, metallic_data, ao_data, self.options.gloss_gamma, height, width,
-                phong_strength=self.options.phong_strength
-            )
-            self.log(f"  ✓ Phong exponent texture computed")
-            self._check_cancel()
+            # Buffers default to "not built"; the encode stage below skips any
+            # that stay None. emit_bumpmap mirrors the full path's flat-normal
+            # drop — the normal is only kept when the phong mask needs a host.
+            base_texture = None
+            normal_texture = None
+            phong_texture = None
+            envmask_texture = None
+            emit_bumpmap = not (normal_is_flat and not emit_phong)
+            if not emit_bumpmap:
+                self.log(f"  ↷ Normal is flat (no bump detail) — dropping $bumpmap")
 
-            # Process colored envmap mask
-            self.log(f"[FakePBR] Computing colored envmap mask...")
-            self.log(f"  → Packing RGB colored metal tint / roughness intensity")
-            envmask_texture = create_colored_envmap_mask(
-                color_data,
-                ao_data,
-                metallic_data,
-                roughness_data,
-                self.options.envmask_gamma
-            )
-            self.log(f"  ✓ Colored envmap mask computed")
-            self._check_cancel()
-            
+            if not compute_buffers:
+                # VMT-only run: emit_phong / emit_envmap stay as derived from
+                # input presence (the content-based black-drops require the
+                # computed buffers we're skipping). The VMT may therefore
+                # reference textures from a prior full export — intentional, so
+                # emission/glow tweaks re-export instantly.
+                self.log(
+                    "[FakePBR] VTF generation disabled — skipping texture "
+                    "computation (VMT-only run)"
+                )
+            else:
+                # Resize all inputs to match target resolution
+                color_data = resize_to_match(color_data, height, width, "color")
+                normal_data = resize_to_match(normal_data, height, width, "normal")
+                ao_data = resize_to_match(ao_data, height, width, "AO")
+                roughness_data = resize_to_match(roughness_data, height, width, "roughness")
+                metallic_data = resize_to_match(metallic_data, height, width, "metallic")
+                translucency_data = resize_to_match(translucency_data, height, width, "translucency")
+                selfillum_data = resize_to_match(selfillum_data, height, width, "selfillum")
+                tintmask_data = resize_to_match(tintmask_data, height, width, "tint mask")
+                self._check_cancel()
+
+                # Process base texture
+                self.log(f"[FakePBR] Processing base texture...")
+                self.log(f"  → Baking AO with power curve (strength: {self.options.ao_strength:.2f})")
+                self.log(f"  → Darkening metallic diffuse regions")
+                if translucency_data is not None:
+                    self.log(f"  → Baking opacity into base texture alpha")
+                elif tintmask_data is not None:
+                    self.log(f"  → Baking tint mask into base texture alpha ($blendtintbybasealpha)")
+                base_texture = process_fakepbr_base_texture(
+                    color_data,
+                    ao_data,
+                    metallic_data,
+                    self.options.ao_strength,
+                    self.options.metal_diffuse_suppression,
+                    translucency=translucency_data,
+                    colored_metal_relief=self.options.colored_metal_relief if tint_mode_active != "off" else 0.0,
+                    tintmask=tintmask_data,
+                    tint_amount=inputs.model_tint_amount,
+                )
+                self.log(f"  ✓ Base texture processed")
+                self._check_cancel()
+
+                # Process normal map. The bump alpha carries the phong mask only
+                # when the phong path will be active; otherwise we pack flat alpha
+                # so the VTF stays well-formed without claiming a fake spec tint.
+                self.log(f"[FakePBR] Packing normal map...")
+                self.log(f"  → Preserving RGB normal channels")
+                if emit_phong:
+                    self.log(f"  → Computing bump alpha Phong mask (tint mode: {tint_mode_active})")
+                    normal_texture = pack_normal_with_phong_mask(
+                        normal_data,
+                        ao_data,
+                        metallic_data,
+                        roughness_data,
+                        self.options.invert_green,
+                        phong_strength=self.options.phong_strength,
+                        color=color_data if tint_mode_active != "off" else None,
+                        tint_mode=tint_mode_active,
+                        metal_diffuse_suppression=self.options.metal_diffuse_suppression,
+                        colored_metal_relief=self.options.colored_metal_relief if tint_mode_active != "off" else 0.0,
+                    )
+                    self.log(f"  ✓ Normal map packed with Phong mask in alpha")
+                else:
+                    normal_rgb = np.clip(normal_data[:, :, :3], 0.0, 1.0).copy()
+                    if self.options.invert_green:
+                        normal_rgb[:, :, 1] = 1.0 - normal_rgb[:, :, 1]
+                    flat_alpha = np.ones(normal_rgb.shape[:2], dtype=np.float32)
+                    normal_texture = to_uint8(np.dstack([normal_rgb, flat_alpha]), clip=True)
+                    self.log(f"  ↷ Skipped phong mask in alpha (vmat has no roughness/metallic signal)")
+
+                # If normal is flat AND there's no phong mask riding in alpha,
+                # drop the buffer so the encode stage skips it (the $bumpmap
+                # reference was already suppressed via emit_bumpmap above).
+                if not emit_bumpmap:
+                    normal_texture = None
+                self._check_cancel()
+
+                # Process phong/gloss map (skipped when no specular signal authored)
+                if emit_phong:
+                    self.log(f"[FakePBR] Computing phong exponent texture...")
+                    self.log(f"  → Converting roughness to gloss: (1-r)^{self.options.gloss_gamma:.2f}")
+                    self.log(f"  → Packing R=exponent, G=metallic, A=rim")
+                    phong_texture = create_phong_exponent_texture(
+                        roughness_data, metallic_data, ao_data, self.options.gloss_gamma, height, width,
+                        phong_strength=self.options.phong_strength
+                    )
+                    self.log(f"  ✓ Phong exponent texture computed")
+                else:
+                    self.log(f"[FakePBR] ↷ Skipping phong exponent texture (no roughness/metallic signal)")
+                self._check_cancel()
+
+                # Process colored envmap mask (skipped when no metallic signal)
+                if emit_envmap:
+                    self.log(f"[FakePBR] Computing colored envmap mask...")
+                    self.log(f"  → Packing RGB colored metal tint / roughness intensity")
+                    envmask_texture = create_colored_envmap_mask(
+                        color_data,
+                        ao_data,
+                        metallic_data,
+                        roughness_data,
+                        self.options.envmask_gamma
+                    )
+                    # Content check: a vmat with g_flMetalness 0.0 (or a metallic
+                    # texture that is actually all-black) computes to a pure-black
+                    # envmask. Writing it costs disk for a result that contributes
+                    # nothing at runtime — drop the texture and the corresponding
+                    # VMT block. Threshold 4/255 ≈ 0.015 tolerates encoder noise.
+                    if envmask_texture[:, :, :3].max() < 4:
+                        envmask_texture = None
+                        emit_envmap = False
+                        self.log(f"  ↷ Envmask is effectively black — dropping output")
+                    else:
+                        self.log(f"  ✓ Colored envmap mask computed")
+                else:
+                    self.log(f"[FakePBR] ↷ Skipping envmap mask (no metallic signal)")
+                self._check_cancel()
+
+                # Same content-check for phong: if both roughness ≈ 1.0 and
+                # metallic ≈ 0.0, the exponent texture (R = exp, G = metal,
+                # B = 0) is essentially black and the runtime $phong contribution
+                # is nil. Drop the file and the $phong* block in that case.
+                if emit_phong and phong_texture is not None:
+                    if phong_texture[:, :, :3].max() < 4:
+                        phong_texture = None
+                        emit_phong = False
+                        self.log(f"[FakePBR] ↷ Phong texture is effectively black — dropping output")
+                self._check_cancel()
+
+                # Every buffer is baked; the float32 inputs are dead weight from
+                # here on. Release them before VTF encoding — sourcepp's DXT
+                # compressor and mipmap chain want the headroom, and a parallel
+                # batch multiplies whatever we keep alive by the worker count.
+                # b_tintable is captured first because the VMT block below only
+                # needs to know whether a mask was baked, not its pixels.
+                b_tintable = tintmask_data is not None
+                color_data = None
+                normal_data = None
+                ao_data = None
+                roughness_data = None
+                metallic_data = None
+                translucency_data = None
+                tintmask_data = None
+
             # Conditionally encode to VTF
             vtf_generated = False
+            normal_vtf_emitted = False
+            phong_vtf_emitted = False
+            envmask_vtf_emitted = False
             selfillum_vtf_emitted = False
             if self.options.generate_vtf:
                 self.log(f"[FakePBR] Encoding textures to VTF...")
 
+                base_texture = self._apply_output_clamp(base_texture, "color")
                 base_path = os.path.join(output_folder, f"{material_name}_color.vtf")
-                normal_path = os.path.join(output_folder, f"{material_name}_normal.vtf")
-                phong_path = os.path.join(output_folder, f"{material_name}_phong.vtf")
-                envmask_path = os.path.join(output_folder, f"{material_name}_envmask.vtf")
                 self._check_cancel()
+                self.log(f"  → Handing color buffer to encoder: shape={base_texture.shape} dtype={base_texture.dtype}")
                 self.encoder.encode_base_texture(base_texture, base_path, generate_mipmaps=self.options.generate_mipmaps)
                 self.log(f"  ✓ Encoded {material_name}_color.vtf")
-                self._check_cancel()
-                self.encoder.encode_normal_map(normal_texture, normal_path, generate_mipmaps=self.options.generate_mipmaps)
-                self.log(f"  ✓ Encoded {material_name}_normal.vtf")
-                self._check_cancel()
-                self.encoder.encode_phong_map(phong_texture, phong_path, generate_mipmaps=self.options.generate_mipmaps)
-                self.log(f"  ✓ Encoded {material_name}_phong.vtf")
-                self._check_cancel()
-                self.encoder.encode_envmap_mask(envmask_texture, envmask_path, generate_mipmaps=self.options.generate_mipmaps)
-                self.log(f"  ✓ Encoded {material_name}_envmask.vtf")
+                if normal_texture is not None:
+                    self._check_cancel()
+                    normal_texture = self._apply_output_clamp(normal_texture, "normal")
+                    normal_path = os.path.join(output_folder, f"{material_name}_normal.vtf")
+                    self.log(f"  → Handing normal buffer to encoder: shape={normal_texture.shape} dtype={normal_texture.dtype}")
+                    self.encoder.encode_normal_map(normal_texture, normal_path, generate_mipmaps=self.options.generate_mipmaps)
+                    self.log(f"  ✓ Encoded {material_name}_normal.vtf")
+                    normal_vtf_emitted = True
+                if phong_texture is not None:
+                    self._check_cancel()
+                    phong_texture = self._apply_output_clamp(phong_texture, "phong")
+                    phong_path = os.path.join(output_folder, f"{material_name}_phong.vtf")
+                    self.log(f"  → Handing phong buffer to encoder: shape={phong_texture.shape} dtype={phong_texture.dtype}")
+                    self.encoder.encode_phong_map(phong_texture, phong_path, generate_mipmaps=self.options.generate_mipmaps)
+                    self.log(f"  ✓ Encoded {material_name}_phong.vtf")
+                    phong_vtf_emitted = True
+                if envmask_texture is not None:
+                    self._check_cancel()
+                    envmask_texture = self._apply_output_clamp(envmask_texture, "envmask")
+                    envmask_path = os.path.join(output_folder, f"{material_name}_envmask.vtf")
+                    self.log(f"  → Handing envmask buffer to encoder: shape={envmask_texture.shape} dtype={envmask_texture.dtype}")
+                    self.encoder.encode_envmap_mask(envmask_texture, envmask_path, generate_mipmaps=self.options.generate_mipmaps)
+                    self.log(f"  ✓ Encoded {material_name}_envmask.vtf")
+                    envmask_vtf_emitted = True
                 if selfillum_data is not None:
                     self._check_cancel()
-                    selfillum_path = os.path.join(output_folder, f"{material_name}_selfillum.vtf")
                     selfillum_rgba = to_uint8(selfillum_data, clip=True)
-                    self.encoder.encode_selfillum_mask(
-                        selfillum_rgba, selfillum_path,
-                        generate_mipmaps=self.options.generate_mipmaps,
-                    )
-                    self.log(f"  ✓ Encoded {material_name}_selfillum.vtf")
-                    selfillum_vtf_emitted = True
+                    # Pure-black selfillum mask = nothing glows. Drop the
+                    # texture and force the VMT-side $selfillum block off
+                    # via a sentinel flag the param-builder reads below.
+                    if selfillum_rgba[:, :, :3].max() < 4:
+                        selfillum_data = None
+                        self.log(f"  ↷ Selfillum is all-black — dropping output and $selfillum")
+                    else:
+                        # Selfillum has its own per-output clamp (defaults to
+                        # the color cap, but can be tuned independently in
+                        # Preferences — glow masks are often mostly black).
+                        selfillum_rgba = self._apply_output_clamp(selfillum_rgba, "selfillum")
+                        selfillum_path = os.path.join(output_folder, f"{material_name}_selfillum.vtf")
+                        self.encoder.encode_selfillum_mask(
+                            selfillum_rgba, selfillum_path,
+                            generate_mipmaps=self.options.generate_mipmaps,
+                        )
+                        self.log(f"  ✓ Encoded {material_name}_selfillum.vtf")
+                        selfillum_vtf_emitted = True
                 vtf_generated = True
             else:
                 self.log(f"[FakePBR] Skipping VTF generation (option disabled)")
@@ -466,12 +836,16 @@ class FakePBRProcessor:
                 #   emissiveblend — $EmissiveBlend* family, recommended when the
                 #                   material also uses $translucent / $phong /
                 #                   $alphatest, where $selfillum tends to break.
-                if inputs.selfillum is not None or inputs.selfillum_constant is not None:
+                # Only emit the $selfillum block when the mask actually
+                # survived the all-black check above. selfillum_data is
+                # cleared to None when the mask is empty, suppressing both
+                # the VTF and the VMT reference.
+                if (inputs.selfillum is not None or inputs.selfillum_constant is not None) and selfillum_data is not None:
                     glow_path = f"{material_path}/{material_name}_selfillum"
                     tint = inputs.selfillum_tint or (1.0, 1.0, 1.0)
                     brightness = inputs.selfillum_brightness if inputs.selfillum_brightness is not None else 1.0
                     glow_mode = (self.options.glow_mode or "selfillum").lower()
-                    if glow_mode == "emissiveblend":
+                    if glow_mode in ("emissiveblend", "emissiveblend_basecolor"):
                         custom_params['"$EmissiveBlendEnabled"'] = "1"
                         # $EmissiveBlendStrength clamps to [0, 1] in the
                         # shader, so anything brighter has to ride along in
@@ -482,10 +856,23 @@ class FakePBRProcessor:
                         strength = min(1.0, b_val)
                         tint_scale = max(1.0, b_val)
                         custom_params['"$EmissiveBlendStrength"'] = f"{strength:.3f}"
-                        # $EmissiveBlendTexture is required even when static; the
-                        # wiki recommends a stock white as a placeholder.
-                        custom_params['"$EmissiveBlendTexture"'] = "vgui/white"
-                        custom_params['"$EmissiveBlendBaseTexture"'] = glow_path
+                        if glow_mode == "emissiveblend_basecolor":
+                            # Emit the diffuse glowing in its OWN color (what
+                            # $selfillum does) but through the much stronger
+                            # EmissiveBlend path. The base color map is the
+                            # emission source ($EmissiveBlendBaseTexture) and
+                            # the self-illum mask drives $EmissiveBlendTexture
+                            # as the per-pixel "where it glows" blend. This
+                            # leaves $basetexture / $color untouched — the
+                            # emission just references the same _color VTF.
+                            base_color_path = f"{material_path}/{material_name}_color"
+                            custom_params['"$EmissiveBlendTexture"'] = glow_path
+                            custom_params['"$EmissiveBlendBaseTexture"'] = base_color_path
+                        else:
+                            # $EmissiveBlendTexture is required even when static;
+                            # the wiki recommends a stock white as a placeholder.
+                            custom_params['"$EmissiveBlendTexture"'] = "vgui/white"
+                            custom_params['"$EmissiveBlendBaseTexture"'] = glow_path
                         custom_params['"$EmissiveBlendFlowTexture"'] = "vgui/white"
                         custom_params['"$EmissiveBlendTint"'] = (
                             f"[{max(0.0, float(tint[0]) * tint_scale):.3f} "
@@ -505,6 +892,23 @@ class FakePBRProcessor:
                             custom_params['"$selfillumtint"'] = (
                                 f"[{scaled_tint[0]:.3f} {scaled_tint[1]:.3f} {scaled_tint[2]:.3f}]"
                             )
+                # Tintable props: the tint mask was baked into the base
+                # alpha above (compute path) or is assumed present from a
+                # prior full export (VMT-only path). Transparency always
+                # wins the alpha channel, so tint is off whenever the
+                # material renders transparent.
+                if compute_buffers:
+                    tintable = b_tintable
+                else:
+                    tintable = inputs.tintmask is not None and not (
+                        self.options.translucent or self.options.alphatest
+                    )
+                if tintable and custom_params.get('"$selfillum"') == "1":
+                    self.log(
+                        "  ⚠ $selfillum breaks the $blendtintbybasealpha shader combo — "
+                        "tint disabled in the VMT. Switch Glow Mode to Emissive Blend "
+                        "to keep the prop colorable."
+                    )
                 generate_fakepbr_vmt(
                     vmt_path,
                     material_name,
@@ -513,9 +917,14 @@ class FakePBRProcessor:
                     target_branch=self.options.target_branch,
                     envmap=self.options.envmap,
                     stats=stats,
-                    has_envmap_mask=True,
+                    has_envmap_mask=emit_envmap,
+                    emit_phong=emit_phong,
+                    emit_envmap=emit_envmap,
+                    emit_bumpmap=emit_bumpmap,
                     custom_params=custom_params or None,
                     tint_mode_used=tint_mode_active,
+                    surfaceprop=self.options.surfaceprop,
+                    tintable=tintable,
                 )
                 self.log(f"  ✓ Generated {material_name}.vmt")
             else:
@@ -526,12 +935,13 @@ class FakePBRProcessor:
             if self.options.generate_vmt:
                 files.append(f" - {material_name}.vmt")
             if vtf_generated:
-                files.extend([
-                    f" - {material_name}_color.vtf",
-                    f" - {material_name}_normal.vtf",
-                    f" - {material_name}_phong.vtf",
-                    f" - {material_name}_envmask.vtf"
-                ])
+                files.append(f" - {material_name}_color.vtf")
+                if normal_vtf_emitted:
+                    files.append(f" - {material_name}_normal.vtf")
+                if phong_vtf_emitted:
+                    files.append(f" - {material_name}_phong.vtf")
+                if envmask_vtf_emitted:
+                    files.append(f" - {material_name}_envmask.vtf")
                 if selfillum_vtf_emitted:
                     files.append(f" - {material_name}_selfillum.vtf")
             success_msg = "[SUCCESS] Created files:\n" + "\n".join(files)
@@ -542,6 +952,15 @@ class FakePBRProcessor:
             return False, "Cancelled by user"
         except VTFEncoderError as e:
             return False, f"VTF Encoding Error: {str(e)}"
+        except MemoryError as e:
+            # numpy raises _ArrayMemoryError (a MemoryError subclass) with the
+            # requested shape in the message. Say what the user can actually
+            # turn down instead of leaving them with a bare allocation failure.
+            return False, (
+                f"Out of Memory: {str(e)} — lower 'Max parallel', set a 'Clamp Size' "
+                f"(2048 or 1024), or reduce the per-output caps in Preferences, "
+                f"then retry."
+            )
         except Exception as e:
             return False, f"Processing Error: {str(e)}"
     
@@ -591,6 +1010,7 @@ class AutomationThread(QThread):
     """Background thread to process multiple detected materials automatically"""
 
     progress = Signal(str)
+    progress_value = Signal(int, int)  # tasks done, total (drives the progress bar)
     finished = Signal(bool, str)
     row_finished = Signal(int, bool)
 
@@ -606,7 +1026,9 @@ class AutomationThread(QThread):
     def run(self):
         total = len(self.tasks)
         ok_count = 0
+        done_count = 0
         cancelled = False
+        self.progress_value.emit(0, total)
 
         def worker(idx: int, task: dict):
             if self.isInterruptionRequested():
@@ -660,6 +1082,8 @@ class AutomationThread(QThread):
                     if isinstance(msg, str) and msg.lower().startswith("cancelled"):
                         cancelled = True
                     self.progress.emit(f"[{idx}/{total}] ✗ {name} failed: {msg}")
+                done_count += 1
+                self.progress_value.emit(done_count, total)
                 if row >= 0:
                     self.row_finished.emit(row, success)
 
@@ -719,6 +1143,10 @@ class FakePBRTool(BaseTool):
             'metallic': [
                 "metallic", "metal", "metalness", "mtl", "m"
             ],
+            'selfillum': [
+                "selfillum", "self_illum", "selfillummask", "emissive", "emission",
+                "emit", "glow", "illum"
+            ],
         }
         # Ensure all keywords are lowercased
         for typ in self._keyword_config:
@@ -758,18 +1186,35 @@ class FakePBRTool(BaseTool):
         input_group = QGroupBox("Input Textures")
         input_layout = QFormLayout()
         
-        self.color_input = self.create_file_input()
-        self.normal_input = self.create_file_input()
-        self.ao_input = self.create_file_input()
-        self.roughness_input = self.create_file_input()
-        self.metallic_input = self.create_file_input()
-        
+        self.color_input = self.create_picker(
+            "open_file", "color", dialog_title="Select Image", file_filter=IMAGE_FILTER)
+        self.normal_input = self.create_picker(
+            "open_file", "normal", dialog_title="Select Image", file_filter=IMAGE_FILTER)
+        self.ao_input = self.create_picker(
+            "open_file", "ao", dialog_title="Select Image", file_filter=IMAGE_FILTER)
+        self.roughness_input = self.create_picker(
+            "open_file", "roughness", dialog_title="Select Image", file_filter=IMAGE_FILTER)
+        self.metallic_input = self.create_picker(
+            "open_file", "metallic", dialog_title="Select Image", file_filter=IMAGE_FILTER)
+        self.selfillum_input = self.create_picker(
+            "open_file", "selfillum", dialog_title="Select Image", file_filter=IMAGE_FILTER)
+        self.tintmask_input = self.create_picker(
+            "open_file", "tintmask", dialog_title="Select Image", file_filter=IMAGE_FILTER)
+        self.tintmask_input.setToolTip(
+            "Source 2 TextureTintMask (white = tinted by entity color). Baked "
+            "into the basetexture alpha with $blendtintbybasealpha so the "
+            "GMod Color tool tints only the masked regions. Ignored for "
+            "transparent materials — $translucent/$alphatest own the alpha."
+        )
+
         input_layout.addRow("Color (Required):", self.color_input)
         input_layout.addRow("Normal (Required):", self.normal_input)
         input_layout.addRow("AO (Optional):", self.ao_input)
         input_layout.addRow("Roughness (Optional):", self.roughness_input)
         input_layout.addRow("Metallic (Optional):", self.metallic_input)
-        
+        input_layout.addRow("Self-Illum / Emissive (Optional):", self.selfillum_input)
+        input_layout.addRow("Tint Mask (Optional):", self.tintmask_input)
+
         input_group.setLayout(input_layout)
         manual_layout.addWidget(input_group)
         
@@ -875,6 +1320,52 @@ class FakePBRTool(BaseTool):
         relief_layout.addWidget(self.colored_metal_relief_value)
         options_layout.addRow("Colored Metal Relief:", relief_layout)
 
+        # Glow Mode — how a self-illum / emissive mask is emitted in the VMT.
+        # Only has an effect when a Self-Illum / Emissive input is supplied.
+        self.glow_mode_combo = QComboBox()
+        self.glow_mode_combo.addItem("Self-Illum ($selfillum)", "selfillum")
+        self.glow_mode_combo.addItem("Emissive Blend ($EmissiveBlend*)", "emissiveblend")
+        self.glow_mode_combo.addItem("Emissive Blend (Base Color)", "emissiveblend_basecolor")
+        self.glow_mode_combo.setToolTip(
+            "How the self-illum / emissive mask is wired into the VMT. "
+            "Self-Illum: classic $selfillum + $selfillummask — standard, but can "
+            "conflict with $translucent / $phong on some branches. "
+            "Emissive Blend: $EmissiveBlend* family — plays nicely with "
+            "$translucent and $phong (recommended for L4D2 / Alyx-port targets). "
+            "Emissive Blend (Base Color): same strong glow, but the emission "
+            "color comes from the base color map (like Self-Illum) with the "
+            "self-illum texture acting as the where-it-glows mask. "
+            "Only used when a Self-Illum / Emissive texture is provided."
+        )
+        options_layout.addRow("Glow Mode:", self.glow_mode_combo)
+
+        # Self-Illum Brightness — scales the glow. Folded into $selfillumtint
+        # (or $EmissiveBlendStrength/Tint) by the processor.
+        self.selfillum_brightness_spin = QDoubleSpinBox()
+        self.selfillum_brightness_spin.setRange(0.0, 10.0)
+        self.selfillum_brightness_spin.setSingleStep(0.1)
+        self.selfillum_brightness_spin.setDecimals(2)
+        self.selfillum_brightness_spin.setValue(1.0)
+        self.selfillum_brightness_spin.setToolTip(
+            "Multiplier on the self-illum / emissive glow. 1.00 = mask at its "
+            "authored brightness. Only used when a Self-Illum / Emissive "
+            "texture is provided."
+        )
+        options_layout.addRow("Self-Illum Brightness:", self.selfillum_brightness_spin)
+
+        # Clamp size — cap the working resolution before PBR math runs.
+        # 0 = off (use the largest dimension across inputs).
+        self.clamp_size_combo = QComboBox()
+        self.clamp_size_combo.addItem("Off", 0)
+        for sz in (32, 64, 128, 256, 512, 1024, 2048, 4096, 8192):
+            self.clamp_size_combo.addItem(f"{sz}", sz)
+        self.clamp_size_combo.setToolTip(
+            "Cap the working resolution before processing. Textures whose "
+            "longest edge exceeds this value are downscaled (aspect "
+            "preserved); smaller textures pass through unchanged."
+        )
+        options_layout.addRow("Clamp Size:", self.clamp_size_combo)
+
         # Generate VTF checkbox
         self.generate_vtf_checkbox = QCheckBox("Generate VTF")
         self.generate_vtf_checkbox.setChecked(True)
@@ -882,7 +1373,7 @@ class FakePBRTool(BaseTool):
 
         # Generate mipmaps checkbox
         self.generate_mipmaps_checkbox = QCheckBox("Generate Mipmaps")
-        self.generate_mipmaps_checkbox.setChecked(True)
+        self.generate_mipmaps_checkbox.setChecked(default_generate_mipmaps(True))
         options_layout.addRow("Generate Mipmaps:", self.generate_mipmaps_checkbox)
 
         # Generate VMT checkbox
@@ -897,13 +1388,9 @@ class FakePBRTool(BaseTool):
         output_group = QGroupBox("Output")
         output_layout = QFormLayout()
         # Output folder
-        folder_layout = QHBoxLayout()
-        self.output_folder_input = QLineEdit()
-        self.output_folder_button = QPushButton("Browse...")
-        self.output_folder_button.clicked.connect(self.browse_output_folder)
-        folder_layout.addWidget(self.output_folder_input)
-        folder_layout.addWidget(self.output_folder_button)
-        output_layout.addRow("Output Folder:", folder_layout)
+        self.output_folder_input = self.create_picker(
+            "dir", "output folder", dialog_title="Select Output Folder")
+        output_layout.addRow("Output Folder:", self.output_folder_input)
         
         # Material name
         self.material_name_input = QLineEdit()
@@ -913,17 +1400,22 @@ class FakePBRTool(BaseTool):
         # Material path
         self.material_path_input = QLineEdit()
         self.material_path_input.setPlaceholderText("e.g., models/ports")
-        self.material_path_input.setText("models/ports")
+        self.material_path_input.setText(default_material_path())
         output_layout.addRow("Material Path:", self.material_path_input)
-        
+
+        # Surface prop (optional $surfaceprop written into the VMT)
+        self.surfaceprop_input = QLineEdit()
+        self.surfaceprop_input.setPlaceholderText("(optional, e.g. metal, concrete, wood)")
+        self.surfaceprop_input.setToolTip(
+            "Value written as $surfaceprop in the generated .vmt. Sets the "
+            "physical surface material (footstep/impact sounds, decals, "
+            "friction). Leave blank to omit $surfaceprop."
+        )
+        output_layout.addRow("Surface Prop:", self.surfaceprop_input)
+
         output_group.setLayout(output_layout)
         manual_layout.addWidget(output_group)
-        
-        # Progress bar
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setVisible(False)
-        manual_layout.addWidget(self.progress_bar)
-        
+
         # Process button
         self.process_button = QPushButton("Generate Material")
         self.process_button.clicked.connect(self.process_material)
@@ -931,9 +1423,8 @@ class FakePBRTool(BaseTool):
         manual_layout.addWidget(self.process_button)
 
         # Cancel button (manual)
-        self.cancel_button = QPushButton("Cancel")
-        self.cancel_button.setEnabled(False)
-        self.cancel_button.clicked.connect(self.cancel_processing)
+        self.cancel_button = self.make_cancel_button(
+            lambda: self.request_cancel(self.processing_thread))
         manual_layout.addWidget(self.cancel_button)
         
         manual_layout.addStretch()
@@ -1007,26 +1498,27 @@ class FakePBRTool(BaseTool):
         self.auto_history_dropdown.currentIndexChanged.connect(self.on_auto_history_selected)
         form.addRow("Recent run:", self.auto_history_dropdown)
 
-        self.auto_input_folder = QLineEdit()
-        in_btn = QPushButton("Browse...")
-        in_btn.clicked.connect(lambda: self._browse_dir_into(self.auto_input_folder))
-        in_row = QHBoxLayout()
-        in_row.addWidget(self.auto_input_folder)
-        in_row.addWidget(in_btn)
-        form.addRow("Input root:", self._row_widget(in_row))
+        self.auto_input_folder = self.create_picker(
+            "dir", "auto input root", dialog_title="Select Folder")
+        form.addRow("Input root:", self.auto_input_folder)
 
-        self.auto_output_folder = QLineEdit()
-        out_btn = QPushButton("Browse...")
-        out_btn.clicked.connect(lambda: self._browse_dir_into(self.auto_output_folder))
-        out_row = QHBoxLayout()
-        out_row.addWidget(self.auto_output_folder)
-        out_row.addWidget(out_btn)
-        form.addRow("Output root:", self._row_widget(out_row))
+        self.auto_output_folder = self.create_picker(
+            "dir", "auto output root", dialog_title="Select Folder")
+        form.addRow("Output root:", self.auto_output_folder)
 
         self.auto_material_path = QLineEdit()
         self.auto_material_path.setPlaceholderText("e.g., models/ports")
-        self.auto_material_path.setText("models/ports")
+        self.auto_material_path.setText(default_material_path())
         form.addRow("Material path:", self.auto_material_path)
+
+        self.auto_surfaceprop_input = QLineEdit()
+        self.auto_surfaceprop_input.setPlaceholderText("(optional, e.g. metal, concrete, wood)")
+        self.auto_surfaceprop_input.setToolTip(
+            "Value written as $surfaceprop in every generated .vmt this batch. "
+            "Sets the physical surface material (footstep/impact sounds, decals, "
+            "friction). Leave blank to omit $surfaceprop."
+        )
+        form.addRow("Surface prop:", self.auto_surfaceprop_input)
 
         name_row = QHBoxLayout()
         self.auto_prefix = QLineEdit()
@@ -1053,7 +1545,7 @@ class FakePBRTool(BaseTool):
         self.auto_generate_vmt = QCheckBox("Generate VMT")
         self.auto_generate_vmt.setChecked(True)
         self.auto_generate_mipmaps = QCheckBox("Generate Mipmaps")
-        self.auto_generate_mipmaps.setChecked(True)
+        self.auto_generate_mipmaps.setChecked(default_generate_mipmaps(True))
         self.auto_skip_existing = QCheckBox("Skip already-processed files")
         self.auto_skip_existing.setChecked(False)
         self.auto_skip_existing.setToolTip(
@@ -1077,8 +1569,19 @@ class FakePBRTool(BaseTool):
         max_cpu = os.cpu_count() or 4
         self.auto_max_parallel = QSpinBox()
         self.auto_max_parallel.setRange(1, max(2, max_cpu))
-        self.auto_max_parallel.setValue(min(4, max_cpu))
+        self.auto_max_parallel.setValue(default_max_parallel(min(4, max_cpu)))
         form.addRow("Max parallel:", self.auto_max_parallel)
+
+        self.auto_clamp_size_combo = QComboBox()
+        self.auto_clamp_size_combo.addItem("Off", 0)
+        for sz in (32, 64, 128, 256, 512, 1024, 2048, 4096, 8192):
+            self.auto_clamp_size_combo.addItem(f"{sz}", sz)
+        self.auto_clamp_size_combo.setToolTip(
+            "Cap the working resolution before processing. Textures whose "
+            "longest edge exceeds this value are downscaled (aspect "
+            "preserved) before the PBR pipeline runs."
+        )
+        form.addRow("Clamp Size:", self.auto_clamp_size_combo)
 
         group.setLayout(form)
         return group
@@ -1141,6 +1644,30 @@ class FakePBRTool(BaseTool):
             self._slider_row(self.auto_colored_metal_relief_slider, self.auto_colored_metal_relief_value),
         )
 
+        self.auto_glow_mode_combo = QComboBox()
+        self.auto_glow_mode_combo.addItem("Self-Illum ($selfillum)", "selfillum")
+        self.auto_glow_mode_combo.addItem("Emissive Blend ($EmissiveBlend*)", "emissiveblend")
+        self.auto_glow_mode_combo.addItem("Emissive Blend (Base Color)", "emissiveblend_basecolor")
+        self.auto_glow_mode_combo.setToolTip(
+            "How a detected self-illum / emissive mask is wired into the VMT. "
+            "Emissive Blend (Base Color) uses the base color map as the emission "
+            "color with the self-illum texture as the where-it-glows mask. "
+            "Only used for materials that have a self-illum / emissive texture."
+        )
+        form.addRow("Glow Mode:", self.auto_glow_mode_combo)
+
+        self.auto_selfillum_brightness_spin = QDoubleSpinBox()
+        self.auto_selfillum_brightness_spin.setRange(0.0, 10.0)
+        self.auto_selfillum_brightness_spin.setSingleStep(0.1)
+        self.auto_selfillum_brightness_spin.setDecimals(2)
+        self.auto_selfillum_brightness_spin.setValue(1.0)
+        self.auto_selfillum_brightness_spin.setToolTip(
+            "Multiplier on the self-illum / emissive glow. 1.00 = mask at its "
+            "authored brightness. Only used for materials with a self-illum / "
+            "emissive texture."
+        )
+        form.addRow("Self-Illum Brightness:", self.auto_selfillum_brightness_spin)
+
         group.setLayout(form)
         return group
 
@@ -1161,6 +1688,7 @@ class FakePBRTool(BaseTool):
             ("AO", "ao", False),
             ("Roughness", "roughness", False),
             ("Metallic", "metallic", False),
+            ("Self-Illum", "selfillum", False),
         )
         for idx, (label, key, default) in enumerate(roles):
             cb = QCheckBox(label)
@@ -1222,9 +1750,9 @@ class FakePBRTool(BaseTool):
         col.addLayout(action_row)
 
         # Results table
-        self.scan_table = QTableWidget(0, 7)
+        self.scan_table = QTableWidget(0, 8)
         self.scan_table.setHorizontalHeaderLabels([
-            "Include", "Material", "Color", "Normal", "AO", "Roughness", "Metallic"
+            "Include", "Material", "Color", "Normal", "AO", "Roughness", "Metallic", "Selfillum"
         ])
         header = self.scan_table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.Stretch)
@@ -1239,9 +1767,8 @@ class FakePBRTool(BaseTool):
         # Run controls — Cancel + Convert at the bottom-right.
         run_row = QHBoxLayout()
         run_row.addStretch()
-        self.cancel_all_button = QPushButton("Cancel")
-        self.cancel_all_button.setEnabled(False)
-        self.cancel_all_button.clicked.connect(self.cancel_automation)
+        self.cancel_all_button = self.make_cancel_button(
+            lambda: self.request_cancel(self.automation_thread))
         self.process_all_button = QPushButton("Convert")
         self.process_all_button.setEnabled(False)
         self.process_all_button.clicked.connect(self.process_all_materials)
@@ -1329,45 +1856,11 @@ class FakePBRTool(BaseTool):
                 return True
         return super().eventFilter(obj, event)
 
-    def create_file_input(self) -> QWidget:
-        """Create a file input row with browse button"""
-        container = QWidget()
-        layout = QHBoxLayout(container)
-        layout.setContentsMargins(0, 0, 0, 0)
-        
-        line_edit = QLineEdit()
-        browse_btn = QPushButton("Browse...")
-        browse_btn.clicked.connect(lambda: self.browse_file(line_edit))
-        
-        layout.addWidget(line_edit)
-        layout.addWidget(browse_btn)
-        
-        # Store line edit as property of container for easy access
-        container.line_edit = line_edit
-        
-        return container
-
     def _row_widget(self, layout: QHBoxLayout) -> QWidget:
         """Helper to wrap a row layout in a QWidget for FormLayout rows"""
         w = QWidget()
         w.setLayout(layout)
         return w
-
-    def _browse_dir_into(self, line_edit: QLineEdit):
-        folder = QFileDialog.getExistingDirectory(self, "Select Folder", "")
-        if folder:
-            line_edit.setText(folder)
-    
-    def browse_file(self, line_edit: QLineEdit):
-        """Browse for an image file"""
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select Image",
-            "",
-            "Images (*.png *.jpg *.jpeg *.tga *.bmp);;All Files (*.*)"
-        )
-        if file_path:
-            line_edit.setText(file_path)
 
     def _load_history(self):
         """Load history list from JSON file"""
@@ -1460,8 +1953,8 @@ class FakePBRTool(BaseTool):
             return
 
         try:
-            self.auto_input_folder.setText(entry.get('input_root') or '')
-            self.auto_output_folder.setText(entry.get('output_folder') or '')
+            self.auto_input_folder.set_path(entry.get('input_root') or '')
+            self.auto_output_folder.set_path(entry.get('output_folder') or '')
             self.auto_material_path.setText(entry.get('material_path') or 'models/ports')
             self.auto_prefix.setText(entry.get('prefix') or '')
             self.auto_suffix.setText(entry.get('suffix') or '')
@@ -1479,9 +1972,15 @@ class FakePBRTool(BaseTool):
             tint_idx = self.auto_phong_tint_mode_combo.findData(tint_mode_val)
             if tint_idx >= 0:
                 self.auto_phong_tint_mode_combo.setCurrentIndex(tint_idx)
+            glow_mode_val = str(opts.get('glow_mode', 'selfillum'))
+            glow_idx = self.auto_glow_mode_combo.findData(glow_mode_val)
+            if glow_idx >= 0:
+                self.auto_glow_mode_combo.setCurrentIndex(glow_idx)
+            self.auto_selfillum_brightness_spin.setValue(float(opts.get('selfillum_brightness', 1.0)))
             self.auto_generate_vtf.setChecked(bool(opts.get('generate_vtf', True)))
             self.auto_generate_vmt.setChecked(bool(opts.get('generate_vmt', True)))
             self.auto_generate_mipmaps.setChecked(bool(opts.get('generate_mipmaps', True)))
+            self.auto_surfaceprop_input.setText(str(opts.get('surfaceprop', '')))
             reqs = opts.get('requirements') or {}
             for key, cb in self.req_checkboxes.items():
                 if key in reqs:
@@ -1503,13 +2002,14 @@ class FakePBRTool(BaseTool):
 
         # Populate inputs
         inputs = entry.get('inputs', {})
-        # Each file input is container with .line_edit
         try:
-            self.color_input.line_edit.setText(inputs.get('color') or '')
-            self.normal_input.line_edit.setText(inputs.get('normal') or '')
-            self.ao_input.line_edit.setText(inputs.get('ao') or '')
-            self.roughness_input.line_edit.setText(inputs.get('roughness') or '')
-            self.metallic_input.line_edit.setText(inputs.get('metallic') or '')
+            self.color_input.set_path(inputs.get('color') or '')
+            self.normal_input.set_path(inputs.get('normal') or '')
+            self.ao_input.set_path(inputs.get('ao') or '')
+            self.roughness_input.set_path(inputs.get('roughness') or '')
+            self.metallic_input.set_path(inputs.get('metallic') or '')
+            self.selfillum_input.set_path(inputs.get('selfillum') or '')
+            self.tintmask_input.set_path(inputs.get('tintmask') or '')
         except Exception:
             pass
 
@@ -1528,6 +2028,11 @@ class FakePBRTool(BaseTool):
             tint_idx = self.phong_tint_mode_combo.findData(tint_mode_val)
             if tint_idx >= 0:
                 self.phong_tint_mode_combo.setCurrentIndex(tint_idx)
+            glow_mode_val = str(options.get('glow_mode', 'selfillum'))
+            glow_idx = self.glow_mode_combo.findData(glow_mode_val)
+            if glow_idx >= 0:
+                self.glow_mode_combo.setCurrentIndex(glow_idx)
+            self.selfillum_brightness_spin.setValue(float(options.get('selfillum_brightness', 1.0)))
             self.generate_vtf_checkbox.setChecked(bool(options.get('generate_vtf', True)))
             self.generate_mipmaps_checkbox.setChecked(bool(options.get('generate_mipmaps', True)))
             self.generate_vmt_checkbox.setChecked(bool(options.get('generate_vmt', True)))
@@ -1536,9 +2041,10 @@ class FakePBRTool(BaseTool):
 
         # Populate outputs
         try:
-            self.output_folder_input.setText(entry.get('output_folder') or '')
+            self.output_folder_input.set_path(entry.get('output_folder') or '')
             self.material_name_input.setText(entry.get('material_name') or '')
             self.material_path_input.setText(entry.get('material_path') or 'models/ports')
+            self.surfaceprop_input.setText(str((entry.get('options') or {}).get('surfaceprop', '')))
         except Exception:
             pass
 
@@ -1550,13 +2056,15 @@ class FakePBRTool(BaseTool):
             'timestamp': datetime.utcnow().isoformat(timespec='seconds') + 'Z',
             'material_name': self.material_name_input.text() or '',
             'material_path': self.material_path_input.text() or '',
-            'output_folder': self.output_folder_input.text() or '',
+            'output_folder': self.output_folder_input.path() or '',
             'inputs': {
                 'color': inputs.color or '',
                 'normal': inputs.normal or '',
                 'ao': inputs.ao or '',
                 'roughness': inputs.roughness or '',
-                'metallic': inputs.metallic or ''
+                'metallic': inputs.metallic or '',
+                'selfillum': inputs.selfillum or '',
+                'tintmask': inputs.tintmask or ''
             },
             'options': {
                 'ao_strength': options.ao_strength,
@@ -1564,9 +2072,12 @@ class FakePBRTool(BaseTool):
                 'metal_diffuse_suppression': options.metal_diffuse_suppression,
                 'phong_tint_mode': options.phong_tint_mode,
                 'colored_metal_relief': options.colored_metal_relief,
+                'glow_mode': options.glow_mode,
+                'selfillum_brightness': inputs.selfillum_brightness,
                 'generate_vtf': options.generate_vtf,
                 'generate_vmt': options.generate_vmt,
-                'generate_mipmaps': options.generate_mipmaps
+                'generate_mipmaps': options.generate_mipmaps,
+                'surfaceprop': options.surfaceprop
             }
         }
         return entry
@@ -1605,17 +2116,20 @@ class FakePBRTool(BaseTool):
             'metal_diffuse_suppression': self.auto_metal_suppression_slider.value() / 100.0,
             'phong_tint_mode': self.auto_phong_tint_mode_combo.currentData() or 'selective',
             'colored_metal_relief': self.auto_colored_metal_relief_slider.value() / 100.0,
+            'glow_mode': self.auto_glow_mode_combo.currentData() or 'selfillum',
+            'selfillum_brightness': self.auto_selfillum_brightness_spin.value(),
             'generate_vtf': self.auto_generate_vtf.isChecked(),
             'generate_vmt': self.auto_generate_vmt.isChecked(),
             'generate_mipmaps': self.auto_generate_mipmaps.isChecked(),
+            'surfaceprop': self.auto_surfaceprop_input.text().strip(),
             'requirements': {key: cb.isChecked() for key, cb in self.req_checkboxes.items()},
         }
-        label = self.auto_input_folder.text() or self.auto_output_folder.text() or ''
+        label = self.auto_input_folder.path() or self.auto_output_folder.path() or ''
         return {
             'timestamp': datetime.utcnow().isoformat(timespec='seconds') + 'Z',
             'label': label,
-            'input_root': self.auto_input_folder.text() or '',
-            'output_folder': self.auto_output_folder.text() or '',
+            'input_root': self.auto_input_folder.path() or '',
+            'output_folder': self.auto_output_folder.path() or '',
             'material_path': self.auto_material_path.text() or 'models/ports',
             'prefix': self.auto_prefix.text() or '',
             'suffix': self.auto_suffix.text() or '',
@@ -1657,16 +2171,6 @@ class FakePBRTool(BaseTool):
         except Exception:
             pass
     
-    def browse_output_folder(self):
-        """Browse for output folder"""
-        folder = QFileDialog.getExistingDirectory(
-            self,
-            "Select Output Folder",
-            ""
-        )
-        if folder:
-            self.output_folder_input.setText(folder)
-    
     def get_processing_options(self) -> ProcessingOptions:
         """Get current processing options from UI"""
         return ProcessingOptions(
@@ -1676,19 +2180,25 @@ class FakePBRTool(BaseTool):
             phong_strength=self.phong_strength_slider.value() / 100.0,
             phong_tint_mode=self.phong_tint_mode_combo.currentData() or "selective",
             colored_metal_relief=self.colored_metal_relief_slider.value() / 100.0,
+            glow_mode=self.glow_mode_combo.currentData() or "selfillum",
             generate_vtf=self.generate_vtf_checkbox.isChecked(),
             generate_vmt=self.generate_vmt_checkbox.isChecked(),
-            generate_mipmaps=self.generate_mipmaps_checkbox.isChecked()
+            generate_mipmaps=self.generate_mipmaps_checkbox.isChecked(),
+            clamp_size=int(self.clamp_size_combo.currentData() or 0),
+            surfaceprop=self.surfaceprop_input.text().strip(),
         )
-    
+
     def get_inputs(self) -> PBRInputs:
         """Get input file paths from UI"""
         return PBRInputs(
-            color=self.color_input.line_edit.text() or None,
-            normal=self.normal_input.line_edit.text() or None,
-            ao=self.ao_input.line_edit.text() or None,
-            roughness=self.roughness_input.line_edit.text() or None,
-            metallic=self.metallic_input.line_edit.text() or None
+            color=self.color_input.path() or None,
+            normal=self.normal_input.path() or None,
+            ao=self.ao_input.path() or None,
+            roughness=self.roughness_input.path() or None,
+            metallic=self.metallic_input.path() or None,
+            selfillum=self.selfillum_input.path() or None,
+            selfillum_brightness=self.selfillum_brightness_spin.value(),
+            tintmask=self.tintmask_input.path() or None,
         )
     
     def process_material(self):
@@ -1703,28 +2213,18 @@ class FakePBRTool(BaseTool):
             self.log("Error: Normal map is required", "error")
             return
         
-        output_folder = self.output_folder_input.text()
+        output_folder = self.output_folder_input.path()
         if not output_folder:
             self.log("Error: Output folder is required", "error")
             return
-        
+
         material_name = self.material_name_input.text()
         if not material_name:
             self.log("Error: Material name is required", "error")
             return
-        
+
         material_path = self.material_path_input.text() or "models/ports"
-        
-        # Disable UI
-        self.process_button.setEnabled(False)
-        self.cancel_button.setEnabled(True)
-        self.progress_bar.setVisible(True)
-        self.progress_bar.setRange(0, 0)  # Indeterminate
-        
-        # Clear log
-        self.log_output.clear()
-        self.log("Starting material processing...", "info")
-        
+
         # Create processor
         options = self.get_processing_options()
         self.processor = FakePBRProcessor(options)
@@ -1734,8 +2234,10 @@ class FakePBRTool(BaseTool):
             self._save_current_run_to_history()
         except Exception:
             pass
-        
-        # Start processing thread
+
+        # Start processing thread. ProcessingThread.progress is a single-arg
+        # Signal(str); route it to the log at INFO. start_worker handles the
+        # process/cancel button busy-state.
         self.processing_thread = ProcessingThread(
             self.processor,
             inputs,
@@ -1743,16 +2245,19 @@ class FakePBRTool(BaseTool):
             material_name,
             material_path
         )
-        self.processing_thread.finished.connect(self.on_processing_finished)
-        self.processing_thread.start()
-    
+        self.start_worker(
+            self.processing_thread,
+            self.on_processing_finished,
+            progress_slot=lambda m: self.log(m, "INFO"),
+            busy_widgets=(self.process_button,),
+            cancel_button=self.cancel_button,
+            status="Processing material...",
+            clear_log=True,
+        )
+        self.log("Starting material processing...", "info")
+
     def on_processing_finished(self, success: bool, message: str):
         """Handle processing completion"""
-        # Re-enable UI
-        self.process_button.setEnabled(True)
-        self.cancel_button.setEnabled(False)
-        self.progress_bar.setVisible(False)
-        
         # Log result
         if success:
             self.log(message, "success")
@@ -1817,8 +2322,8 @@ class FakePBRTool(BaseTool):
         return found_type, key
 
     def scan_folder_for_materials(self):
-        root = self.auto_input_folder.text().strip()
-        out_dir = self.auto_output_folder.text().strip()
+        root = self.auto_input_folder.path()
+        out_dir = self.auto_output_folder.path()
         if not root:
             self.log("Select an Input Root Folder first", "ERROR")
             return
@@ -1873,7 +2378,7 @@ class FakePBRTool(BaseTool):
                 per_key = {}
             # For each desired type, if missing, try to fill from index
             base_tokens = key.split('_') if key else []
-            for typ in ("color", "normal", "ao", "roughness", "metallic"):
+            for typ in ("color", "normal", "ao", "roughness", "metallic", "selfillum"):
                 if typ in data:
                     continue
                 # 2a) If present in per_key (from first-pass recognitions), use it
@@ -1920,7 +2425,7 @@ class FakePBRTool(BaseTool):
             name_item = QTableWidgetItem(key)
             self.scan_table.setItem(row, 1, name_item)
             # For each map type, show Yes/No with tooltip path
-            for col, typ in enumerate(["color", "normal", "ao", "roughness", "metallic"], start=2):
+            for col, typ in enumerate(["color", "normal", "ao", "roughness", "metallic", "selfillum"], start=2):
                 path = data.get(typ)
                 txt = "Yes" if path else "No"
                 item = QTableWidgetItem(txt)
@@ -1929,15 +2434,6 @@ class FakePBRTool(BaseTool):
                 self.scan_table.setItem(row, col, item)
         # store matches for processing
         self._scan_matches = matches
-
-    def _get_override_path(self, enabled_checkbox: QCheckBox, file_container: QWidget) -> Optional[str]:
-        try:
-            if enabled_checkbox.isChecked():
-                p = file_container.line_edit.text().strip()
-                return p or None
-        except Exception:
-            return None
-        return None
 
     def _fakepbr_outputs_exist(self, output_folder: str, material_name: str,
                                gen_vmt: bool, gen_vtf: bool) -> bool:
@@ -1962,7 +2458,7 @@ class FakePBRTool(BaseTool):
         if not hasattr(self, '_scan_matches') or not self._scan_matches:
             self.log("No materials to process. Run Scan first.", "ERROR")
             return
-        out_dir = self.auto_output_folder.text().strip()
+        out_dir = self.auto_output_folder.path()
         mat_path = self.auto_material_path.text().strip() or "models/ports"
         prefix = self.auto_prefix.text().strip()
         suffix = self.auto_suffix.text().strip()
@@ -1974,6 +2470,10 @@ class FakePBRTool(BaseTool):
         phong_strength = self.auto_phong_strength_slider.value() / 100.0
         phong_tint_mode = self.auto_phong_tint_mode_combo.currentData() or "selective"
         colored_metal_relief = self.auto_colored_metal_relief_slider.value() / 100.0
+        glow_mode = self.auto_glow_mode_combo.currentData() or "selfillum"
+        selfillum_brightness = self.auto_selfillum_brightness_spin.value()
+        clamp_size = int(self.auto_clamp_size_combo.currentData() or 0)
+        surfaceprop = self.auto_surfaceprop_input.text().strip()
         gen_vmt = self.auto_generate_vmt.isChecked()
 
         gen_vtf = self.auto_generate_vtf.isChecked()
@@ -2003,7 +2503,9 @@ class FakePBRTool(BaseTool):
                 normal=normal,
                 ao=data.get('ao'),
                 roughness=data.get('roughness'),
-                metallic=data.get('metallic')
+                metallic=data.get('metallic'),
+                selfillum=data.get('selfillum'),
+                selfillum_brightness=selfillum_brightness,
             )
             tasks.append({
                 'inputs': inputs,
@@ -2018,9 +2520,12 @@ class FakePBRTool(BaseTool):
                     phong_strength=phong_strength,
                     phong_tint_mode=phong_tint_mode,
                     colored_metal_relief=colored_metal_relief,
+                    glow_mode=glow_mode,
                     generate_vtf=gen_vtf,
                     generate_vmt=gen_vmt,
-                    generate_mipmaps=self.auto_generate_mipmaps.isChecked()
+                    generate_mipmaps=self.auto_generate_mipmaps.isChecked(),
+                    clamp_size=clamp_size,
+                    surfaceprop=surfaceprop,
                 )
             })
         if skip_existing and skipped_existing:
@@ -2035,13 +2540,6 @@ class FakePBRTool(BaseTool):
         except Exception:
             pass
 
-        # Disable buttons
-        self.scan_button.setEnabled(False)
-        self.process_all_button.setEnabled(False)
-        self.cancel_all_button.setEnabled(True)
-        self.clear_log()
-        self.log(f"Starting batch processing of {len(tasks)} materials...", "INFO")
-
         def make_processor():
             proc = FakePBRProcessor(ProcessingOptions(
                 ao_strength=ao_strength,
@@ -2050,17 +2548,28 @@ class FakePBRTool(BaseTool):
                 phong_strength=phong_strength,
                 phong_tint_mode=phong_tint_mode,
                 colored_metal_relief=colored_metal_relief,
+                glow_mode=glow_mode,
                 generate_vtf=gen_vtf,
                 generate_vmt=gen_vmt,
-                generate_mipmaps=self.auto_generate_mipmaps.isChecked()
+                generate_mipmaps=self.auto_generate_mipmaps.isChecked(),
+                clamp_size=clamp_size,
             ))
             return proc
 
+        # AutomationThread.progress is a single-arg Signal(str); route it to the
+        # log at INFO. row_finished paints per-row status and must be connected
+        # before start_worker takes over the busy-state wiring.
         self.automation_thread = AutomationThread(make_processor, tasks, max_workers=self.auto_max_parallel.value())
-        self.automation_thread.progress.connect(lambda m: self.log(m, "INFO"))
         self.automation_thread.row_finished.connect(self._on_scan_row_finished)
-        self.automation_thread.finished.connect(self.on_automation_finished)
-        self.automation_thread.start()
+        self.start_worker(
+            self.automation_thread,
+            self.on_automation_finished,
+            progress_slot=lambda m: self.log(m, "INFO"),
+            busy_widgets=(self.process_all_button, self.scan_button),
+            cancel_button=self.cancel_all_button,
+            clear_log=True,
+        )
+        self.log(f"Starting batch processing of {len(tasks)} materials...", "INFO")
 
     def _on_scan_row_finished(self, row: int, success: bool):
         """Tint the corresponding scan_table row green/red as each task completes."""
@@ -2103,24 +2612,3 @@ class FakePBRTool(BaseTool):
 
     def on_automation_finished(self, success: bool, message: str):
         self.log(message, "SUCCESS" if success else "WARNING")
-        self.scan_button.setEnabled(True)
-        self.process_all_button.setEnabled(True)
-        self.cancel_all_button.setEnabled(False)
-
-    def cancel_processing(self):
-        """Request cancellation of the current manual process."""
-        try:
-            if self.processing_thread and self.processing_thread.isRunning():
-                self.processing_thread.requestInterruption()
-                self.log("Cancel requested for current process...", "INFO")
-        except Exception:
-            pass
-
-    def cancel_automation(self):
-        """Request cancellation of the current automation batch."""
-        try:
-            if self.automation_thread and self.automation_thread.isRunning():
-                self.automation_thread.requestInterruption()
-                self.log("Cancel requested for batch processing...", "INFO")
-        except Exception:
-            pass

@@ -31,17 +31,19 @@ import numpy as np
 from PIL import Image
 
 from PySide6.QtWidgets import (
-    QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFileDialog,
-    QLineEdit, QGroupBox, QDoubleSpinBox, QCheckBox, QSlider,
-    QProgressBar, QFormLayout, QWidget, QComboBox, QTableWidget,
+    QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+    QLineEdit, QGroupBox, QCheckBox, QSlider,
+    QFormLayout, QWidget, QComboBox, QTableWidget,
     QTableWidgetItem, QHeaderView, QAbstractItemView,
     QSplitter, QScrollArea, QSizePolicy, QGridLayout,
 )
 from PySide6.QtCore import Qt, QThread, Signal, QEvent
 
 from .base_tool import BaseTool
+from ..ui import widgets
 from .fake_pbr_tool import FakePBRProcessor, ProcessingOptions, PBRInputs, _paint_table_row
 from .exo_pbr_tool import ExoPBRProcessor, ExoPBROptions, ExoPBRInputs
+from ..core.tool_defaults import default_generate_mipmaps, default_material_path
 from ..utils.image_processing import load_image, to_uint8
 from ..utils.helpers import get_config_dir
 
@@ -247,6 +249,7 @@ class Converter:
         phong_strength: float = 0.5,
         phong_tint_mode: str = "selective",
         colored_metal_relief: float = 0.5,
+        clamp_size: int = 0,
     ):
         self.mode = mode
         self.include_emissive = include_emissive
@@ -257,6 +260,7 @@ class Converter:
         self.phong_strength = phong_strength
         self.phong_tint_mode = phong_tint_mode
         self.colored_metal_relief = colored_metal_relief
+        self.clamp_size = int(clamp_size or 0)
 
     @staticmethod
     def _save_channel(channel: np.ndarray, out_path: Path) -> None:
@@ -344,6 +348,7 @@ class Converter:
                     phong_strength=self.phong_strength,
                     phong_tint_mode=self.phong_tint_mode,
                     colored_metal_relief=self.colored_metal_relief,
+                    clamp_size=self.clamp_size,
                 )
                 processor = FakePBRProcessor(options)
                 inputs = PBRInputs(
@@ -359,7 +364,10 @@ class Converter:
                     processor.shutdown()
                 return success, msg
 
-            options = ExoPBROptions(generate_mipmaps=self.generate_mipmaps)
+            options = ExoPBROptions(
+                generate_mipmaps=self.generate_mipmaps,
+                clamp_size=self.clamp_size,
+            )
             processor = ExoPBRProcessor(options)
             inputs = ExoPBRInputs(
                 color=str(color.path),
@@ -399,6 +407,7 @@ class BatchRunner(QThread):
         phong_strength: float = 0.5,
         phong_tint_mode: str = "selective",
         colored_metal_relief: float = 0.5,
+        clamp_size: int = 0,
         row_indices: Optional[List[int]] = None,
     ):
         super().__init__()
@@ -415,6 +424,7 @@ class BatchRunner(QThread):
         self.phong_strength = phong_strength
         self.phong_tint_mode = phong_tint_mode
         self.colored_metal_relief = colored_metal_relief
+        self.clamp_size = int(clamp_size or 0)
         # Parallel list of QTableWidget row indices, one per group, used to
         # report per-row completion back to the UI. -1 means "no row".
         self.row_indices = list(row_indices) if row_indices else [-1] * len(groups)
@@ -441,6 +451,7 @@ class BatchRunner(QThread):
             self.phong_strength,
             self.phong_tint_mode,
             self.colored_metal_relief,
+            clamp_size=self.clamp_size,
         )
         ok_count = 0
         for idx, group in enumerate(self.groups, start=1):
@@ -474,7 +485,6 @@ class TexturePBRBatchTool(BaseTool):
 
     def __init__(self):
         super().__init__("Texture PBR Batch")
-        self.thread: Optional[BatchRunner] = None
         self.scanned_groups: List[AssetGroup] = []
         self.history: List[dict] = []
         try:
@@ -535,18 +545,16 @@ class TexturePBRBatchTool(BaseTool):
         self.history_dropdown.currentIndexChanged.connect(self.on_history_selected)
         form.addRow("Recent run:", self.history_dropdown)
 
-        self.input_root = QLineEdit()
-        in_btn = QPushButton("Browse...")
-        in_btn.clicked.connect(lambda: self._browse_dir_into(self.input_root))
-        form.addRow("Input root:", self._row(self.input_root, in_btn))
+        self.input_root = self.create_picker(
+            "dir", "input root", dialog_title="Select Folder")
+        form.addRow("Input root:", self.input_root)
 
-        self.output_root = QLineEdit()
-        out_btn = QPushButton("Browse...")
-        out_btn.clicked.connect(lambda: self._browse_dir_into(self.output_root))
-        form.addRow("Output root:", self._row(self.output_root, out_btn))
+        self.output_root = self.create_picker(
+            "dir", "output root", dialog_title="Select Folder")
+        form.addRow("Output root:", self.output_root)
 
         self.material_path = QLineEdit()
-        self.material_path.setText("models/ports")
+        self.material_path.setText(default_material_path())
         self.material_path.setPlaceholderText("models/ports (Fake) or exopbr (Exo)")
         form.addRow("Material path:", self.material_path)
 
@@ -584,13 +592,24 @@ class TexturePBRBatchTool(BaseTool):
         self.include_emissive = QCheckBox("Include emissive if present")
         self.include_emissive.setChecked(True)
         self.generate_mipmaps = QCheckBox("Generate Mipmaps")
-        self.generate_mipmaps.setChecked(True)
+        self.generate_mipmaps.setChecked(default_generate_mipmaps(True))
         gen_grid.addWidget(self.recursive_scan, 0, 0)
         gen_grid.addWidget(self.preserve_structure, 0, 1)
         gen_grid.addWidget(self.overwrite, 1, 0)
         gen_grid.addWidget(self.include_emissive, 1, 1)
         gen_grid.addWidget(self.generate_mipmaps, 2, 0)
         form.addRow("Run mode:", self._wrap_layout(gen_grid))
+
+        self.clamp_size_combo = QComboBox()
+        self.clamp_size_combo.addItem("Off", 0)
+        for sz in (32, 64, 128, 256, 512, 1024, 2048, 4096, 8192):
+            self.clamp_size_combo.addItem(f"{sz}", sz)
+        self.clamp_size_combo.setToolTip(
+            "Cap the working resolution before processing. Textures whose "
+            "longest edge exceeds this value are downscaled (aspect "
+            "preserved); smaller textures pass through unchanged."
+        )
+        form.addRow("Clamp Size:", self.clamp_size_combo)
 
         group.setLayout(form)
         return group
@@ -738,21 +757,10 @@ class TexturePBRBatchTool(BaseTool):
         self.results_table.installEventFilter(self)
         col.addWidget(self.results_table, 1)
 
-        self.progress = QProgressBar()
-        self.progress.setVisible(False)
-        col.addWidget(self.progress)
-
-        run_row = QHBoxLayout()
-        run_row.addStretch()
-        self.cancel_btn = QPushButton("Cancel")
-        self.cancel_btn.setEnabled(False)
-        self.cancel_btn.clicked.connect(self.cancel)
-        self.convert_btn = QPushButton("Convert")
+        self.cancel_btn = self.make_cancel_button()
+        self.convert_btn = self.make_run_button("Convert", self.convert)
         self.convert_btn.setEnabled(False)
-        self.convert_btn.clicked.connect(self.convert)
-        run_row.addWidget(self.cancel_btn)
-        run_row.addWidget(self.convert_btn)
-        col.addLayout(run_row)
+        col.addLayout(widgets.action_row(self.cancel_btn, self.convert_btn))
 
         return pane
 
@@ -870,8 +878,8 @@ class TexturePBRBatchTool(BaseTool):
         self.history_dropdown.blockSignals(False)
 
     def _make_history_entry(self) -> dict:
-        input_root = self.input_root.text().strip()
-        output_root = self.output_root.text().strip()
+        input_root = self.input_root.path()
+        output_root = self.output_root.path()
         return {
             "timestamp": datetime.utcnow().isoformat(timespec="seconds") + "Z",
             "label": Path(input_root).name if input_root else output_root,
@@ -921,8 +929,8 @@ class TexturePBRBatchTool(BaseTool):
         except Exception:
             return
 
-        self.input_root.setText(entry.get("input_root") or "")
-        self.output_root.setText(entry.get("output_root") or "")
+        self.input_root.set_path(entry.get("input_root") or "")
+        self.output_root.set_path(entry.get("output_root") or "")
         mode = entry.get("mode") or "Fake PBR"
         mode_index = self.mode_combo.findText(mode)
         if mode_index >= 0:
@@ -957,22 +965,9 @@ class TexturePBRBatchTool(BaseTool):
             if key in reqs:
                 cb.setChecked(bool(reqs[key]))
 
-    def _row(self, line_edit: QLineEdit, button: QPushButton) -> QWidget:
-        w = QWidget()
-        row = QHBoxLayout(w)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.addWidget(line_edit)
-        row.addWidget(button)
-        return w
-
-    def _browse_dir_into(self, line_edit: QLineEdit):
-        folder = QFileDialog.getExistingDirectory(self, "Select Folder", "")
-        if folder:
-            line_edit.setText(folder)
-
     def scan(self):
-        root = self.input_root.text().strip()
-        out_root = self.output_root.text().strip()
+        root = self.input_root.path()
+        out_root = self.output_root.path()
         if not root:
             self.log("Input root is required", "ERROR")
             return
@@ -1069,8 +1064,8 @@ class TexturePBRBatchTool(BaseTool):
         return selected, rows
 
     def convert(self):
-        root = self.input_root.text().strip()
-        out_root = self.output_root.text().strip()
+        root = self.input_root.path()
+        out_root = self.output_root.path()
         if not root or not out_root:
             self.log("Input/Output roots are required", "ERROR")
             return
@@ -1082,17 +1077,11 @@ class TexturePBRBatchTool(BaseTool):
 
         self._save_current_run_to_history()
 
-        self.convert_btn.setEnabled(False)
-        self.cancel_btn.setEnabled(True)
-        self.progress.setVisible(True)
-        self.progress.setRange(0, len(groups))
-        self.progress.setValue(0)
-
         material_path = self.material_path.text().strip()
         if not material_path:
             material_path = "exopbr" if self.mode_combo.currentText() == "Exo PBR" else "models/ports"
 
-        self.thread = BatchRunner(
+        worker = BatchRunner(
             groups=groups,
             input_root=Path(root),
             output_root=Path(out_root),
@@ -1106,12 +1095,19 @@ class TexturePBRBatchTool(BaseTool):
             phong_strength=self.phong_strength_slider.value() / 100.0,
             phong_tint_mode=self.phong_tint_mode_combo.currentData() or "selective",
             colored_metal_relief=self.colored_metal_relief_slider.value() / 100.0,
+            clamp_size=int(self.clamp_size_combo.currentData() or 0),
             row_indices=row_indices,
         )
-        self.thread.progress.connect(self.on_progress)
-        self.thread.row_finished.connect(self._on_row_finished)
-        self.thread.finished.connect(self.on_finished)
-        self.thread.start()
+        worker.row_finished.connect(self._on_row_finished)
+        self.start_worker(
+            worker,
+            self.on_finished,
+            progress_slot=self.on_progress,
+            busy_widgets=(self.convert_btn,),
+            cancel_button=self.cancel_btn,
+            clear_log=False,
+            progress_total=len(groups),
+        )
 
     def _on_row_finished(self, row: int, success: bool):
         """Tint the corresponding results_table row green/red as each task completes."""
@@ -1160,17 +1156,9 @@ class TexturePBRBatchTool(BaseTool):
         return excluded
 
     def on_progress(self, idx: int, total: int, message: str):
-        self.progress.setMaximum(total)
-        self.progress.setValue(idx)
+        self.set_progress(idx, total)
         self.log(message, "INFO")
 
     def on_finished(self, success: bool, message: str):
-        self.convert_btn.setEnabled(True)
-        self.cancel_btn.setEnabled(False)
-        self.progress.setVisible(False)
+        # start_worker's finish wrapper hides the shared progress bar.
         self.log(message, "SUCCESS" if success else "WARNING")
-
-    def cancel(self):
-        if self.thread and self.thread.isRunning():
-            self.thread.requestInterruption()
-            self.log("Cancel requested...", "INFO")

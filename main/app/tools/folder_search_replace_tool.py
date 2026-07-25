@@ -4,13 +4,13 @@ Allows searching and replacing in folder names with blacklist support
 """
 
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
-    QPushButton, QCheckBox, QTextEdit, QFileDialog, QGroupBox
+    QLabel, QLineEdit, QPushButton, QCheckBox, QTextEdit, QMessageBox
 )
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import QThread, Signal
 from pathlib import Path
 from datetime import datetime
 from app.tools.base_tool import BaseTool
+from app.ui import widgets
 import shutil
 
 
@@ -18,6 +18,7 @@ class FolderSearchReplaceWorker(QThread):
     """Worker thread for folder search and replace operations"""
 
     progress = Signal(str, str)  # message, level
+    progress_value = Signal(int, int)  # folders done, total (drives the progress bar)
     finished = Signal(int, int)  # folders_processed, matches_found
 
     def __init__(self, directory, search_text, replace_text, blacklist, create_backup, recursive):
@@ -49,7 +50,16 @@ class FolderSearchReplaceWorker(QThread):
                 all_folders = list(self.directory.glob('*'))
             folder_list = [f for f in all_folders if f.is_dir()]
 
-            for folder_path in folder_list:
+            # Renames are cheap, so throttle bar updates to ~200 steps or a
+            # huge tree would flood the event queue with signal emissions.
+            total = len(folder_list)
+            emit_step = max(1, total // 200)
+            self.progress_value.emit(0, total)
+
+            for idx, folder_path in enumerate(folder_list, start=1):
+                if idx % emit_step == 0 or idx == total:
+                    self.progress_value.emit(idx, total)
+
                 # Check blacklist
                 if self._is_blacklisted(folder_path):
                     continue
@@ -128,51 +138,26 @@ class FolderSearchReplaceTool(BaseTool):
 
     def __init__(self):
         super().__init__("Folder Search & Replace")
-        self.worker = None
         self.last_undo_data = None
         self.setup_tool_ui()
 
     def setup_tool_ui(self):
         """Setup the tool-specific UI"""
-        # Directory selection
-        dir_group = QGroupBox("Directory")
-        dir_layout = QHBoxLayout()
+        self.dir_picker = self.create_picker(
+            "dir", "directory",
+            placeholder="Select a directory to process...",
+            dialog_title="Select Directory")
+        self.add_group("Directory", self.dir_picker)
 
-        self.dir_input = QLineEdit()
-        self.dir_input.setPlaceholderText("Select a directory to process...")
-        dir_layout.addWidget(self.dir_input)
-
-        browse_btn = QPushButton("Browse...")
-        browse_btn.clicked.connect(self.browse_directory)
-        dir_layout.addWidget(browse_btn)
-
-        dir_group.setLayout(dir_layout)
-        self.content_layout.addWidget(dir_group)
-
-        # Search and Replace inputs
-        search_group = QGroupBox("Search && Replace")
-        search_layout = QVBoxLayout()
-
-        search_row = QHBoxLayout()
-        search_row.addWidget(QLabel("Search for:"))
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Text to search for...")
-        search_row.addWidget(self.search_input)
-        search_layout.addLayout(search_row)
-
-        replace_row = QHBoxLayout()
-        replace_row.addWidget(QLabel("Replace with:"))
         self.replace_input = QLineEdit()
         self.replace_input.setPlaceholderText("Replacement text...")
-        replace_row.addWidget(self.replace_input)
-        search_layout.addLayout(replace_row)
-
-        search_group.setLayout(search_layout)
-        self.content_layout.addWidget(search_group)
-
-        # Options
-        options_group = QGroupBox("Options")
-        options_layout = QVBoxLayout()
+        self.add_group(
+            "Search && Replace",
+            widgets.hbox(QLabel("Search for:"), self.search_input),
+            widgets.hbox(QLabel("Replace with:"), self.replace_input),
+        )
 
         self.recursive_check = QCheckBox("Recursive (include subfolders)")
         self.recursive_check.setChecked(True)
@@ -180,70 +165,39 @@ class FolderSearchReplaceTool(BaseTool):
             "When on, scan all subfolders of the input. When off, scan only "
             "the input folder itself."
         )
-        options_layout.addWidget(self.recursive_check)
 
         self.backup_check = QCheckBox("Create backups (.bak)")
         self.backup_check.setChecked(False)
         self.backup_check.setToolTip(
             "Save the original alongside the modified copy."
         )
-        options_layout.addWidget(self.backup_check)
 
-        options_group.setLayout(options_layout)
-        self.content_layout.addWidget(options_group)
-
-        # Blacklist
-        blacklist_group = QGroupBox("Folder Blacklist")
-        blacklist_layout = QVBoxLayout()
+        self.add_group("Options", self.recursive_check, self.backup_check)
 
         blacklist_label = QLabel("Patterns to exclude (one per line, supports * wildcard):")
         blacklist_label.setStyleSheet("color: #808080; font-size: 9pt;")
-        blacklist_layout.addWidget(blacklist_label)
 
         self.blacklist_input = QTextEdit()
         self.blacklist_input.setPlaceholderText("Examples:\n*temp\nbackup_*\n*_old")
         self.blacklist_input.setMaximumHeight(80)
-        blacklist_layout.addWidget(self.blacklist_input)
 
-        blacklist_group.setLayout(blacklist_layout)
-        self.content_layout.addWidget(blacklist_group)
-
-        # Action buttons
-        button_layout = QHBoxLayout()
-        button_layout.addStretch()
+        self.add_group("Folder Blacklist", blacklist_label, self.blacklist_input)
 
         self.clear_log_btn = QPushButton("Clear Log")
         self.clear_log_btn.clicked.connect(self.clear_log)
-        button_layout.addWidget(self.clear_log_btn)
 
         self.undo_btn = QPushButton("Undo Last")
         self.undo_btn.clicked.connect(self.undo_last_operation)
         self.undo_btn.setEnabled(False)
-        button_layout.addWidget(self.undo_btn)
 
-        self.process_btn = QPushButton("Process")
-        self.process_btn.setMinimumWidth(120)
-        self.process_btn.clicked.connect(self.start_processing)
-        button_layout.addWidget(self.process_btn)
-
-        self.content_layout.addLayout(button_layout)
+        self.process_btn = self.make_run_button("Process", self.start_processing)
+        self.add_action_row(self.clear_log_btn, self.undo_btn, self.process_btn)
         self.content_layout.addStretch()
-
-    def browse_directory(self):
-        """Open directory browser"""
-        directory = QFileDialog.getExistingDirectory(
-            self,
-            "Select Directory",
-            self.dir_input.text() or ""
-        )
-        if directory:
-            self.dir_input.setText(directory)
-            self.log(f"Selected directory: {directory}", "INFO")
 
     def start_processing(self):
         """Start the folder search and replace process"""
         # Validate inputs
-        directory = self.dir_input.text()
+        directory = self.dir_picker.path()
         search_text = self.search_input.text()
 
         if not directory:
@@ -262,30 +216,23 @@ class FolderSearchReplaceTool(BaseTool):
         blacklist = [line.strip() for line in self.blacklist_input.toPlainText().split('\n')]
         blacklist = [p for p in blacklist if p]  # Remove empty lines
 
-        # Disable button during processing
-        self.process_btn.setEnabled(False)
-        self.clear_log()
-
-        # Create and start worker
-        self.worker = FolderSearchReplaceWorker(
-            directory=directory,
-            search_text=search_text,
-            replace_text=self.replace_input.text(),
-            blacklist=blacklist,
-            create_backup=self.backup_check.isChecked(),
-            recursive=self.recursive_check.isChecked()
+        self.start_worker(
+            FolderSearchReplaceWorker(
+                directory=directory,
+                search_text=search_text,
+                replace_text=self.replace_input.text(),
+                blacklist=blacklist,
+                create_backup=self.backup_check.isChecked(),
+                recursive=self.recursive_check.isChecked()
+            ),
+            self.processing_finished,
+            busy_widgets=(self.process_btn,),
+            status="Processing...",
         )
-
-        self.worker.progress.connect(self.log)
-        self.worker.finished.connect(self.processing_finished)
-        self.worker.start()
-
         self.log("Processing started...", "INFO")
-        self.emit_status("Processing...")
 
     def processing_finished(self, folders_processed: int, matches_found: int):
         """Handle processing completion"""
-        self.process_btn.setEnabled(True)
         self.log(f"Processing complete! Folders processed: {folders_processed}, Matches found: {matches_found}", "SUCCESS")
 
         if matches_found > 0:
@@ -298,8 +245,6 @@ class FolderSearchReplaceTool(BaseTool):
 
     def undo_last_operation(self):
         """Undo the last folder search and replace operation"""
-        from PySide6.QtWidgets import QMessageBox
-
         if not self.last_undo_data:
             self.log("No operation to undo", "WARNING")
             return

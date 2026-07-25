@@ -14,22 +14,26 @@ import json
 from datetime import datetime
 
 from PySide6.QtWidgets import (
-    QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFileDialog,
+    QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QLineEdit, QGroupBox, QDoubleSpinBox, QCheckBox,
-    QProgressBar, QFormLayout, QWidget, QComboBox, QTabWidget,
+    QFormLayout, QWidget, QComboBox, QTabWidget,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
     QSpinBox, QSplitter, QScrollArea, QSizePolicy, QGridLayout,
 )
 from PySide6.QtCore import Qt, QThread, Signal, QEvent
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from threading import Event
 
 from .base_tool import BaseTool
+from ..ui import widgets
+from ..core.tool_defaults import default_generate_mipmaps, default_max_parallel
 from ..utils.vtf_encoder import VTFEncoder, VTFEncoderError
 from ..utils.helpers import get_config_dir
 from ..utils.image_processing import load_image, resize_to_match, to_uint8
 from ..utils.vmt_generator import generate_exopbr_vmt
 from sourcepp import vtfpp
+
+
+IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.tga *.bmp);;All Files (*.*)"
 
 
 class ProcessingCancelled(Exception):
@@ -72,6 +76,11 @@ class ExoPBROptions:
     emissionscale: float = 0.0
     parallaxscale: float = 0.0
     alphablend: bool = False
+    # Maximum working-resolution edge in pixels. 0 = off (use native
+    # resolution). When > 0, any input whose longest side exceeds
+    # clamp_size is scaled down (aspect preserved) before the PBR
+    # pipeline runs. Only downsizes.
+    clamp_size: int = 0
 
 
 class ExoPBRProcessor:
@@ -245,7 +254,14 @@ class ExoPBRProcessor:
             max_height = max(img.shape[0] for img in all_inputs if img is not None)
             max_width = max(img.shape[1] for img in all_inputs if img is not None)
             height, width = max_height, max_width
-            
+
+            clamp = int(getattr(self.options, "clamp_size", 0) or 0)
+            if clamp > 0 and max(height, width) > clamp:
+                scale = clamp / float(max(height, width))
+                height = max(1, int(round(height * scale)))
+                width = max(1, int(round(width * scale)))
+                self.log(f"[ExoPBR] Clamping working resolution to {width}x{height} (max edge {clamp})")
+
             self.log(f"[ExoPBR] Processing at resolution: {width}x{height}")
             self._check_cancel()
             
@@ -512,6 +528,7 @@ class ExoAutomationThread(QThread):
     """Background thread to process multiple detected materials automatically"""
 
     progress = Signal(str)
+    progress_value = Signal(int, int)  # tasks done, total (drives the progress bar)
     finished = Signal(bool, str)
 
     def __init__(self, processor_factory, tasks, max_workers: int = 2):
@@ -523,7 +540,9 @@ class ExoAutomationThread(QThread):
     def run(self):
         total = len(self.tasks)
         ok_count = 0
+        done_count = 0
         cancelled = False
+        self.progress_value.emit(0, total)
 
         def worker(idx: int, task: dict):
             if self.isInterruptionRequested():
@@ -577,6 +596,8 @@ class ExoAutomationThread(QThread):
                     if isinstance(msg, str) and msg.lower().startswith("cancelled"):
                         cancelled = True
                     self.progress.emit(f"[{idx}/{total}] ✗ {name} failed: {msg}")
+                done_count += 1
+                self.progress_value.emit(done_count, total)
 
         if cancelled or self.isInterruptionRequested():
             self.finished.emit(False, f"Cancelled after {ok_count}/{total} materials")
@@ -680,14 +701,14 @@ class ExoPBRTool(BaseTool):
         input_group = QGroupBox("Input Textures")
         input_layout = QFormLayout()
         
-        self.color_input = self.create_file_input()
-        self.normal_input = self.create_file_input()
-        self.ao_input = self.create_file_input()
-        self.roughness_input = self.create_file_input()
-        self.metallic_input = self.create_file_input()
-        self.selfillum_input = self.create_file_input()
-        self.height_input = self.create_file_input()
-        self.transparency_mask_input = self.create_file_input()
+        self.color_input = self._image_picker()
+        self.normal_input = self._image_picker()
+        self.ao_input = self._image_picker()
+        self.roughness_input = self._image_picker()
+        self.metallic_input = self._image_picker()
+        self.selfillum_input = self._image_picker()
+        self.height_input = self._image_picker()
+        self.transparency_mask_input = self._image_picker()
         
         input_layout.addRow("Color (Required):", self.color_input)
         input_layout.addRow("Normal (Required):", self.normal_input)
@@ -726,6 +747,18 @@ class ExoPBRTool(BaseTool):
         self.alphablend_checkbox.setChecked(False)
         options_layout.addRow("$alphablend:", self.alphablend_checkbox)
 
+        # Clamp size — cap the working resolution before processing.
+        self.clamp_size_combo = QComboBox()
+        self.clamp_size_combo.addItem("Off", 0)
+        for sz in (32, 64, 128, 256, 512, 1024, 2048, 4096, 8192):
+            self.clamp_size_combo.addItem(f"{sz}", sz)
+        self.clamp_size_combo.setToolTip(
+            "Cap the working resolution before processing. Textures whose "
+            "longest edge exceeds this value are downscaled (aspect "
+            "preserved); smaller textures pass through unchanged."
+        )
+        options_layout.addRow("Clamp Size:", self.clamp_size_combo)
+
         # Generate VTF checkbox
         self.generate_vtf_checkbox = QCheckBox("Generate VTF")
         self.generate_vtf_checkbox.setChecked(True)
@@ -733,7 +766,7 @@ class ExoPBRTool(BaseTool):
 
         # Generate mipmaps checkbox
         self.generate_mipmaps_checkbox = QCheckBox("Generate Mipmaps")
-        self.generate_mipmaps_checkbox.setChecked(True)
+        self.generate_mipmaps_checkbox.setChecked(default_generate_mipmaps(True))
         options_layout.addRow("Generate Mipmaps:", self.generate_mipmaps_checkbox)
 
         # Generate VMT checkbox
@@ -748,13 +781,9 @@ class ExoPBRTool(BaseTool):
         output_group = QGroupBox("Output")
         output_layout = QFormLayout()
         # Output folder
-        folder_layout = QHBoxLayout()
-        self.output_folder_input = QLineEdit()
-        self.output_folder_button = QPushButton("Browse...")
-        self.output_folder_button.clicked.connect(self.browse_output_folder)
-        folder_layout.addWidget(self.output_folder_input)
-        folder_layout.addWidget(self.output_folder_button)
-        output_layout.addRow("Output Folder:", folder_layout)
+        self.output_folder_input = self.create_picker(
+            "dir", "output folder", dialog_title="Select Output Folder")
+        output_layout.addRow("Output Folder:", self.output_folder_input)
         
         # Material name
         self.material_name_input = QLineEdit()
@@ -769,22 +798,15 @@ class ExoPBRTool(BaseTool):
         
         output_group.setLayout(output_layout)
         manual_layout.addWidget(output_group)
-        
-        # Progress bar
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setVisible(False)
-        manual_layout.addWidget(self.progress_bar)
-        
+
         # Process button
-        self.process_button = QPushButton("Generate Material")
-        self.process_button.clicked.connect(self.process_material)
+        self.process_button = self.make_run_button("Generate Material", self.process_material)
         self.process_button.setMinimumHeight(40)
         manual_layout.addWidget(self.process_button)
 
-        # Cancel button (manual)
-        self.cancel_button = QPushButton("Cancel")
-        self.cancel_button.setEnabled(False)
-        self.cancel_button.clicked.connect(self.cancel_processing)
+        # Cancel button (manual) — targets the manual worker explicitly
+        self.cancel_button = self.make_cancel_button(
+            lambda: self.request_cancel(self.processing_thread))
         manual_layout.addWidget(self.cancel_button)
         
         manual_layout.addStretch()
@@ -854,35 +876,24 @@ class ExoPBRTool(BaseTool):
         self.auto_history_dropdown.currentIndexChanged.connect(self.on_auto_history_selected)
         form.addRow("Recent run:", self.auto_history_dropdown)
 
-        self.auto_input_folder = QLineEdit()
-        in_btn = QPushButton("Browse...")
-        in_btn.clicked.connect(lambda: self._browse_dir_into(self.auto_input_folder))
-        in_row = QHBoxLayout()
-        in_row.addWidget(self.auto_input_folder)
-        in_row.addWidget(in_btn)
-        form.addRow("Input root:", self._row_widget(in_row))
+        self.auto_input_folder = self.create_picker(
+            "dir", "auto input root", dialog_title="Select Folder")
+        form.addRow("Input root:", self.auto_input_folder)
 
-        self.auto_output_folder = QLineEdit()
-        out_btn = QPushButton("Browse...")
-        out_btn.clicked.connect(lambda: self._browse_dir_into(self.auto_output_folder))
-        out_row = QHBoxLayout()
-        out_row.addWidget(self.auto_output_folder)
-        out_row.addWidget(out_btn)
-        form.addRow("Output root:", self._row_widget(out_row))
+        self.auto_output_folder = self.create_picker(
+            "dir", "auto output root", dialog_title="Select Folder")
+        form.addRow("Output root:", self.auto_output_folder)
 
         self.auto_material_path = QLineEdit()
         self.auto_material_path.setPlaceholderText("e.g., exopbr")
         self.auto_material_path.setText("exopbr")
         form.addRow("Material path:", self.auto_material_path)
 
-        name_row = QHBoxLayout()
         self.auto_prefix = QLineEdit()
         self.auto_prefix.setPlaceholderText("Prefix")
         self.auto_suffix = QLineEdit()
         self.auto_suffix.setPlaceholderText("Suffix")
-        name_row.addWidget(self.auto_prefix)
-        name_row.addWidget(self.auto_suffix)
-        form.addRow("Prefix / Suffix:", self._row_widget(name_row))
+        form.addRow("Prefix / Suffix:", widgets.hbox(self.auto_prefix, self.auto_suffix))
 
         group.setLayout(form)
         return group
@@ -899,7 +910,7 @@ class ExoPBRTool(BaseTool):
         self.auto_generate_vmt = QCheckBox("Generate VMT")
         self.auto_generate_vmt.setChecked(True)
         self.auto_generate_mipmaps = QCheckBox("Generate Mipmaps")
-        self.auto_generate_mipmaps.setChecked(True)
+        self.auto_generate_mipmaps.setChecked(default_generate_mipmaps(True))
         self.auto_skip_existing = QCheckBox("Skip already-processed files")
         self.auto_skip_existing.setChecked(False)
         self.auto_skip_existing.setToolTip(
@@ -923,8 +934,19 @@ class ExoPBRTool(BaseTool):
         max_cpu = os.cpu_count() or 4
         self.auto_max_parallel = QSpinBox()
         self.auto_max_parallel.setRange(1, max(2, max_cpu))
-        self.auto_max_parallel.setValue(min(4, max_cpu))
+        self.auto_max_parallel.setValue(default_max_parallel(min(4, max_cpu)))
         form.addRow("Max parallel:", self.auto_max_parallel)
+
+        self.auto_clamp_size_combo = QComboBox()
+        self.auto_clamp_size_combo.addItem("Off", 0)
+        for sz in (32, 64, 128, 256, 512, 1024, 2048, 4096, 8192):
+            self.auto_clamp_size_combo.addItem(f"{sz}", sz)
+        self.auto_clamp_size_combo.setToolTip(
+            "Cap the working resolution before processing. Textures whose "
+            "longest edge exceeds this value are downscaled (aspect "
+            "preserved) before the PBR pipeline runs."
+        )
+        form.addRow("Clamp Size:", self.auto_clamp_size_combo)
 
         group.setLayout(form)
         return group
@@ -1014,17 +1036,11 @@ class ExoPBRTool(BaseTool):
         self.scan_table.installEventFilter(self)
         col.addWidget(self.scan_table, 1)
 
-        run_row = QHBoxLayout()
-        run_row.addStretch()
-        self.cancel_all_button = QPushButton("Cancel")
-        self.cancel_all_button.setEnabled(False)
-        self.cancel_all_button.clicked.connect(self.cancel_automation)
-        self.process_all_button = QPushButton("Convert")
+        self.cancel_all_button = self.make_cancel_button(
+            lambda: self.request_cancel(self.automation_thread))
+        self.process_all_button = self.make_run_button("Convert", self.process_all_materials)
         self.process_all_button.setEnabled(False)
-        self.process_all_button.clicked.connect(self.process_all_materials)
-        run_row.addWidget(self.cancel_all_button)
-        run_row.addWidget(self.process_all_button)
-        col.addLayout(run_row)
+        col.addLayout(widgets.action_row(self.cancel_all_button, self.process_all_button))
 
         return pane
 
@@ -1088,45 +1104,10 @@ class ExoPBRTool(BaseTool):
                 return True
         return super().eventFilter(obj, event)
 
-    def create_file_input(self) -> QWidget:
-        """Create a file input row with browse button"""
-        container = QWidget()
-        layout = QHBoxLayout(container)
-        layout.setContentsMargins(0, 0, 0, 0)
-        
-        line_edit = QLineEdit()
-        browse_btn = QPushButton("Browse...")
-        browse_btn.clicked.connect(lambda: self.browse_file(line_edit))
-        
-        layout.addWidget(line_edit)
-        layout.addWidget(browse_btn)
-        
-        # Store line edit as property of container for easy access
-        container.line_edit = line_edit
-        
-        return container
-
-    def _row_widget(self, layout: QHBoxLayout) -> QWidget:
-        """Helper to wrap a row layout in a QWidget for FormLayout rows"""
-        w = QWidget()
-        w.setLayout(layout)
-        return w
-
-    def _browse_dir_into(self, line_edit: QLineEdit):
-        folder = QFileDialog.getExistingDirectory(self, "Select Folder", "")
-        if folder:
-            line_edit.setText(folder)
-    
-    def browse_file(self, line_edit: QLineEdit):
-        """Browse for an image file"""
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select Image",
-            "",
-            "Images (*.png *.jpg *.jpeg *.tga *.bmp);;All Files (*.*)"
-        )
-        if file_path:
-            line_edit.setText(file_path)
+    def _image_picker(self) -> widgets.PathPickerRow:
+        """A single-image file picker row (shared last-dir under the "input" key)."""
+        return self.create_picker(
+            "open_file", "input", dialog_title="Select Image", file_filter=IMAGE_FILTER)
 
     def _load_history(self):
         """Load history list from JSON file"""
@@ -1214,8 +1195,8 @@ class ExoPBRTool(BaseTool):
             return
 
         try:
-            self.auto_input_folder.setText(entry.get('input_root') or '')
-            self.auto_output_folder.setText(entry.get('output_folder') or '')
+            self.auto_input_folder.set_path(entry.get('input_root') or '')
+            self.auto_output_folder.set_path(entry.get('output_folder') or '')
             self.auto_material_path.setText(entry.get('material_path') or 'exopbr')
             self.auto_prefix.setText(entry.get('prefix') or '')
             self.auto_suffix.setText(entry.get('suffix') or '')
@@ -1244,17 +1225,17 @@ class ExoPBRTool(BaseTool):
         # Populate inputs
         inputs = entry.get('inputs', {})
         try:
-            self.color_input.line_edit.setText(inputs.get('color') or '')
-            self.normal_input.line_edit.setText(inputs.get('normal') or '')
-            self.ao_input.line_edit.setText(inputs.get('ao') or '')
-            self.roughness_input.line_edit.setText(inputs.get('roughness') or '')
-            self.metallic_input.line_edit.setText(inputs.get('metallic') or '')
+            self.color_input.set_path(inputs.get('color') or '')
+            self.normal_input.set_path(inputs.get('normal') or '')
+            self.ao_input.set_path(inputs.get('ao') or '')
+            self.roughness_input.set_path(inputs.get('roughness') or '')
+            self.metallic_input.set_path(inputs.get('metallic') or '')
             if hasattr(self, 'selfillum_input'):
-                self.selfillum_input.line_edit.setText(inputs.get('selfillum') or '')
+                self.selfillum_input.set_path(inputs.get('selfillum') or '')
             if hasattr(self, 'height_input'):
-                self.height_input.line_edit.setText(inputs.get('height') or '')
+                self.height_input.set_path(inputs.get('height') or '')
             if hasattr(self, 'transparency_mask_input'):
-                self.transparency_mask_input.line_edit.setText(inputs.get('transparency_mask') or '')
+                self.transparency_mask_input.set_path(inputs.get('transparency_mask') or '')
         except Exception:
             pass
 
@@ -1273,7 +1254,7 @@ class ExoPBRTool(BaseTool):
 
         # Populate outputs
         try:
-            self.output_folder_input.setText(entry.get('output_folder') or '')
+            self.output_folder_input.set_path(entry.get('output_folder') or '')
             self.material_name_input.setText(entry.get('material_name') or '')
             self.material_path_input.setText(entry.get('material_path') or 'exopbr')
         except Exception:
@@ -1287,7 +1268,7 @@ class ExoPBRTool(BaseTool):
             'timestamp': datetime.utcnow().isoformat(timespec='seconds') + 'Z',
             'material_name': self.material_name_input.text() or '',
             'material_path': self.material_path_input.text() or '',
-            'output_folder': self.output_folder_input.text() or '',
+            'output_folder': self.output_folder_input.path() or '',
             'inputs': {
                 'color': inputs.color or '',
                 'normal': inputs.normal or '',
@@ -1340,12 +1321,12 @@ class ExoPBRTool(BaseTool):
             'generate_vmt': self.auto_generate_vmt.isChecked(),
             'generate_mipmaps': self.auto_generate_mipmaps.isChecked(),
         }
-        label = self.auto_input_folder.text() or self.auto_output_folder.text() or ''
+        label = self.auto_input_folder.path() or self.auto_output_folder.path() or ''
         return {
             'timestamp': datetime.utcnow().isoformat(timespec='seconds') + 'Z',
             'label': label,
-            'input_root': self.auto_input_folder.text() or '',
-            'output_folder': self.auto_output_folder.text() or '',
+            'input_root': self.auto_input_folder.path() or '',
+            'output_folder': self.auto_output_folder.path() or '',
             'material_path': self.auto_material_path.text() or 'exopbr',
             'prefix': self.auto_prefix.text() or '',
             'suffix': self.auto_suffix.text() or '',
@@ -1385,16 +1366,6 @@ class ExoPBRTool(BaseTool):
         except Exception:
             pass
     
-    def browse_output_folder(self):
-        """Browse for output folder"""
-        folder = QFileDialog.getExistingDirectory(
-            self,
-            "Select Output Folder",
-            ""
-        )
-        if folder:
-            self.output_folder_input.setText(folder)
-    
     def get_processing_options(self) -> ExoPBROptions:
         """Get current processing options from UI"""
         return ExoPBROptions(
@@ -1403,20 +1374,21 @@ class ExoPBRTool(BaseTool):
             generate_mipmaps=self.generate_mipmaps_checkbox.isChecked(),
             emissionscale=float(self.emission_spin.value()),
             parallaxscale=float(self.parallax_spin.value()),
-            alphablend=self.alphablend_checkbox.isChecked()
+            alphablend=self.alphablend_checkbox.isChecked(),
+            clamp_size=int(self.clamp_size_combo.currentData() or 0),
         )
     
     def get_inputs(self) -> ExoPBRInputs:
         """Get input file paths from UI"""
         return ExoPBRInputs(
-            color=self.color_input.line_edit.text() or None,
-            normal=self.normal_input.line_edit.text() or None,
-            ao=self.ao_input.line_edit.text() or None,
-            roughness=self.roughness_input.line_edit.text() or None,
-            metallic=self.metallic_input.line_edit.text() or None,
-            selfillum=self.selfillum_input.line_edit.text() or None,
-            height=self.height_input.line_edit.text() or None,
-            transparency_mask=self.transparency_mask_input.line_edit.text() or None
+            color=self.color_input.path() or None,
+            normal=self.normal_input.path() or None,
+            ao=self.ao_input.path() or None,
+            roughness=self.roughness_input.path() or None,
+            metallic=self.metallic_input.path() or None,
+            selfillum=self.selfillum_input.path() or None,
+            height=self.height_input.path() or None,
+            transparency_mask=self.transparency_mask_input.path() or None
         )
     
     def process_material(self):
@@ -1431,28 +1403,18 @@ class ExoPBRTool(BaseTool):
             self.log("Error: Normal map is required", "error")
             return
         
-        output_folder = self.output_folder_input.text()
+        output_folder = self.output_folder_input.path()
         if not output_folder:
             self.log("Error: Output folder is required", "error")
             return
-        
+
         material_name = self.material_name_input.text()
         if not material_name:
             self.log("Error: Material name is required", "error")
             return
-        
+
         material_path = self.material_path_input.text() or "exopbr"
-        
-        # Disable UI
-        self.process_button.setEnabled(False)
-        self.cancel_button.setEnabled(True)
-        self.progress_bar.setVisible(True)
-        self.progress_bar.setRange(0, 0)  # Indeterminate
-        
-        # Clear log
-        self.log_output.clear()
-        self.log("Starting material processing...", "info")
-        
+
         # Create processor
         options = self.get_processing_options()
         self.processor = ExoPBRProcessor(options)
@@ -1462,8 +1424,8 @@ class ExoPBRTool(BaseTool):
             self._save_current_run_to_history()
         except Exception:
             pass
-        
-        # Start processing thread
+
+        # Start processing thread with standard busy/cancel/progress wiring
         self.processing_thread = ExoProcessingThread(
             self.processor,
             inputs,
@@ -1471,16 +1433,18 @@ class ExoPBRTool(BaseTool):
             material_name,
             material_path
         )
-        self.processing_thread.finished.connect(self.on_processing_finished)
-        self.processing_thread.start()
-    
+        self.start_worker(
+            self.processing_thread,
+            self.on_processing_finished,
+            progress_slot=lambda m: self.log(m, "INFO"),
+            busy_widgets=(self.process_button,),
+            cancel_button=self.cancel_button,
+            clear_log=True,
+        )
+        self.log("Starting material processing...", "info")
+
     def on_processing_finished(self, success: bool, message: str):
         """Handle processing completion"""
-        # Re-enable UI
-        self.process_button.setEnabled(True)
-        self.cancel_button.setEnabled(False)
-        self.progress_bar.setVisible(False)
-        
         # Log result
         if success:
             self.log(message, "success")
@@ -1534,8 +1498,8 @@ class ExoPBRTool(BaseTool):
 
     def scan_folder_for_materials(self):
         """Scan a folder for PBR material sets"""
-        root = self.auto_input_folder.text().strip()
-        out_dir = self.auto_output_folder.text().strip()
+        root = self.auto_input_folder.path()
+        out_dir = self.auto_output_folder.path()
         if not root:
             self.log("Select an Input Root Folder first", "ERROR")
             return
@@ -1655,7 +1619,7 @@ class ExoPBRTool(BaseTool):
         if not hasattr(self, '_scan_matches') or not self._scan_matches:
             self.log("No materials to process. Run Scan first.", "ERROR")
             return
-        out_dir = self.auto_output_folder.text().strip()
+        out_dir = self.auto_output_folder.path()
         mat_path = self.auto_material_path.text().strip() or "exopbr"
         prefix = self.auto_prefix.text().strip()
         suffix = self.auto_suffix.text().strip()
@@ -1664,6 +1628,7 @@ class ExoPBRTool(BaseTool):
         emission = float(self.auto_emission_spin.value())
         parallax = float(self.auto_parallax_spin.value()) if hasattr(self, 'auto_parallax_spin') else 0.0
         alphablend = self.auto_alphablend.isChecked()
+        clamp_size = int(self.auto_clamp_size_combo.currentData() or 0)
         gen_vmt = self.auto_generate_vmt.isChecked()
         gen_vtf = self.auto_generate_vtf.isChecked()
         skip_existing = self.auto_skip_existing.isChecked()
@@ -1708,7 +1673,8 @@ class ExoPBRTool(BaseTool):
                     generate_mipmaps=self.auto_generate_mipmaps.isChecked(),
                     emissionscale=emission,
                     parallaxscale=parallax,
-                    alphablend=alphablend
+                    alphablend=alphablend,
+                    clamp_size=clamp_size,
                 )
             })
         if skip_existing and skipped_existing:
@@ -1723,13 +1689,6 @@ class ExoPBRTool(BaseTool):
         except Exception:
             pass
 
-        # Disable buttons
-        self.scan_button.setEnabled(False)
-        self.process_all_button.setEnabled(False)
-        self.cancel_all_button.setEnabled(True)
-        self.clear_log()
-        self.log(f"Starting batch processing of {len(tasks)} materials...", "INFO")
-
         def make_processor():
             proc = ExoPBRProcessor(ExoPBROptions(
                 generate_vtf=self.auto_generate_vtf.isChecked(),
@@ -1737,36 +1696,22 @@ class ExoPBRTool(BaseTool):
                 generate_mipmaps=self.auto_generate_mipmaps.isChecked(),
                 emissionscale=emission,
                 parallaxscale=parallax,
-                alphablend=alphablend
+                alphablend=alphablend,
+                clamp_size=clamp_size,
             ))
             return proc
 
         self.automation_thread = ExoAutomationThread(make_processor, tasks, max_workers=self.auto_max_parallel.value())
-        self.automation_thread.progress.connect(lambda m: self.log(m, "INFO"))
-        self.automation_thread.finished.connect(self.on_automation_finished)
-        self.automation_thread.start()
+        self.start_worker(
+            self.automation_thread,
+            self.on_automation_finished,
+            progress_slot=lambda m: self.log(m, "INFO"),
+            busy_widgets=(self.scan_button, self.process_all_button),
+            cancel_button=self.cancel_all_button,
+            clear_log=True,
+        )
+        self.log(f"Starting batch processing of {len(tasks)} materials...", "INFO")
 
     def on_automation_finished(self, success: bool, message: str):
         """Handle automation completion"""
         self.log(message, "SUCCESS" if success else "WARNING")
-        self.scan_button.setEnabled(True)
-        self.process_all_button.setEnabled(True)
-        self.cancel_all_button.setEnabled(False)
-
-    def cancel_processing(self):
-        """Request cancellation of the current manual process."""
-        try:
-            if self.processing_thread and self.processing_thread.isRunning():
-                self.processing_thread.requestInterruption()
-                self.log("Cancel requested for current process...", "INFO")
-        except Exception:
-            pass
-
-    def cancel_automation(self):
-        """Request cancellation of the current automation batch."""
-        try:
-            if self.automation_thread and self.automation_thread.isRunning():
-                self.automation_thread.requestInterruption()
-                self.log("Cancel requested for batch processing...", "INFO")
-        except Exception:
-            pass

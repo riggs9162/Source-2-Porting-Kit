@@ -132,6 +132,18 @@ class VTFEncoder:
             options.compute_reflectivity = False
             options.compute_transparency_flags = False
             options.invert_green_channel = invert_green
+            # CRITICAL: sourcepp's CreationOptions default to
+            # ResizeMethod.POWER_OF_TWO_BIGGER + ResizeFilter.DEFAULT, which
+            # runs an internal resize+filter pass on every encode — even when
+            # the input is already power-of-two. The default filter mangles
+            # normal-map vector data, producing the all-black flat regions
+            # users hit on tangent-space normals. Since the FakePBR pipeline
+            # already snaps each output buffer to its target resolution in
+            # Python (see _apply_output_clamp), we explicitly disable the
+            # encoder-side resize so sourcepp uses our buffer dimensions
+            # verbatim.
+            options.width_resize_method = vtfpp.ImageConversion.ResizeMethod.NONE
+            options.height_resize_method = vtfpp.ImageConversion.ResizeMethod.NONE
 
             # Create VTF using sourcepp's static method
             # VTF.create_and_bake returns None on success

@@ -1,2 +1,102 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# ----------------------------------------------------------------------------
+# Line endings that must not be normalised
+# ----------------------------------------------------------------------------
+# Batch/PowerShell scripts can misbehave with LF endings on Windows.
+*.bat           text eol=crlf
+*.cmd           text eol=crlf
+*.ps1           text eol=crlf
+# Shell scripts must stay LF even when checked out on Windows.
+*.sh            text eol=lf
+
+# ----------------------------------------------------------------------------
+# Source engine text formats — normalise and diff them like any other source
+# ----------------------------------------------------------------------------
+*.qc            text
+*.qci           text
+*.smd           text
+*.vmt           text
+*.vmf           text
+*.vdf           text
+*.res           text
+*.gltf          text
+*.hlsl          text diff=cpp
+*.fxc           text diff=cpp
+
+# ----------------------------------------------------------------------------
+# Binary — never touch these. autocrlf mangling corrupts them silently and the
+# damage only surfaces in-engine (a texture or compiled shader that no longer
+# loads), so mark them explicitly rather than trusting content detection.
+# ----------------------------------------------------------------------------
+# Compiled Source 1 models and assets
+*.mdl           binary
+*.vvd           binary
+*.vtx           binary
+*.phy           binary
+*.ani           binary
+*.vtf           binary
+*.vcs           binary
+*.bsp           binary
+*.gma           binary
+*.vpk           binary
+
+# Compiled Source 2 assets
+*.vmdl_c        binary
+*.vmat_c        binary
+*.vtex_c        binary
+*.vmesh_c       binary
+*.vphys_c       binary
+*.vanim_c       binary
+*.vagrp_c       binary
+*.vseq_c        binary
+*.vsnd_c        binary
+*.vpcf_c        binary
+*.vwrld_c       binary
+
+# Model interchange
+*.glb           binary
+*.fbx           binary
+*.dmx           binary
+*.blend         binary
+
+# Images
+*.png           binary
+*.jpg           binary
+*.jpeg          binary
+*.gif           binary
+*.bmp           binary
+*.tga           binary
+*.psd           binary
+*.ico           binary
+*.dds           binary
+*.exr           binary
+*.hdr           binary
+
+# Audio
+*.wav           binary
+*.ogg           binary
+*.mp3           binary
+*.flac          binary
+
+# Executables, libraries and archives
+*.exe           binary
+*.dll           binary
+*.pyd           binary
+*.so            binary
+*.dylib         binary
+*.zip           binary
+*.7z            binary
+*.rar           binary
+*.gz            binary
+
+# Fonts
+*.ttf           binary
+*.otf           binary
+
+# ----------------------------------------------------------------------------
+# Diff behaviour
+# ----------------------------------------------------------------------------
+*.py            text diff=python
+*.md            text diff=markdown

@@ -1,23 +1,22 @@
+"""
+Loop Point Converter Tool
+
+Converts audio files to WAV and embeds a RIFF ``smpl`` loop-point chunk so the
+Source engine plays them as seamless loops.
+"""
+
 import shutil
 import struct
 import wave
 from pathlib import Path
 from threading import Lock
-from typing import List, Optional
+from typing import List
 
 from PySide6.QtCore import QThread, Signal
-from PySide6.QtWidgets import (
-    QVBoxLayout,
-    QHBoxLayout,
-    QGroupBox,
-    QLabel,
-    QLineEdit,
-    QPushButton,
-    QCheckBox,
-    QFileDialog,
-)
+from PySide6.QtWidgets import QCheckBox, QLabel, QLineEdit, QPushButton
 
 from app.tools.base_tool import BaseTool
+from app.ui import widgets
 from app.utils.audio_runner import default_workers, parallel_for_each, run_ffmpeg
 
 SUPPORTED_EXTENSIONS = {".ogg", ".mp3", ".wav"}
@@ -28,6 +27,7 @@ class LoopConversionWorker(QThread):
     """Background worker to convert audio to WAV and add loop points."""
 
     progress = Signal(str, str)  # message, level
+    progress_value = Signal(int, int)  # files done, total (drives the progress bar)
     finished = Signal(int, int, int)  # total, converted, failed
 
     def __init__(
@@ -45,6 +45,7 @@ class LoopConversionWorker(QThread):
         self._counter_lock = Lock()
         self._converted = 0
         self._failed = 0
+        self._done_files = 0
 
     def run(self):
         total = len(self.files)
@@ -64,6 +65,17 @@ class LoopConversionWorker(QThread):
     def _process_one(self, src: Path) -> None:
         if self.isInterruptionRequested():
             return
+        try:
+            self._process_one_inner(src)
+        finally:
+            # Progress counts files finished regardless of outcome; emitted
+            # from pool threads (safe — cross-thread signals are queued).
+            with self._counter_lock:
+                self._done_files += 1
+                done = self._done_files
+            self.progress_value.emit(done, len(self.files))
+
+    def _process_one_inner(self, src: Path) -> None:
         try:
             dest = self._compute_destination(src)
 
@@ -207,109 +219,70 @@ class LoopPointTool(BaseTool):
 
     def __init__(self):
         super().__init__("Loop Point Converter")
-        self.worker: Optional[LoopConversionWorker] = None
-        self.selected_path: Optional[Path] = None
         self.setup_tool_ui()
 
     def setup_tool_ui(self):
-        # Source selection
-        src_group = QGroupBox("Source")
-        src_layout = QVBoxLayout()
-
-        path_row = QHBoxLayout()
+        # One line edit fed by BOTH a file and a folder button, so it stays a
+        # plain QLineEdit instead of a single-mode PathPickerRow.
         self.path_input = QLineEdit()
         self.path_input.setPlaceholderText("Select a file or folder containing audio…")
-        path_row.addWidget(self.path_input)
 
         file_btn = QPushButton("File…")
         file_btn.clicked.connect(self.select_file)
-        path_row.addWidget(file_btn)
-
         folder_btn = QPushButton("Folder…")
         folder_btn.clicked.connect(self.select_folder)
-        path_row.addWidget(folder_btn)
+        path_row = widgets.hbox(self.path_input, file_btn, folder_btn)
 
-        src_layout.addLayout(path_row)
-
-        options_row = QHBoxLayout()
         self.recursive_check = QCheckBox("Recursive (include subfolders)")
         self.recursive_check.setChecked(True)
         self.recursive_check.setToolTip(
             "When on, scan all subfolders of the input. When off, scan only "
             "the input folder itself."
         )
-        options_row.addWidget(self.recursive_check)
 
         self.process_wav_check = QCheckBox("Add loop chunk to existing WAV")
         self.process_wav_check.setChecked(True)
-        options_row.addWidget(self.process_wav_check)
 
         self.overwrite_check = QCheckBox("Replace existing outputs")
         self.overwrite_check.setChecked(True)
         self.overwrite_check.setToolTip(
             "Overwrite outputs that already exist in the destination folder."
         )
-        options_row.addWidget(self.overwrite_check)
 
         self.delete_original_check = QCheckBox("Delete originals after conversion")
         self.delete_original_check.setChecked(True)
-        options_row.addWidget(self.delete_original_check)
 
-        src_layout.addLayout(options_row)
-        src_group.setLayout(src_layout)
-        self.content_layout.addWidget(src_group)
+        options_row = widgets.hbox(self.recursive_check, self.process_wav_check,
+                                   self.overwrite_check, self.delete_original_check)
 
-        # Detection options
-        detect_group = QGroupBox("Loop keyword detection")
-        detect_layout = QVBoxLayout()
+        self.add_group("Source", path_row, options_row)
 
-        keyword_row = QHBoxLayout()
-        keyword_row.addWidget(QLabel("Keywords (comma separated):"))
         self.keyword_input = QLineEdit(",".join(DEFAULT_KEYWORDS))
-        keyword_row.addWidget(self.keyword_input)
-        detect_layout.addLayout(keyword_row)
+        keyword_row = widgets.hbox(QLabel("Keywords (comma separated):"), self.keyword_input)
+        self.add_group("Loop keyword detection", keyword_row)
 
-        detect_group.setLayout(detect_layout)
-        self.content_layout.addWidget(detect_group)
-
-        # Action buttons — Cancel + primary action right-aligned, like the
-        # other batch tools.
-        action_row = QHBoxLayout()
-        action_row.addStretch()
-
-        self.cancel_btn = QPushButton("Cancel")
-        self.cancel_btn.setEnabled(False)
-        self.cancel_btn.clicked.connect(self.cancel_worker)
-        action_row.addWidget(self.cancel_btn)
-
-        self.run_btn = QPushButton("Process")
-        self.run_btn.clicked.connect(self.start_conversion)
-        action_row.addWidget(self.run_btn)
-
-        self.content_layout.addLayout(action_row)
+        self.cancel_btn = self.make_cancel_button()
+        self.run_btn = self.make_run_button("Process", self.start_conversion)
+        self.add_action_row(self.cancel_btn, self.run_btn)
 
     def select_file(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select audio file",
-            "",
-            "Audio Files (*.wav *.ogg *.mp3);;All Files (*.*)",
-        )
+        path = widgets.browse_open_file(
+            self, "Select audio file",
+            file_filter="Audio Files (*.wav *.ogg *.mp3);;All Files (*.*)",
+            settings=self.settings, remember_key=f"{self.tool_name}/input",
+            fallback=self.path_input.text().strip())
         if path:
             self.path_input.setText(path)
-            self.selected_path = Path(path)
 
     def select_folder(self):
-        path = QFileDialog.getExistingDirectory(self, "Select folder containing audio")
+        path = widgets.browse_dir(
+            self, "Select folder containing audio",
+            settings=self.settings, remember_key=f"{self.tool_name}/input",
+            fallback=self.path_input.text().strip())
         if path:
             self.path_input.setText(path)
-            self.selected_path = Path(path)
 
     def start_conversion(self):
-        if self.worker and self.worker.isRunning():
-            self.log("A conversion is already running.", "WARNING")
-            return
-
         path_text = self.path_input.text().strip()
         if not path_text:
             self.log("Please select a file or folder first.", "ERROR")
@@ -334,32 +307,21 @@ class LoopPointTool(BaseTool):
             self.log("No matching audio files found with the provided keywords.", "WARNING")
             return
 
-        self.run_btn.setEnabled(False)
-        self.cancel_btn.setEnabled(True)
-        self.emit_status("Starting loop point conversion…")
-
-        self.worker = LoopConversionWorker(
-            files=files,
-            overwrite_existing=overwrite,
-            process_wav=process_wav,
-            delete_original=delete_original,
+        self.start_worker(
+            LoopConversionWorker(
+                files=files,
+                overwrite_existing=overwrite,
+                process_wav=process_wav,
+                delete_original=delete_original,
+            ),
+            self.on_finished,
+            busy_widgets=(self.run_btn,),
+            cancel_button=self.cancel_btn,
+            status="Starting loop point conversion…",
+            clear_log=False,
         )
-        self.worker.progress.connect(self.log)
-        self.worker.finished.connect(self.on_finished)
-        self.worker.start()
-
-    def cancel_worker(self):
-        if self.worker and self.worker.isRunning():
-            self.worker.requestInterruption()
-            self.worker.quit()
-            self.worker.wait(2000)
-            self.log("Conversion cancelled.", "WARNING")
-        self.run_btn.setEnabled(True)
-        self.cancel_btn.setEnabled(False)
 
     def on_finished(self, total: int, converted: int, failed: int):
-        self.run_btn.setEnabled(True)
-        self.cancel_btn.setEnabled(False)
         self.emit_status("Loop point conversion complete.")
         self.log(
             f"Done. Total queued: {total}, converted: {converted}, failed: {failed}",

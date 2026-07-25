@@ -17,17 +17,19 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from PySide6.QtWidgets import (
-    QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFileDialog,
+    QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QLineEdit, QGroupBox, QDoubleSpinBox, QCheckBox,
-    QProgressBar, QFormLayout, QWidget, QComboBox, QTableWidget,
+    QFormLayout, QWidget, QComboBox, QTableWidget,
     QTableWidgetItem, QHeaderView, QAbstractItemView, QSlider, QStackedWidget,
     QSplitter, QScrollArea, QGridLayout, QSizePolicy,
 )
 from PySide6.QtCore import Qt, QThread, Signal, QEvent
 
 from .base_tool import BaseTool
+from ..ui import widgets
 from .fake_pbr_tool import FakePBRProcessor, ProcessingOptions, PBRInputs, _paint_table_row
 from .exo_pbr_tool import ExoPBRProcessor, ExoPBROptions, ExoPBRInputs
+from ..core.tool_defaults import default_generate_mipmaps, default_material_path
 from ..utils.helpers import get_config_dir
 
 
@@ -40,6 +42,11 @@ class VmatTextures:
     metallic: Optional[Path] = None
     emissive: Optional[Path] = None
     translucency: Optional[Path] = None
+    # Model-tint mask (Source 2 TextureTintMask / g_tTintMask). Single-channel:
+    # white = the entity's render color tints this pixel, black = keeps the
+    # authored albedo. Baked into the basetexture alpha for GMod's
+    # $blendtintbybasealpha colorable-prop path.
+    tintmask: Optional[Path] = None
     # When the source vmat declared a Texture* value as a vector literal
     # (e.g. `"TextureColor" "[1.0 1.0 1.0 0.0]"`) instead of a path, the
     # parsed RGBA components live here as a 4-tuple. The processors
@@ -80,6 +87,14 @@ class VmatEntry:
     selfillum: bool = False
     selfillum_tint: Optional[Tuple[float, float, float]] = None
     selfillum_brightness: Optional[float] = None
+    # Tintable-prop support from F_TINT_MASK + TextureTintMask +
+    # g_flModelTintAmount. When True, the FakePBR processor bakes the tint
+    # mask into the basetexture alpha and the VMT enables
+    # $blendtintbybasealpha so GMod's Color tool / render color drives the
+    # masked regions. g_flModelTintAmount 0 opts a material out even when
+    # the flag is present (Source 2 defaults the amount to 1).
+    tintable: bool = False
+    model_tint_amount: Optional[float] = None
 
 
 class VmatParser:
@@ -133,6 +148,13 @@ class VmatParser:
             "trans", "translucency", "translucent", "opacity", "alpha", "opac",
             "ttranslucency", "topacity",
         ),
+        # "mask" alone is deliberately generic — HLA names its tint masks
+        # `<name>_mask.png` — so sibling auto-detect for this role only runs
+        # when the vmat actually sets F_TINT_MASK (see parse_file).
+        "tintmask": (
+            "tintmask", "tint_mask", "tint", "mask",
+            "ttintmask",
+        ),
     }
 
     KEY_MAP: Dict[str, Tuple[str, ...]] = {
@@ -173,6 +195,9 @@ class VmatParser:
             "TextureTranslucency",
             "TextureOpacity",
             "TextureAlpha",
+        ),
+        "tintmask": (
+            "TextureTintMask",
         ),
     }
 
@@ -375,7 +400,14 @@ class VmatParser:
             if resolved is not None:
                 sources[role] = "VMAT definition"
             else:
-                sibling = self._resolve_from_siblings(vmat_path, role)
+                # The tintmask role tokens include the generic "mask" (HLA
+                # names tint masks `<name>_mask.png`), so sibling auto-detect
+                # for it only runs when the vmat declares F_TINT_MASK —
+                # otherwise any unrelated *_mask sibling would be grabbed.
+                if role == "tintmask" and flags.get("F_TINT_MASK") != "1":
+                    sibling = None
+                else:
+                    sibling = self._resolve_from_siblings(vmat_path, role)
                 if sibling is not None:
                     resolved = sibling
                     sources[role] = "Same-folder auto-detect"
@@ -413,6 +445,8 @@ class VmatParser:
             elif role == "translucency":
                 textures.translucency = resolved
                 textures.translucency_constant = constant
+            elif role == "tintmask":
+                textures.tintmask = resolved
             if raw_val:
                 raw_map[role] = raw_val
 
@@ -440,6 +474,36 @@ class VmatParser:
         if selfillum and textures.emissive is None:
             warnings.append("F_SELF_ILLUM set but no selfillum mask found")
 
+        # Tintable-prop support: F_TINT_MASK (or an explicitly referenced
+        # TextureTintMask) marks the material as responding to the model's
+        # render color through a mask. g_flModelTintAmount 0 opts out — the
+        # Source 2 default is 1 (full tint) even when the key is absent.
+        model_tint_amount = _parse_scalar("g_flModelTintAmount")
+        tintable = flags.get("F_TINT_MASK") == "1" or textures.tintmask is not None
+        if model_tint_amount is not None and model_tint_amount <= 0.0:
+            tintable = False
+        if tintable and textures.tintmask is None:
+            warnings.append("F_TINT_MASK set but no tint mask found; whole surface will tint")
+
+        # HLA's "the entity tint IS the color" skins (e.g. bodybag_01_tintable)
+        # author TextureColor as a literal — that literal is what Source 2
+        # compiles into g_tColor, so it must win over sibling auto-detect
+        # here: the sibling color map belongs to the NON-tintable skin, and
+        # using it makes the ported skin render as a duplicate of skin 0
+        # with muddy multiply-coloring instead of a cleanly tintable base.
+        if tintable and textures.color is not None:
+            raw_color = (raw_map.get("color") or "").strip()
+            if raw_color.startswith(("[", "{")):
+                constant = self._parse_literal_rgba(raw_color)
+                if constant is not None:
+                    textures.color = None
+                    textures.color_constant = constant
+                    sources["color"] = (
+                        f"VMAT literal "
+                        f"[{constant[0]:.3f} {constant[1]:.3f} {constant[2]:.3f} {constant[3]:.3f}]"
+                        " (tintable base)"
+                    )
+
         rel_dir = vmat_path.parent
         if vmat_root in vmat_path.parents:
             rel_dir = vmat_path.parent.relative_to(vmat_root)
@@ -458,6 +522,8 @@ class VmatParser:
             selfillum=selfillum,
             selfillum_tint=selfillum_tint,
             selfillum_brightness=selfillum_brightness,
+            tintable=tintable,
+            model_tint_amount=model_tint_amount,
         )
 
 
@@ -483,6 +549,8 @@ class VmatBatchRunner(QThread):
         fake_phong_strength: float,
         fake_phong_tint_mode: str,
         fake_colored_metal_relief: float,
+        fake_shader: str,
+        fake_surfaceprop: str,
         exo_emission: float,
         exo_parallax: float,
         exo_alphablend: bool,
@@ -491,8 +559,10 @@ class VmatBatchRunner(QThread):
         generate_mipmaps: bool,
         glow_mode: str = "selfillum",
         transparency_mode: str = "auto",
+        tint_mode: str = "auto",
         skip_existing: bool = False,
         synthesize_missing_maps: bool = False,
+        clamp_size: int = 0,
         row_indices: Optional[List[int]] = None,
     ):
         super().__init__()
@@ -516,6 +586,8 @@ class VmatBatchRunner(QThread):
         self.fake_phong_strength = fake_phong_strength
         self.fake_phong_tint_mode = fake_phong_tint_mode
         self.fake_colored_metal_relief = fake_colored_metal_relief
+        self.fake_shader = (fake_shader or "VertexLitGeneric").strip() or "VertexLitGeneric"
+        self.fake_surfaceprop = (fake_surfaceprop or "").strip()
         self.exo_emission = exo_emission
         self.exo_parallax = exo_parallax
         self.exo_alphablend = exo_alphablend
@@ -524,8 +596,13 @@ class VmatBatchRunner(QThread):
         self.generate_mipmaps = generate_mipmaps
         self.glow_mode = glow_mode
         self.transparency_mode = transparency_mode
+        # "auto" ports tint masks from tintable vmats (F_TINT_MASK); "off"
+        # ignores them entirely. Fake PBR mode only — the ExoPBR shader has
+        # no $blendtintbybasealpha equivalent.
+        self.tint_mode = tint_mode
         self.skip_existing = skip_existing
         self.synthesize_missing_maps = synthesize_missing_maps
+        self.clamp_size = int(clamp_size or 0)
         # Parallel list of QTableWidget row indices (-1 = no row), used to
         # report per-row completion back to the UI.
         self.row_indices = list(row_indices) if row_indices else [-1] * len(entries)
@@ -677,6 +754,8 @@ class VmatBatchRunner(QThread):
                     options = ProcessingOptions(
                         ao_strength=self.fake_ao_strength,
                         gloss_gamma=self.fake_gloss_gamma,
+                        shader=self.fake_shader,
+                        surfaceprop=self.fake_surfaceprop,
                         generate_vtf=self.generate_vtf,
                         generate_vmt=self.generate_vmt,
                         generate_mipmaps=self.generate_mipmaps,
@@ -688,6 +767,7 @@ class VmatBatchRunner(QThread):
                         alphatest=alphatest,
                         glow_mode=self.glow_mode,
                         synthesize_missing_maps=self.synthesize_missing_maps,
+                        clamp_size=self.clamp_size,
                     )
                     processor = FakePBRProcessor(options)
                     # Selfillum mask is only fed in when the vmat actually
@@ -700,6 +780,15 @@ class VmatBatchRunner(QThread):
                     )
                     selfillum_constant = (
                         tex.emissive_constant if entry.selfillum and not tex.emissive else None
+                    )
+                    # Tint mask only flows through when the vmat is tintable
+                    # AND the user hasn't turned tint porting off. The
+                    # processor drops it again if transparency claims the
+                    # basetexture alpha channel.
+                    tintmask_path = (
+                        str(tex.tintmask)
+                        if entry.tintable and tex.tintmask and (self.tint_mode or "auto") != "off"
+                        else None
                     )
                     inputs = PBRInputs(
                         color=str(tex.color) if tex.color else None,
@@ -717,6 +806,8 @@ class VmatBatchRunner(QThread):
                         ao_constant=tex.ao_constant,
                         translucency_constant=tex.translucency_constant,
                         selfillum_constant=selfillum_constant,
+                        tintmask=tintmask_path,
+                        model_tint_amount=entry.model_tint_amount,
                     )
                     try:
                         success, msg = processor.process_material(inputs, str(output_dir), material_name, mat_path)
@@ -734,6 +825,7 @@ class VmatBatchRunner(QThread):
                         emissionscale=self.exo_emission,
                         parallaxscale=self.exo_parallax,
                         alphablend=alphablend,
+                        clamp_size=self.clamp_size,
                     )
                     processor = ExoPBRProcessor(options)
                     inputs = ExoPBRInputs(
@@ -780,7 +872,6 @@ class VmatPBRTool(BaseTool):
 
     def __init__(self):
         super().__init__("VMAT PBR")
-        self.thread: Optional[VmatBatchRunner] = None
         self.entries: List[VmatEntry] = []
         self.sorted_entries: List[VmatEntry] = []
         self.history: List[dict] = []
@@ -848,22 +939,20 @@ class VmatPBRTool(BaseTool):
         form.addRow("Recent run:", self.history_dropdown)
         self._refresh_history_dropdown()
 
-        self.vmat_root = QLineEdit()
-        self.vmat_root.textChanged.connect(self._on_vmat_root_changed)
-        vmat_btn = QPushButton("Browse...")
-        vmat_btn.clicked.connect(lambda: self._browse_dir_into(self.vmat_root))
-        form.addRow("VMAT root:", self._row(self.vmat_root, vmat_btn))
+        self.vmat_root = self.create_picker(
+            "dir", "vmat root", dialog_title="Select Folder")
+        # Auto-derive the material path as the user types or picks a VMAT root.
+        self.vmat_root.edit.textChanged.connect(self._on_vmat_root_changed)
+        form.addRow("VMAT root:", self.vmat_root)
 
-        self.texture_root = QLineEdit()
-        self.texture_root.setPlaceholderText("Optional; same-folder textures auto-detected")
-        tex_btn = QPushButton("Browse...")
-        tex_btn.clicked.connect(lambda: self._browse_dir_into(self.texture_root))
-        form.addRow("Texture root:", self._row(self.texture_root, tex_btn))
+        self.texture_root = self.create_picker(
+            "dir", "texture root", dialog_title="Select Folder",
+            placeholder="Optional; same-folder textures auto-detected")
+        form.addRow("Texture root:", self.texture_root)
 
-        self.output_root = QLineEdit()
-        out_btn = QPushButton("Browse...")
-        out_btn.clicked.connect(lambda: self._browse_dir_into(self.output_root))
-        form.addRow("Output root:", self._row(self.output_root, out_btn))
+        self.output_root = self.create_picker(
+            "dir", "output root", dialog_title="Select Folder")
+        form.addRow("Output root:", self.output_root)
 
         group.setLayout(form)
         return group
@@ -879,7 +968,7 @@ class VmatPBRTool(BaseTool):
         form.addRow("Mode:", self.mode_combo)
 
         self.material_path = QLineEdit()
-        self.material_path.setText("models/ports")
+        self.material_path.setText(default_material_path())
         self.material_path.setPlaceholderText("models/ports (Fake) or exopbr (Exo)")
         self.material_path.setToolTip(
             "Source 1 material reference path — what comes after `materials/` "
@@ -976,7 +1065,7 @@ class VmatPBRTool(BaseTool):
         self.generate_vmt = QCheckBox("Generate VMT")
         self.generate_vmt.setChecked(True)
         self.generate_mipmaps = QCheckBox("Generate Mipmaps")
-        self.generate_mipmaps.setChecked(True)
+        self.generate_mipmaps.setChecked(default_generate_mipmaps(True))
         self.skip_existing = QCheckBox("Skip already-processed files")
         self.skip_existing.setChecked(False)
         self.skip_existing.setToolTip(
@@ -1004,6 +1093,18 @@ class VmatPBRTool(BaseTool):
         gen_grid.addWidget(self.synthesize_missing, 2, 0, 1, 2)
         form.addRow("Generate:", self._wrap_layout(gen_grid))
 
+        self.clamp_size_combo = QComboBox()
+        self.clamp_size_combo.addItem("Off", 0)
+        for sz in (32, 64, 128, 256, 512, 1024, 2048, 4096, 8192):
+            self.clamp_size_combo.addItem(f"{sz}", sz)
+        self.clamp_size_combo.setToolTip(
+            "Cap the working resolution before processing. Textures whose "
+            "longest edge exceeds this value are downscaled (aspect "
+            "preserved) before the PBR pipeline runs; smaller textures pass "
+            "through unchanged. Applies to both Fake PBR and Exo PBR modes."
+        )
+        form.addRow("Clamp Size:", self.clamp_size_combo)
+
         group.setLayout(form)
         return group
 
@@ -1015,13 +1116,17 @@ class VmatPBRTool(BaseTool):
         self.glow_mode_combo = QComboBox()
         self.glow_mode_combo.addItem("Self-illum ($selfillum)", "selfillum")
         self.glow_mode_combo.addItem("Emissive Blend ($EmissiveBlend*)", "emissiveblend")
+        self.glow_mode_combo.addItem("Emissive Blend (Base Color)", "emissiveblend_basecolor")
         self.glow_mode_combo.setToolTip(
             "Technique used to emit glow VMT params when a vmat declares "
             "F_SELF_ILLUM or ships a *_selfillum mask.\n"
             "• Self-illum: classic $selfillum + $selfillummask. Breaks with "
             "$translucent / $alphatest on some branches.\n"
             "• Emissive Blend: $EmissiveBlend* family. Plays nicely with "
-            "$translucent and $phong; recommended for L4D2 / Alyx-port targets."
+            "$translucent and $phong; recommended for L4D2 / Alyx-port targets.\n"
+            "• Emissive Blend (Base Color): same strong glow but the emission "
+            "color comes from the base color map, with the self-illum mask "
+            "controlling where it glows."
         )
         form.addRow("Glow mode:", self.glow_mode_combo)
 
@@ -1043,6 +1148,22 @@ class VmatPBRTool(BaseTool):
         )
         form.addRow("Transparency:", self.transparency_mode_combo)
 
+        self.tint_mode_combo = QComboBox()
+        self.tint_mode_combo.addItem("Auto (use vmat flags)", "auto")
+        self.tint_mode_combo.addItem("Off (ignore tint masks)", "off")
+        self.tint_mode_combo.setToolTip(
+            "Tintable props (Source 2 F_TINT_MASK + TextureTintMask).\n"
+            "• Auto: bake the tint mask into the basetexture alpha and emit "
+            "$blendtintbybasealpha, so the entity's render color (GMod Color "
+            "tool) tints only the masked regions — matching Source 2's "
+            "model-tint behaviour. Fake PBR mode only.\n"
+            "• Off: ignore tint masks entirely; props still tint uniformly "
+            "via render color like any stock model.\n"
+            "Transparent materials always drop the mask — $translucent/"
+            "$alphatest own the basetexture alpha channel."
+        )
+        form.addRow("Tintable props:", self.tint_mode_combo)
+
         group.setLayout(form)
         return group
 
@@ -1062,6 +1183,40 @@ class VmatPBRTool(BaseTool):
     def _build_fake_pbr_widget(self) -> QWidget:
         widget = QWidget()
         form = QFormLayout(widget)
+
+        # Editable so the user can pick one of the stock Source 1 shaders OR
+        # type a custom shader name. The chosen name is written verbatim as the
+        # VMT's top-level shader block; generate_fakepbr_vmt special-cases
+        # VertexLitGeneric (rimlight/$model) and LightmappedGeneric (lightmap
+        # phong/envmap caps), and passes any other name straight through.
+        self.fake_shader_combo = QComboBox()
+        self.fake_shader_combo.setEditable(True)
+        self.fake_shader_combo.addItems([
+            "VertexLitGeneric",
+            "LightmappedGeneric",
+            "UnlitGeneric",
+            "WorldVertexTransition",
+        ])
+        self.fake_shader_combo.setToolTip(
+            "Top-level shader for the generated .vmt.\n"
+            "• VertexLitGeneric — models/props (default); adds rimlight + $model.\n"
+            "• LightmappedGeneric — world brushes/displacements; lightmapped "
+            "phong & envmap emitted only where the target branch supports them.\n"
+            "• UnlitGeneric / WorldVertexTransition — other stock shaders.\n"
+            "Or type any custom shader name — it's written verbatim.\n\n"
+            "Applies to Fake PBR only; Exo PBR always emits its screenspace shader."
+        )
+        form.addRow("Shader:", self.fake_shader_combo)
+
+        self.fake_surfaceprop_edit = QLineEdit()
+        self.fake_surfaceprop_edit.setPlaceholderText("(optional, e.g. metal, concrete, wood)")
+        self.fake_surfaceprop_edit.setToolTip(
+            "Value written as $surfaceprop in the generated .vmt. Controls the "
+            "physical surface material (footstep/impact sounds, bullet decals, "
+            "friction) that the engine associates with this material.\n"
+            "Leave blank to omit $surfaceprop entirely."
+        )
+        form.addRow("Surface Prop:", self.fake_surfaceprop_edit)
 
         self.fake_ao_slider, self.fake_ao_value = self._make_slider(0, 200, 50, 0.01)
         form.addRow("AO Strength:", self._slider_row(self.fake_ao_slider, self.fake_ao_value))
@@ -1250,23 +1405,12 @@ class VmatPBRTool(BaseTool):
         self.results_table.installEventFilter(self)
         col.addWidget(self.results_table, 1)
 
-        self.progress = QProgressBar()
-        self.progress.setVisible(False)
-        col.addWidget(self.progress)
-
         # Run controls live next to the table where the user actually clicks
         # them, instead of being buried below all the settings.
-        run_row = QHBoxLayout()
-        run_row.addStretch()
-        self.cancel_btn = QPushButton("Cancel")
-        self.cancel_btn.setEnabled(False)
-        self.cancel_btn.clicked.connect(self.cancel)
-        self.convert_btn = QPushButton("Convert")
+        self.cancel_btn = self.make_cancel_button()
+        self.convert_btn = self.make_run_button("Convert", self.convert)
         self.convert_btn.setEnabled(False)
-        self.convert_btn.clicked.connect(self.convert)
-        run_row.addWidget(self.cancel_btn)
-        run_row.addWidget(self.convert_btn)
-        col.addLayout(run_row)
+        col.addLayout(widgets.action_row(self.cancel_btn, self.convert_btn))
 
         return pane
 
@@ -1329,13 +1473,13 @@ class VmatPBRTool(BaseTool):
         self.history_dropdown.blockSignals(False)
 
     def _make_history_entry(self) -> dict:
-        vmat_root = self.vmat_root.text().strip()
+        vmat_root = self.vmat_root.path()
         return {
             "timestamp": datetime.utcnow().isoformat(timespec="seconds") + "Z",
-            "label": Path(vmat_root).name if vmat_root else self.output_root.text().strip(),
+            "label": Path(vmat_root).name if vmat_root else self.output_root.path(),
             "vmat_root": vmat_root,
-            "texture_root": self.texture_root.text().strip(),
-            "output_root": self.output_root.text().strip(),
+            "texture_root": self.texture_root.path(),
+            "output_root": self.output_root.path(),
             "mode": self.mode_combo.currentText(),
             "material_path": self.material_path.text().strip(),
             "append_material_subfolders": self.append_material_subfolders.isChecked(),
@@ -1351,11 +1495,14 @@ class VmatPBRTool(BaseTool):
             "fake_phong_strength": self.fake_phong_strength_slider.value() / 100.0,
             "fake_phong_tint_mode": self.fake_phong_tint_mode_combo.currentData() or "selective",
             "fake_colored_metal_relief": self.fake_colored_metal_relief_slider.value() / 100.0,
+            "fake_shader": self.fake_shader_combo.currentText().strip() or "VertexLitGeneric",
+            "fake_surfaceprop": self.fake_surfaceprop_edit.text().strip(),
             "exo_emission": float(self.exo_emission.value()),
             "exo_parallax": float(self.exo_parallax.value()),
             "exo_alphablend": self.exo_alphablend.isChecked(),
             "glow_mode": self.glow_mode_combo.currentData() or "selfillum",
             "transparency_mode": self.transparency_mode_combo.currentData() or "auto",
+            "tint_mode": self.tint_mode_combo.currentData() or "auto",
             "skip_existing": self.skip_existing.isChecked(),
             "synthesize_missing_maps": self.synthesize_missing.isChecked(),
             "requirements": {key: cb.isChecked() for key, cb in self.req_checkboxes.items()},
@@ -1371,10 +1518,10 @@ class VmatPBRTool(BaseTool):
             "append_material_subfolders", "preserve_structure", "prefix", "suffix",
             "generate_vtf", "generate_vmt", "generate_mipmaps", "fake_ao_strength",
             "fake_gloss_gamma", "fake_metal_diffuse_suppression", "fake_phong_strength",
-            "fake_phong_tint_mode", "fake_colored_metal_relief",
-            "exo_emission",
+            "fake_phong_tint_mode", "fake_colored_metal_relief", "fake_shader",
+            "fake_surfaceprop", "exo_emission",
             "exo_parallax", "exo_alphablend", "glow_mode", "transparency_mode",
-            "skip_existing", "synthesize_missing_maps", "requirements"
+            "tint_mode", "skip_existing", "synthesize_missing_maps", "requirements"
         ]
 
         def _same(a: dict, b: dict) -> bool:
@@ -1396,9 +1543,9 @@ class VmatPBRTool(BaseTool):
         except Exception:
             return
 
-        self.vmat_root.setText(entry.get("vmat_root") or "")
-        self.texture_root.setText(entry.get("texture_root") or "")
-        self.output_root.setText(entry.get("output_root") or "")
+        self.vmat_root.set_path(entry.get("vmat_root") or "")
+        self.texture_root.set_path(entry.get("texture_root") or "")
+        self.output_root.set_path(entry.get("output_root") or "")
         mode = entry.get("mode") or "Fake PBR"
         mode_index = self.mode_combo.findText(mode)
         if mode_index >= 0:
@@ -1426,6 +1573,8 @@ class VmatPBRTool(BaseTool):
         tint_idx = self.fake_phong_tint_mode_combo.findData(tint_mode_val)
         if tint_idx >= 0:
             self.fake_phong_tint_mode_combo.setCurrentIndex(tint_idx)
+        self.fake_shader_combo.setCurrentText(str(entry.get("fake_shader", "VertexLitGeneric")))
+        self.fake_surfaceprop_edit.setText(str(entry.get("fake_surfaceprop", "")))
         self.exo_emission.setValue(float(entry.get("exo_emission", 0.0)))
         self.exo_parallax.setValue(float(entry.get("exo_parallax", 0.0)))
         self.exo_alphablend.setChecked(bool(entry.get("exo_alphablend", False)))
@@ -1437,6 +1586,10 @@ class VmatPBRTool(BaseTool):
         transparency_idx = self.transparency_mode_combo.findData(transparency_mode_val)
         if transparency_idx >= 0:
             self.transparency_mode_combo.setCurrentIndex(transparency_idx)
+        tint_mode_prop_val = str(entry.get("tint_mode", "auto"))
+        tint_mode_prop_idx = self.tint_mode_combo.findData(tint_mode_prop_val)
+        if tint_mode_prop_idx >= 0:
+            self.tint_mode_combo.setCurrentIndex(tint_mode_prop_idx)
         self.skip_existing.setChecked(bool(entry.get("skip_existing", False)))
         self.synthesize_missing.setChecked(bool(entry.get("synthesize_missing_maps", False)))
         reqs = entry.get("requirements") or {}
@@ -1457,11 +1610,6 @@ class VmatPBRTool(BaseTool):
         layout.setContentsMargins(0, 0, 0, 0)
         w.setLayout(layout)
         return w
-
-    def _browse_dir_into(self, line_edit: QLineEdit):
-        folder = QFileDialog.getExistingDirectory(self, "Select Folder", "")
-        if folder:
-            line_edit.setText(folder)
 
     # ------------------------------------------------------------------
     # Auto-derive material path from VMAT root
@@ -1506,7 +1654,7 @@ class VmatPBRTool(BaseTool):
         looks default — empty string, a mode-default, or the previously
         auto-derived value. This keeps manual edits sticky.
         """
-        derived = self._derive_material_path_from(self.vmat_root.text().strip())
+        derived = self._derive_material_path_from(self.vmat_root.path())
         if not derived:
             return
         current = self.material_path.text().strip()
@@ -1531,9 +1679,9 @@ class VmatPBRTool(BaseTool):
                 self.material_path.setText("exopbr")
 
     def scan(self):
-        vmat_root = self.vmat_root.text().strip()
-        texture_root = self.texture_root.text().strip()
-        out_root = self.output_root.text().strip()
+        vmat_root = self.vmat_root.path()
+        texture_root = self.texture_root.path()
+        out_root = self.output_root.path()
         if not vmat_root:
             self.log("VMAT root is required", "ERROR")
             return
@@ -1634,6 +1782,8 @@ class VmatPBRTool(BaseTool):
                 mode_notes.append("alphatest")
             if entry.selfillum:
                 mode_notes.append("selfillum")
+            if entry.tintable:
+                mode_notes.append("tintable")
             warn_text = "; ".join(mode_notes + entry.warnings)
             warn_item = QTableWidgetItem(warn_text)
             self.results_table.setItem(row, 9, warn_item)
@@ -1725,8 +1875,8 @@ class VmatPBRTool(BaseTool):
         return super().eventFilter(obj, event)
 
     def convert(self):
-        vmat_root = self.vmat_root.text().strip()
-        out_root = self.output_root.text().strip()
+        vmat_root = self.vmat_root.path()
+        out_root = self.output_root.path()
         if not vmat_root or not out_root:
             self.log("VMAT root and output root are required", "ERROR")
             return
@@ -1742,13 +1892,7 @@ class VmatPBRTool(BaseTool):
         if not material_path:
             material_path = "exopbr" if self.mode_combo.currentText() == "Exo PBR" else "models/ports"
 
-        self.convert_btn.setEnabled(False)
-        self.cancel_btn.setEnabled(True)
-        self.progress.setVisible(True)
-        self.progress.setRange(0, len(entries))
-        self.progress.setValue(0)
-
-        self.thread = VmatBatchRunner(
+        worker = VmatBatchRunner(
             entries=entries,
             vmat_root=Path(vmat_root),
             output_root=Path(out_root),
@@ -1764,6 +1908,8 @@ class VmatPBRTool(BaseTool):
             fake_phong_strength=self.fake_phong_strength_slider.value() / 100.0,
             fake_phong_tint_mode=self.fake_phong_tint_mode_combo.currentData() or "selective",
             fake_colored_metal_relief=self.fake_colored_metal_relief_slider.value() / 100.0,
+            fake_shader=self.fake_shader_combo.currentText().strip(),
+            fake_surfaceprop=self.fake_surfaceprop_edit.text().strip(),
             exo_emission=float(self.exo_emission.value()),
             exo_parallax=float(self.exo_parallax.value()),
             exo_alphablend=self.exo_alphablend.isChecked(),
@@ -1772,14 +1918,23 @@ class VmatPBRTool(BaseTool):
             generate_mipmaps=self.generate_mipmaps.isChecked(),
             glow_mode=self.glow_mode_combo.currentData() or "selfillum",
             transparency_mode=self.transparency_mode_combo.currentData() or "auto",
+            tint_mode=self.tint_mode_combo.currentData() or "auto",
             skip_existing=self.skip_existing.isChecked(),
             synthesize_missing_maps=self.synthesize_missing.isChecked(),
+            clamp_size=int(self.clamp_size_combo.currentData() or 0),
             row_indices=row_indices,
         )
-        self.thread.progress.connect(self.on_progress)
-        self.thread.row_finished.connect(self._on_row_finished)
-        self.thread.finished.connect(self.on_finished)
-        self.thread.start()
+        # row_finished is an extra signal beyond start_worker's standard wiring.
+        worker.row_finished.connect(self._on_row_finished)
+        self.start_worker(
+            worker,
+            self.on_finished,
+            progress_slot=self.on_progress,
+            busy_widgets=(self.convert_btn,),
+            cancel_button=self.cancel_btn,
+            clear_log=False,
+            progress_total=len(entries),
+        )
 
     def _on_row_finished(self, row: int, success: bool):
         """Tint the corresponding results_table row green/red as each task completes."""
@@ -1850,17 +2005,9 @@ class VmatPBRTool(BaseTool):
         return excluded
 
     def on_progress(self, idx: int, total: int, message: str):
-        self.progress.setMaximum(total)
-        self.progress.setValue(idx)
+        self.set_progress(idx, total)
         self.log(message, "INFO")
 
     def on_finished(self, success: bool, message: str):
-        self.convert_btn.setEnabled(True)
-        self.cancel_btn.setEnabled(False)
-        self.progress.setVisible(False)
+        # start_worker's finish wrapper hides the shared progress bar.
         self.log(message, "SUCCESS" if success else "WARNING")
-
-    def cancel(self):
-        if self.thread and self.thread.isRunning():
-            self.thread.requestInterruption()
-            self.log("Cancel requested...", "INFO")

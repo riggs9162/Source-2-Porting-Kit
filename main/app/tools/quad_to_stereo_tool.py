@@ -6,25 +6,21 @@ Converts quad audio files (L, LS, R, RS) to stereo format
 import re
 from pathlib import Path
 from threading import Lock
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 from PySide6.QtCore import QThread, Signal
 from PySide6.QtWidgets import (
-    QVBoxLayout,
-    QHBoxLayout,
-    QGroupBox,
-    QLabel,
-    QLineEdit,
-    QPushButton,
-    QCheckBox,
-    QFileDialog,
-    QRadioButton,
     QButtonGroup,
-    QSpinBox,
+    QCheckBox,
     QComboBox,
+    QLabel,
+    QPushButton,
+    QRadioButton,
+    QSpinBox,
 )
 
 from app.tools.base_tool import BaseTool
+from app.ui import widgets
 from app.utils.audio_runner import default_workers, parallel_for_each, run_ffmpeg
 
 
@@ -32,6 +28,7 @@ class QuadToStereoWorker(QThread):
     """Worker thread for quad-to-stereo conversion."""
 
     progress = Signal(str, str)  # message, level
+    progress_value = Signal(int, int)  # groups done, total (drives the progress bar)
     finished = Signal(int, int, int)  # converted, skipped, failed
 
     def __init__(
@@ -58,6 +55,7 @@ class QuadToStereoWorker(QThread):
         self._converted = 0
         self._skipped = 0
         self._failed = 0
+        self._done_groups = 0
 
     def run(self):
         try:
@@ -92,6 +90,17 @@ class QuadToStereoWorker(QThread):
     def _process_group(self, item: Tuple[str, Dict[str, Path]]) -> None:
         if self.isInterruptionRequested():
             return
+        try:
+            self._process_group_inner(item)
+        finally:
+            # Progress counts groups finished regardless of outcome; emitted
+            # from pool threads (safe — cross-thread signals are queued).
+            with self._counter_lock:
+                self._done_groups += 1
+                done = self._done_groups
+            self.progress_value.emit(done, len(self.quad_groups))
+
+    def _process_group_inner(self, item: Tuple[str, Dict[str, Path]]) -> None:
         base_name, files = item
         output_filename = f"{base_name}.{self.output_format}"
         output_path = self.output_folder / output_filename
@@ -182,45 +191,19 @@ class QuadToStereoTool(BaseTool):
 
     def __init__(self):
         super().__init__("Quad to Stereo")
-        self.worker: Optional[QuadToStereoWorker] = None
         self.quad_groups: Dict[str, Dict[str, Path]] = {}
         self.setup_tool_ui()
 
     def setup_tool_ui(self):
-        # Input/Output section
-        io_group = QGroupBox("Input & Output")
-        io_layout = QVBoxLayout()
-
-        # Input folder
-        input_row = QHBoxLayout()
-        input_row.addWidget(QLabel("Input Folder:"))
-        self.input_folder = QLineEdit()
-        self.input_folder.setPlaceholderText(
-            "Select folder containing quad audio files..."
-        )
-        input_row.addWidget(self.input_folder)
-        browse_input_btn = QPushButton("Browse...")
-        browse_input_btn.clicked.connect(self.select_input_folder)
-        input_row.addWidget(browse_input_btn)
-        io_layout.addLayout(input_row)
-
-        # Output folder
-        output_row = QHBoxLayout()
-        output_row.addWidget(QLabel("Output Folder:"))
-        self.output_folder = QLineEdit()
-        self.output_folder.setPlaceholderText("Select output folder for stereo files...")
-        output_row.addWidget(self.output_folder)
-        browse_output_btn = QPushButton("Browse...")
-        browse_output_btn.clicked.connect(self.select_output_folder)
-        output_row.addWidget(browse_output_btn)
-        io_layout.addLayout(output_row)
-
-        io_group.setLayout(io_layout)
-        self.content_layout.addWidget(io_group)
-
-        # Mix mode section
-        mix_group = QGroupBox("Mix Mode")
-        mix_layout = QVBoxLayout()
+        self.input_picker = self.create_picker(
+            "dir", "input folder", label="Input Folder:",
+            placeholder="Select folder containing quad audio files...",
+            dialog_title="Select folder containing quad audio files")
+        self.output_picker = self.create_picker(
+            "dir", "output folder", label="Output Folder:",
+            placeholder="Select output folder for stereo files...",
+            dialog_title="Select output folder for stereo files")
+        self.add_group("Input & Output", self.input_picker, self.output_picker)
 
         self.mix_mode_group = QButtonGroup()
         balance_radio = QRadioButton("Balance (L+LS → Left, R+RS → Right)")
@@ -229,101 +212,53 @@ class QuadToStereoTool(BaseTool):
 
         self.mix_mode_group.addButton(balance_radio, 0)
         self.mix_mode_group.addButton(downmix_radio, 1)
+        self.add_group("Mix Mode", balance_radio, downmix_radio)
 
-        mix_layout.addWidget(balance_radio)
-        mix_layout.addWidget(downmix_radio)
-        mix_group.setLayout(mix_layout)
-        self.content_layout.addWidget(mix_group)
-
-        # Audio settings section
-        audio_group = QGroupBox("Audio Settings")
-        audio_layout = QVBoxLayout()
-
-        # Volume adjustment
-        volume_row = QHBoxLayout()
-        volume_row.addWidget(QLabel("Volume Adjustment:"))
         self.volume_spin = QSpinBox()
         self.volume_spin.setRange(10, 200)
         self.volume_spin.setValue(100)
         self.volume_spin.setSuffix("%")
         self.volume_spin.setToolTip("Adjust output volume (100% = no change)")
-        volume_row.addWidget(self.volume_spin)
-        volume_row.addStretch()
-        audio_layout.addLayout(volume_row)
+        volume_row = widgets.hbox(QLabel("Volume Adjustment:"), self.volume_spin,
+                                  stretch_after=True)
 
-        # Output format and quality
-        format_row = QHBoxLayout()
-        format_row.addWidget(QLabel("Output Format:"))
         self.format_combo = QComboBox()
         self.format_combo.addItems(["mp3", "wav", "ogg"])
         self.format_combo.currentTextChanged.connect(self.on_format_changed)
-        format_row.addWidget(self.format_combo)
-
-        format_row.addWidget(QLabel("Quality:"))
         self.quality_combo = QComboBox()
         self.quality_combo.addItems(["128k", "192k", "256k", "320k"])
         self.quality_combo.setCurrentText("192k")
-        format_row.addWidget(self.quality_combo)
-        format_row.addStretch()
-        audio_layout.addLayout(format_row)
+        format_row = widgets.hbox(QLabel("Output Format:"), self.format_combo,
+                                  QLabel("Quality:"), self.quality_combo,
+                                  stretch_after=True)
 
-        audio_group.setLayout(audio_layout)
-        self.content_layout.addWidget(audio_group)
-
-        # Options section
-        options_group = QGroupBox("Options")
-        options_layout = QVBoxLayout()
+        self.add_group("Audio Settings", volume_row, format_row)
 
         self.overwrite_check = QCheckBox("Replace existing outputs")
         self.overwrite_check.setChecked(False)
         self.overwrite_check.setToolTip(
             "Overwrite outputs that already exist in the destination folder."
         )
-        options_layout.addWidget(self.overwrite_check)
 
         self.delete_originals_check = QCheckBox("Delete originals after conversion")
         self.delete_originals_check.setChecked(False)
-        options_layout.addWidget(self.delete_originals_check)
 
-        options_group.setLayout(options_layout)
-        self.content_layout.addWidget(options_group)
+        self.add_group("Options", self.overwrite_check, self.delete_originals_check)
 
         # Action buttons — Scan on the left, Cancel + Process right-aligned.
-        button_row = QHBoxLayout()
         self.scan_btn = QPushButton("Scan")
         self.scan_btn.clicked.connect(self.scan_quad_groups)
-        button_row.addWidget(self.scan_btn)
+        self.cancel_btn = self.make_cancel_button()
+        self.convert_btn = self.make_run_button("Process", self.start_conversion)
 
-        button_row.addStretch()
-
-        self.cancel_btn = QPushButton("Cancel")
-        self.cancel_btn.setEnabled(False)
-        self.cancel_btn.clicked.connect(self.cancel_worker)
+        button_row = widgets.hbox(self.scan_btn, stretch_after=True)
         button_row.addWidget(self.cancel_btn)
-
-        self.convert_btn = QPushButton("Process")
-        self.convert_btn.clicked.connect(self.start_conversion)
         button_row.addWidget(self.convert_btn)
-
         self.content_layout.addLayout(button_row)
 
     def on_format_changed(self, format_str: str):
         """Update quality combo visibility based on selected format."""
         self.quality_combo.setEnabled(format_str in ["mp3", "ogg"])
-
-    def select_input_folder(self):
-        path = QFileDialog.getExistingDirectory(
-            self, "Select folder containing quad audio files"
-        )
-        if path:
-            self.input_folder.setText(path)
-
-    def select_output_folder(self):
-        path = QFileDialog.getExistingDirectory(
-            self, "Select output folder for stereo files"
-        )
-        if path:
-            self.output_folder.setText(path)
 
     def find_quad_groups(self, root_path: Path, log_incomplete: bool = False) -> Tuple[Dict[str, Dict[str, Path]], Dict[str, Dict[str, Path]], List[Tuple[str, str]], List[str]]:
         """Find all complete quad audio groups (L, LS, R, RS) or (front_l, front_r, rear_l, rear_r)."""
@@ -495,43 +430,26 @@ class QuadToStereoTool(BaseTool):
         overwrite = self.overwrite_check.isChecked()
         delete_originals = self.delete_originals_check.isChecked()
 
-        self.scan_btn.setEnabled(False)
-        self.convert_btn.setEnabled(False)
-        self.cancel_btn.setEnabled(True)
-        self.emit_status("Starting quad-to-stereo conversion...")
-
-        self.worker = QuadToStereoWorker(
-            quad_groups=self.quad_groups,
-            output_folder=output_path,
-            mix_mode=mix_mode,
-            volume_adjustment=volume_adjustment,
-            output_format=output_format,
-            quality=quality,
-            overwrite_existing=overwrite,
-            delete_originals=delete_originals,
+        self.start_worker(
+            QuadToStereoWorker(
+                quad_groups=self.quad_groups,
+                output_folder=output_path,
+                mix_mode=mix_mode,
+                volume_adjustment=volume_adjustment,
+                output_format=output_format,
+                quality=quality,
+                overwrite_existing=overwrite,
+                delete_originals=delete_originals,
+            ),
+            self.on_conversion_finished,
+            busy_widgets=(self.scan_btn, self.convert_btn),
+            cancel_button=self.cancel_btn,
+            status="Starting quad-to-stereo conversion...",
+            clear_log=False,
         )
-        self.worker.progress.connect(self.log)
-        self.worker.finished.connect(self.on_conversion_finished)
-        self.worker.start()
-
-    def cancel_worker(self):
-        """Cancel the running worker thread."""
-        if self.worker and self.worker.isRunning():
-            self.worker.requestInterruption()
-            self.worker.quit()
-            self.worker.wait(2000)
-            self.log("Conversion cancelled.", "WARNING")
-
-        self.scan_btn.setEnabled(True)
-        self.convert_btn.setEnabled(True)
-        self.cancel_btn.setEnabled(False)
 
     def on_conversion_finished(self, converted: int, skipped: int, failed: int):
         """Handle conversion completion."""
-        self.scan_btn.setEnabled(True)
-        self.convert_btn.setEnabled(True)
-        self.cancel_btn.setEnabled(False)
-
         total = converted + skipped + failed
         self.log(
             f"Done. Total: {total}, Converted: {converted}, Skipped: {skipped}, "

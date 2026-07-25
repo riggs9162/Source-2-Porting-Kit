@@ -40,14 +40,12 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
     QComboBox,
-    QFileDialog,
     QFormLayout,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
-    QLineEdit,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -62,6 +60,7 @@ from PySide6.QtWidgets import (
 from sourcepp import vtfpp
 
 from app.tools.base_tool import BaseTool
+from app.ui import widgets
 from app.utils.helpers import get_config_dir
 
 
@@ -197,6 +196,7 @@ class FakePBRReverseWorker(QThread):
     """Background worker that reverses Fake PBR VTFs into PNGs."""
 
     progress = Signal(str, str)  # message, level
+    progress_value = Signal(int, int)  # materials done, total (drives the progress bar)
     finished = Signal(int, int, int)  # processed, skipped, failed
 
     def __init__(
@@ -212,6 +212,7 @@ class FakePBRReverseWorker(QThread):
         recover_albedo: bool,
         write_opacity: bool,
         overwrite: bool,
+        clamp_size: int = 0,
     ):
         super().__init__()
         self.materials = materials
@@ -225,12 +226,15 @@ class FakePBRReverseWorker(QThread):
         self.recover_albedo = bool(recover_albedo)
         self.write_opacity = bool(write_opacity)
         self.overwrite = bool(overwrite)
+        self.clamp_size = int(clamp_size or 0)
 
     def run(self):
         processed = 0
         skipped = 0
         failed = 0
-        for name, folder, paths in self.materials:
+        total = len(self.materials)
+        self.progress_value.emit(0, total)
+        for idx, (name, folder, paths) in enumerate(self.materials, start=1):
             if self.isInterruptionRequested():
                 self.progress.emit("Cancelled by user", "WARNING")
                 break
@@ -243,7 +247,37 @@ class FakePBRReverseWorker(QThread):
             except Exception as exc:
                 failed += 1
                 self.progress.emit(f"✗ {name}: {exc}", "ERROR")
+            self.progress_value.emit(idx, total)
         self.finished.emit(processed, skipped, failed)
+
+    def _clamp_rgba(self, rgba: Optional[np.ndarray]) -> Optional[np.ndarray]:
+        """Downscale an HxWx4 uint8 array so its longest edge is ≤ clamp_size.
+
+        Aspect ratio is preserved; arrays already at or below the cap pass
+        through unchanged. Returns None when the input is None.
+
+        RGB and alpha are resized independently so the BILINEAR filter
+        doesn't premultiply RGB by alpha (which would destroy normal-vector
+        data in regions where the phong mask alpha is 0).
+        """
+        if rgba is None or self.clamp_size <= 0:
+            return rgba
+        h, w = rgba.shape[:2]
+        long_edge = max(h, w)
+        if long_edge <= self.clamp_size:
+            return rgba
+        scale = self.clamp_size / float(long_edge)
+        new_h = max(1, int(round(h * scale)))
+        new_w = max(1, int(round(w * scale)))
+        rgb_img = Image.fromarray(rgba[:, :, :3], mode="RGB").resize(
+            (new_w, new_h), Image.Resampling.BILINEAR
+        )
+        alpha_img = Image.fromarray(rgba[:, :, 3], mode="L").resize(
+            (new_w, new_h), Image.Resampling.BILINEAR
+        )
+        rgb_arr = np.asarray(rgb_img, dtype=np.uint8)
+        alpha_arr = np.asarray(alpha_img, dtype=np.uint8)[:, :, np.newaxis]
+        return np.concatenate([rgb_arr, alpha_arr], axis=2).copy()
 
     def _output_dir_for(self, folder: Path) -> Path:
         if not self.preserve_structure:
@@ -271,6 +305,15 @@ class FakePBRReverseWorker(QThread):
         color_rgba = _decode_vtf_rgba(paths["color"]) if "color" in paths else None
         normal_rgba = _decode_vtf_rgba(paths["normal"]) if "normal" in paths else None
         phong_rgba = _decode_vtf_rgba(paths["phong"]) if "phong" in paths else None
+
+        # Clamp the working resolution of every decoded source. We resize each
+        # channel independently against its own dimensions so different-sized
+        # inputs stay coherent with their own aspect; downstream math already
+        # re-aligns roughness/metallic to color_rgb via _resize_gray.
+        if self.clamp_size > 0:
+            color_rgba = self._clamp_rgba(color_rgba)
+            normal_rgba = self._clamp_rgba(normal_rgba)
+            phong_rgba = self._clamp_rgba(phong_rgba)
 
         roughness: Optional[np.ndarray] = None
         metallic: Optional[np.ndarray] = None
@@ -326,7 +369,6 @@ class FakePBRReverseTool(BaseTool):
 
     def __init__(self):
         super().__init__("Fake PBR Reverse")
-        self.worker: Optional[FakePBRReverseWorker] = None
         self.scanned_materials: List[Material] = []
         self.history: List[dict] = []
         try:
@@ -387,15 +429,13 @@ class FakePBRReverseTool(BaseTool):
         self.history_dropdown.currentIndexChanged.connect(self.on_history_selected)
         form.addRow("Recent run:", self.history_dropdown)
 
-        self.input_root = QLineEdit()
-        in_btn = QPushButton("Browse...")
-        in_btn.clicked.connect(lambda: self._browse_dir_into(self.input_root))
-        form.addRow("Input root:", self._row(self.input_root, in_btn))
+        self.input_root = self.create_picker(
+            "dir", "input root", dialog_title="Select Folder")
+        form.addRow("Input root:", self.input_root)
 
-        self.output_root = QLineEdit()
-        out_btn = QPushButton("Browse...")
-        out_btn.clicked.connect(lambda: self._browse_dir_into(self.output_root))
-        form.addRow("Output root:", self._row(self.output_root, out_btn))
+        self.output_root = self.create_picker(
+            "dir", "output root", dialog_title="Select Folder")
+        form.addRow("Output root:", self.output_root)
 
         group.setLayout(form)
         return group
@@ -447,6 +487,17 @@ class FakePBRReverseTool(BaseTool):
         run_grid.addWidget(self.overwrite, 1, 0)
         run_grid.addWidget(self.write_opacity, 1, 1)
         form.addRow("Run mode:", self._wrap_layout(run_grid))
+
+        self.clamp_size_combo = QComboBox()
+        self.clamp_size_combo.addItem("Off", 0)
+        for sz in (32, 64, 128, 256, 512, 1024, 2048, 4096, 8192):
+            self.clamp_size_combo.addItem(f"{sz}", sz)
+        self.clamp_size_combo.setToolTip(
+            "Cap the decoded VTF resolution before writing PNGs. Channels "
+            "whose longest edge exceeds this value are downscaled (aspect "
+            "preserved); smaller channels pass through unchanged."
+        )
+        form.addRow("Clamp Size:", self.clamp_size_combo)
 
         group.setLayout(form)
         return group
@@ -561,17 +612,10 @@ class FakePBRReverseTool(BaseTool):
         self.results_table.installEventFilter(self)
         col.addWidget(self.results_table, 1)
 
-        run_row = QHBoxLayout()
-        run_row.addStretch()
-        self.cancel_button = QPushButton("Cancel")
-        self.cancel_button.setEnabled(False)
-        self.cancel_button.clicked.connect(self.cancel_worker)
-        self.run_button = QPushButton("Reverse")
+        self.cancel_button = self.make_cancel_button()
+        self.run_button = self.make_run_button("Reverse", self.start_reverse)
         self.run_button.setEnabled(False)
-        self.run_button.clicked.connect(self.start_reverse)
-        run_row.addWidget(self.cancel_button)
-        run_row.addWidget(self.run_button)
-        col.addLayout(run_row)
+        col.addLayout(widgets.action_row(self.cancel_button, self.run_button))
 
         return pane
 
@@ -648,14 +692,6 @@ class FakePBRReverseTool(BaseTool):
                 return True
         return super().eventFilter(obj, event)
 
-    def _row(self, line_edit: QLineEdit, button: QPushButton) -> QWidget:
-        w = QWidget()
-        row = QHBoxLayout(w)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.addWidget(line_edit)
-        row.addWidget(button)
-        return w
-
     def _make_slider(self, lo: int, hi: int, value: int, divisor: float, fmt: str, tooltip: str):
         slider = QSlider(Qt.Horizontal)
         slider.setRange(lo, hi)
@@ -669,11 +705,6 @@ class FakePBRReverseTool(BaseTool):
         layout.addWidget(slider)
         layout.addWidget(label)
         return slider, widget, label
-
-    def _browse_dir_into(self, line_edit: QLineEdit):
-        folder = QFileDialog.getExistingDirectory(self, "Select Folder", "")
-        if folder:
-            line_edit.setText(folder)
 
     # ------------------------------------------------------------------ results table
 
@@ -841,36 +872,31 @@ class FakePBRReverseTool(BaseTool):
 
         self._save_current_run_to_history()
 
-        self.scan_button.setEnabled(False)
-        self.run_button.setEnabled(False)
-        self.cancel_button.setEnabled(True)
-
-        self.worker = FakePBRReverseWorker(
-            materials=materials,
-            output_root=out_root,
-            input_root=in_root,
-            preserve_structure=self.preserve_structure.isChecked(),
-            gloss_gamma=self.gloss_gamma_slider.value() / 10.0,
-            phong_strength=self.phong_strength_slider.value() / 100.0,
-            metal_suppression=self.metal_supp_slider.value() / 100.0,
-            invert_green=self.invert_green.isChecked(),
-            recover_albedo=self.recover_albedo.isChecked(),
-            write_opacity=self.write_opacity.isChecked(),
-            overwrite=self.overwrite.isChecked(),
+        self.start_worker(
+            FakePBRReverseWorker(
+                materials=materials,
+                output_root=out_root,
+                input_root=in_root,
+                preserve_structure=self.preserve_structure.isChecked(),
+                gloss_gamma=self.gloss_gamma_slider.value() / 10.0,
+                phong_strength=self.phong_strength_slider.value() / 100.0,
+                metal_suppression=self.metal_supp_slider.value() / 100.0,
+                invert_green=self.invert_green.isChecked(),
+                recover_albedo=self.recover_albedo.isChecked(),
+                write_opacity=self.write_opacity.isChecked(),
+                overwrite=self.overwrite.isChecked(),
+                clamp_size=int(self.clamp_size_combo.currentData() or 0),
+            ),
+            self.on_finished,
+            busy_widgets=(self.scan_button, self.run_button),
+            cancel_button=self.cancel_button,
+            clear_log=False,
         )
-        self.worker.progress.connect(self.log)
-        self.worker.finished.connect(self.on_finished)
-        self.worker.start()
-
-    def cancel_worker(self):
-        if self.worker and self.worker.isRunning():
-            self.worker.requestInterruption()
-            self.log("Cancellation requested...", "WARNING")
 
     def on_finished(self, processed: int, skipped: int, failed: int):
-        self.scan_button.setEnabled(True)
+        # start_worker re-enabled run_button unconditionally; narrow it back
+        # to "only when there are scanned materials to re-run".
         self.run_button.setEnabled(bool(self.scanned_materials))
-        self.cancel_button.setEnabled(False)
         if failed:
             self.log(
                 f"Finished with errors: {processed} processed, {skipped} skipped, {failed} failed",

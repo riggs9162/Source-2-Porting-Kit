@@ -9,7 +9,7 @@ import math
 import shutil
 import struct
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 
 import numpy as np
 from PIL import Image
@@ -17,28 +17,24 @@ from PySide6.QtCore import QThread, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
-    QFileDialog,
-    QGroupBox,
-    QHBoxLayout,
     QLabel,
-    QLineEdit,
     QPushButton,
-    QVBoxLayout,
 )
 
 from sourcepp import vtfpp
 
 from app.tools.base_tool import BaseTool
-from app.core.settings import Settings
+from app.ui import widgets
 
 
-MAX_TEXTURE_SIZES = [512, 1024, 2048, 4096]
+MAX_TEXTURE_SIZES = [32, 64, 128, 256, 512, 1024, 2048, 4096]
 
 
 class VtfClampWorker(QThread):
     """Background worker that clamps VTF files to power-of-two dimensions."""
 
     progress = Signal(str, str)  # message, level
+    progress_value = Signal(int, int)  # files done, total (drives the progress bar)
     finished = Signal(int, int, int, int)  # total, clamped, skipped, failed
 
     def __init__(
@@ -64,7 +60,8 @@ class VtfClampWorker(QThread):
         failed = 0
         total = len(self.files)
 
-        for file_path in self.files:
+        self.progress_value.emit(0, total)
+        for idx, file_path in enumerate(self.files, start=1):
             if self.isInterruptionRequested():
                 self.progress.emit("Clamp cancelled by user", "WARNING")
                 break
@@ -80,6 +77,7 @@ class VtfClampWorker(QThread):
             except Exception as exc:
                 failed += 1
                 self.progress.emit(f"Failed {file_path.name}: {exc}", "ERROR")
+            self.progress_value.emit(idx, total)
 
         self.finished.emit(total, clamped, skipped, failed)
 
@@ -195,51 +193,32 @@ class VtfClampTool(BaseTool):
 
     def __init__(self):
         super().__init__("VTF Clamp")
-        self.worker: Optional[VtfClampWorker] = None
-        self.settings = Settings()
         self.selected_files: List[Path] = []
         self.setup_tool_ui()
 
     def setup_tool_ui(self):
-        input_group = QGroupBox("Input")
-        input_layout = QVBoxLayout()
+        self.folder_picker = self.create_picker(
+            "dir", "input folder", label="VTF Folder:",
+            placeholder="Select folder containing .vtf files...",
+            dialog_title="Select VTF Folder")
+        # Picking a folder switches the tool back to folder mode.
+        self.folder_picker.changed.connect(self._folder_picked)
 
-        folder_row = QHBoxLayout()
-        folder_row.addWidget(QLabel("VTF Folder:"))
-        self.folder_input = QLineEdit()
-        self.folder_input.setPlaceholderText("Select folder containing .vtf files...")
-        folder_row.addWidget(self.folder_input)
-        folder_button = QPushButton("Browse...")
-        folder_button.clicked.connect(self.select_folder)
-        folder_row.addWidget(folder_button)
-        input_layout.addLayout(folder_row)
-
-        files_row = QHBoxLayout()
-        files_row.addWidget(QLabel("Or select files:"))
         self.files_label = QLabel("No files selected")
         self.files_label.setStyleSheet("color: #808080;")
-        files_row.addWidget(self.files_label)
         files_button = QPushButton("Select Files...")
         files_button.clicked.connect(self.select_files)
-        files_row.addWidget(files_button)
-        input_layout.addLayout(files_row)
+        files_row = widgets.hbox(QLabel("Or select files:"), self.files_label, files_button)
 
-        input_group.setLayout(input_layout)
-        self.content_layout.addWidget(input_group)
+        self.add_group("Input", self.folder_picker, files_row)
 
-        settings_group = QGroupBox("Settings")
-        settings_layout = QVBoxLayout()
-
-        max_row = QHBoxLayout()
-        max_row.addWidget(QLabel("Clamp anything above:"))
         self.max_size_combo = QComboBox()
         for size in MAX_TEXTURE_SIZES:
             label = f"{size}x{size} ({size // 1024}K)" if size >= 1024 else f"{size}x{size}"
             self.max_size_combo.addItem(label, size)
-        self.max_size_combo.setCurrentIndex(1)  # 1024 default
-        max_row.addWidget(self.max_size_combo)
-        max_row.addStretch()
-        settings_layout.addLayout(max_row)
+        self.max_size_combo.setCurrentIndex(self.max_size_combo.findData(1024))  # 1024 default
+        max_row = widgets.hbox(QLabel("Clamp anything above:"), self.max_size_combo,
+                               stretch_after=True)
 
         self.recursive_check = QCheckBox("Recursive (include subfolders)")
         self.recursive_check.setChecked(True)
@@ -247,86 +226,55 @@ class VtfClampTool(BaseTool):
             "When on, scan all subfolders of the input. When off, scan only "
             "the input folder itself."
         )
-        settings_layout.addWidget(self.recursive_check)
 
         self.preserve_aspect_check = QCheckBox("Preserve aspect ratio")
         self.preserve_aspect_check.setChecked(True)
         self.preserve_aspect_check.setToolTip("Keeps rectangular textures rectangular, e.g. 2048x1024 → 1024x512.")
-        settings_layout.addWidget(self.preserve_aspect_check)
 
         self.overwrite_check = QCheckBox("Replace existing outputs")
         self.overwrite_check.setChecked(True)
         self.overwrite_check.setToolTip(
             "Overwrite outputs that already exist in the destination folder."
         )
-        settings_layout.addWidget(self.overwrite_check)
 
         self.backup_check = QCheckBox("Create backups (.bak)")
         self.backup_check.setChecked(True)
         self.backup_check.setToolTip(
             "Save the original alongside the modified copy."
         )
-        settings_layout.addWidget(self.backup_check)
 
-        settings_group.setLayout(settings_layout)
-        self.content_layout.addWidget(settings_group)
+        self.add_group("Settings", max_row, self.recursive_check,
+                       self.preserve_aspect_check, self.overwrite_check, self.backup_check)
 
-        info_label = QLabel(
+        self.content_layout.addWidget(widgets.note_label(
             "Clamps oversized VTF textures to power-of-two dimensions for Source engine budgets.\n"
             "Examples: 4096x4096 -> 1024x1024, 2048x1024 -> 1024x512 when preserving aspect ratio."
-        )
-        info_label.setStyleSheet("color: #FFA500; padding: 10px; background-color: #2b2b2b; border-radius: 4px;")
-        info_label.setWordWrap(True)
-        self.content_layout.addWidget(info_label)
+        ))
 
-        buttons = QHBoxLayout()
-        buttons.addStretch()
-
-        self.cancel_button = QPushButton("Cancel")
-        self.cancel_button.setEnabled(False)
-        self.cancel_button.clicked.connect(self.cancel_worker)
-        buttons.addWidget(self.cancel_button)
-
-        self.clamp_button = QPushButton("Process")
-        self.clamp_button.setMinimumWidth(120)
-        self.clamp_button.clicked.connect(self.start_clamp)
-        buttons.addWidget(self.clamp_button)
-
-        self.content_layout.addLayout(buttons)
+        self.cancel_button = self.make_cancel_button()
+        self.clamp_button = self.make_run_button("Process", self.start_clamp)
+        self.add_action_row(self.cancel_button, self.clamp_button)
         self.content_layout.addStretch()
 
-    def select_folder(self):
-        start_dir = self.settings.get("vtf_clamp_last_dir", "") or ""
-        folder = QFileDialog.getExistingDirectory(self, "Select VTF Folder", start_dir)
-        if folder:
-            self.folder_input.setText(folder)
-            self.selected_files = []
-            self.files_label.setText("No files selected")
-            self.settings.set("vtf_clamp_last_dir", folder)
-            self.settings.save()
-            self.log(f"Selected folder: {folder}", "INFO")
+    def _folder_picked(self, folder: str):
+        self.selected_files = []
+        self.files_label.setText("No files selected")
 
     def select_files(self):
-        start_dir = self.settings.get("vtf_clamp_last_dir", "") or ""
-        files, _ = QFileDialog.getOpenFileNames(
-            self,
-            "Select VTF Files",
-            start_dir,
-            "VTF Textures (*.vtf)",
-        )
+        files = widgets.browse_open_files(
+            self, "Select VTF Files", file_filter="VTF Textures (*.vtf)",
+            settings=self.settings, remember_key=f"{self.tool_name}/input folder")
         if files:
             self.selected_files = [Path(file) for file in files]
-            self.folder_input.clear()
+            self.folder_picker.set_path("")
             self.files_label.setText(f"{len(self.selected_files)} file(s) selected")
-            self.settings.set("vtf_clamp_last_dir", str(self.selected_files[0].parent))
-            self.settings.save()
             self.log(f"Selected {len(self.selected_files)} VTF file(s)", "INFO")
 
     def _collect_files(self) -> List[Path]:
         if self.selected_files:
             return [path for path in self.selected_files if path.exists() and path.suffix.lower() == ".vtf"]
 
-        folder = Path(self.folder_input.text().strip())
+        folder = Path(self.folder_picker.path())
         if not folder.exists() or not folder.is_dir():
             return []
 
@@ -340,33 +288,23 @@ class VtfClampTool(BaseTool):
             return
 
         max_size = int(self.max_size_combo.currentData())
-        self.clear_log()
-        self.emit_status("Clamping VTF textures...")
-        self.clamp_button.setEnabled(False)
-        self.cancel_button.setEnabled(True)
-
-        self.worker = VtfClampWorker(
-            files,
-            max_size,
-            self.recursive_check.isChecked(),
-            self.overwrite_check.isChecked(),
-            self.backup_check.isChecked(),
-            self.preserve_aspect_check.isChecked(),
+        self.start_worker(
+            VtfClampWorker(
+                files,
+                max_size,
+                self.recursive_check.isChecked(),
+                self.overwrite_check.isChecked(),
+                self.backup_check.isChecked(),
+                self.preserve_aspect_check.isChecked(),
+            ),
+            self.on_finished,
+            busy_widgets=(self.clamp_button,),
+            cancel_button=self.cancel_button,
+            status="Clamping VTF textures...",
         )
-        self.worker.progress.connect(self.log)
-        self.worker.finished.connect(self.on_finished)
-        self.worker.start()
         self.log(f"Started VTF clamp for {len(files)} file(s) with max {max_size}x{max_size}", "INFO")
 
-    def cancel_worker(self):
-        if self.worker and self.worker.isRunning():
-            self.worker.requestInterruption()
-            self.log("Cancellation requested...", "WARNING")
-
     def on_finished(self, total: int, clamped: int, skipped: int, failed: int):
-        self.clamp_button.setEnabled(True)
-        self.cancel_button.setEnabled(False)
-
         if failed > 0:
             self.log(f"Finished with errors: {clamped} clamped, {skipped} skipped, {failed} failed out of {total}", "WARNING")
             self.emit_status("Finished with errors")

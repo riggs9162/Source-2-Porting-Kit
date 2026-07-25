@@ -70,6 +70,80 @@ from .smd_export_helpers import pick_material, resolve_face_materials, resolve_u
 _AXIS_SWAP_QUAT = np.array([np.sin(np.pi / 4), 0.0, 0.0, np.cos(np.pi / 4)], dtype=np.float32)
 
 
+def export_smd(mesh: Mesh, file) -> None:
+    """Serialize a srctools ``Mesh`` to SMD — replacement for
+    ``Mesh.export``, which has a bug that fuses the vertex link COUNT onto
+    the UV's last digit (``0.4713204`` instead of ``0.471320 4``) for
+    multi-weighted vertices. studiomdl's tokenizer desyncs on that and
+    crashes with EXCEPTION_ACCESS_VIOLATION while reading the reference SMD.
+
+    The per-vertex weight block (``count bone weight ...``) is separated from
+    the UV by a TAB, not a space. StudioMDL CE (EvanPurr's SFM build, shipped
+    with Crowbar) tokenizes the vertex line into TAB-delimited fields and reads
+    the weight block as its own field; space-joining it to the UV leaves that
+    field empty, so any vertex with 2+ weights aborts the compile with the
+    misleading ``ERROR: Bone weight 0 not found``. A tab is plain SMD
+    whitespace, so stock studiomdl and srctools accept it identically.
+
+    Also iterates bones in insertion order (parents first, as built by
+    ``_build_bone_tree``) instead of srctools' nondeterministic set walk,
+    so bone indices are stable across runs.
+    """
+    import math as _math
+
+    file.write(b"version 1\nnodes\n")
+    bone_indexes: Dict[object, int] = {}
+    pending = list(mesh.bones.values())
+    next_ind = 0
+    while pending:
+        remaining = []
+        progressed = False
+        for bone in pending:
+            if bone.parent is None or bone.parent in bone_indexes:
+                bone_indexes[bone] = next_ind
+                parent_ind = -1 if bone.parent is None else bone_indexes[bone.parent]
+                file.write(b'%i "%s" %i\n' % (
+                    next_ind, bone.name.encode('ascii'), parent_ind))
+                next_ind += 1
+                progressed = True
+            else:
+                remaining.append(bone)
+        if not progressed:
+            raise ValueError(f'Loop in bone parenting! Remaining: {remaining}')
+        pending = remaining
+
+    file.write(b'end\nskeleton\n')
+    for time, frame in sorted(mesh.animation.items()):
+        file.write(b'time %i\n' % time)
+        for bone_pose in frame:
+            x, y, z = bone_pose.position
+            pit, yaw, rol = bone_pose.rotation
+            file.write(b'%i %.6f %.6f %.6f  %.6f %.6f %.6f\n' % (
+                bone_indexes[bone_pose.bone], x, y, z,
+                _math.radians(pit), _math.radians(yaw), _math.radians(rol)))
+    file.write(b'end\n')
+
+    if mesh.triangles:
+        file.write(b'triangles\n')
+        for tri in mesh.triangles:
+            file.write(tri.mat.encode('ascii') + b'\n')
+            for vert in tri:
+                file.write(
+                    b'%i\t%.6f %.6f %.6f\t%.6f %.6f %.6f\t%.6f %.6f' % (
+                        bone_indexes[vert.links[0][0]],
+                        vert.pos.x, vert.pos.y, vert.pos.z,
+                        vert.norm.x, vert.norm.y, vert.norm.z,
+                        vert.tex_u, vert.tex_v))
+                if len(vert.links) > 1:
+                    # TAB before the weight block — StudioMDL CE reads it as a
+                    # distinct tab-delimited field (see docstring).
+                    file.write(b'\t%i' % (len(vert.links),))
+                    for bone, weight in vert.links:
+                        file.write(b' %i %.6f' % (bone_indexes[bone], weight))
+                file.write(b'\n')
+        file.write(b'end\n')
+
+
 @dataclass
 class CoordinateMode:
     """Controls how joint TRS values get mapped into Source space.
@@ -236,11 +310,15 @@ def derive_definebone_lines(skin: GltfSkin, coord: CoordinateMode) -> List[str]:
             t = _apply_coord_to_child_translation(j.rest_translation, coord)
             q = j.rest_rotation
         pit, yaw, rol = _quat_to_pyr_degrees(np.asarray(q, dtype=np.float64))
-        # $definebone columns 5/6/7 are (rot_x, rot_y, rot_z) = (roll, pitch, yaw).
+        # $definebone columns 5/6/7 are QANGLE order (pitch, yaw, roll) —
+        # NOT the SMD skeleton's (rotX, rotY, rotZ) = (roll, pitch, yaw).
+        # Verified empirically against StudioMDL CE output (102/102
+        # discriminating bones): writing SMD order here scrambles the
+        # compiled bind pose while positions stay exact.
         lines.append(
             f'$definebone "{j.name}" "{parent_name}" '
             f'{t[0]:.6f} {t[1]:.6f} {t[2]:.6f} '
-            f'{rol:.6f} {pit:.6f} {yaw:.6f} '
+            f'{pit:.6f} {yaw:.6f} {rol:.6f} '
             f'0 0 0 0 0 0'
         )
     return lines
@@ -278,7 +356,7 @@ class SmdAnimationExporter:
         try:
             out_path.parent.mkdir(parents=True, exist_ok=True)
             with open(out_path, "wb") as f:
-                smd.export(f)
+                export_smd(smd, f)
         except Exception as e:
             return (False, f"Animation SMD write failed: {e}")
         return (True, "")
@@ -423,9 +501,92 @@ class SmdSkeletalExporter:
         try:
             out_path.parent.mkdir(parents=True, exist_ok=True)
             with open(out_path, "wb") as f:
-                smd.export(f)
+                export_smd(smd, f)
         except Exception as e:
             return (False, f"Skinned SMD write failed: {e}")
+        return (True, "")
+
+
+# ---------------------------------------------------------------------------
+# Ragdoll physics SMD (jointed collision model)
+# ---------------------------------------------------------------------------
+
+class SmdRagdollPhysicsExporter:
+    """Jointed-physics SMD writer for ragdolls (``$collisionjoints`` source).
+
+    Writes the full bone tree + bind pose (identical to the skinned reference
+    SMD, so the two share one skeleton), then emits each bone's convex hull as
+    triangles weighted 1.0 to that single bone. studiomdl turns every bone
+    carrying geometry into exactly one ragdoll collision part — the convex
+    shape vphysics simulates for that joint. Hull vertices are expected in the
+    same coordinate space as the reference SMD (already scaled / axis-swapped).
+    """
+
+    PHYS_MATERIAL = "phys"
+
+    @staticmethod
+    def write(
+        bone_hulls: List[Tuple[int, trimesh.Trimesh]],
+        skin: GltfSkin,
+        out_path: Path,
+        coord: CoordinateMode,
+    ) -> Tuple[bool, str]:
+        if not skin.joints:
+            return (False, "Skin has no joints")
+        if not bone_hulls:
+            return (False, "No bone hulls to write")
+
+        _, bones_in_order = _build_bone_tree(skin)
+        bind_frame_data: Dict[int, Tuple[np.ndarray, np.ndarray, np.ndarray]] = {
+            i: (j.rest_translation, j.rest_rotation, j.rest_scale)
+            for i, j in enumerate(skin.joints)
+        }
+        bind_frame = _frame_to_bone_frames(skin, bones_in_order, bind_frame_data, coord)
+
+        smd = Mesh(
+            bones={b.name: b for b in bones_in_order},
+            animation={0: bind_frame},
+            triangles=[],
+        )
+
+        n_joints = len(skin.joints)
+        default_n = (0.0, 0.0, 1.0)
+        for joint_idx, hull in bone_hulls:
+            if not (0 <= joint_idx < n_joints):
+                continue
+            bone = bones_in_order[joint_idx]
+            links = [(bone, 1.0)]
+            V = np.asarray(hull.vertices, dtype=np.float64)
+            F = np.asarray(hull.faces)
+            try:
+                N = np.asarray(hull.vertex_normals, dtype=np.float64)
+                if len(N) != len(V):
+                    N = None
+            except Exception:
+                N = None
+
+            for face in F:
+                verts = []
+                for vid in face:
+                    v = V[int(vid)]
+                    n = N[int(vid)] if N is not None else default_n
+                    verts.append(Vertex(
+                        Vec(float(v[0]), float(v[1]), float(v[2])),
+                        Vec(float(n[0]), float(n[1]), float(n[2])),
+                        0.0, 0.0,
+                        list(links),
+                    ))
+                smd.triangles.append(Triangle(
+                    SmdRagdollPhysicsExporter.PHYS_MATERIAL,
+                    verts[0], verts[1], verts[2],
+                ))
+
+        try:
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(out_path, "wb") as f:
+                export_smd(smd, f)
+        except Exception as e:
+            return (False, f"Ragdoll physics SMD write failed: {e}")
         return (True, "")
 
 

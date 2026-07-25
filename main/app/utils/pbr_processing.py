@@ -22,19 +22,41 @@ class FakePBRMaterialStats:
     b_is_rough_dielectric: bool
 
 
+def _resize_scalar(scalar: np.ndarray, height: int, width: int) -> np.ndarray:
+    """Bilinear-resize a 2D float32 scalar map to (height, width)."""
+    from PIL import Image
+    img = Image.fromarray(scalar, mode="F").resize(
+        (width, height), Image.Resampling.BILINEAR
+    )
+    return np.asarray(img, dtype=np.float32)
+
+
 def _extract_scalar_map(
     data: Optional[np.ndarray],
     height: int,
     width: int,
     default: float
 ) -> np.ndarray:
-    """Return a clamped 2D scalar map, creating a constant default when missing."""
+    """Return a clamped 2D scalar map sized to exactly (height, width).
+
+    Missing data becomes a constant default. Present data is reduced to its
+    first channel, clamped to [0, 1], and resized to (height, width) when it
+    doesn't already match. Callers that combine several scalar maps
+    element-wise (e.g. roughness × metallic in
+    ``compute_fakepbr_material_stats``) rely on every map sharing one shape.
+    The full pipeline pre-resizes its inputs so this is a no-op there, but
+    paths that feed raw on-disk maps at differing source resolutions
+    (e.g. a 2048² roughness next to a 4096² metallic) would otherwise fail
+    to broadcast — honouring the height/width contract makes them always fit.
+    """
     if data is None:
         return np.full((height, width), default, dtype=np.float32)
 
     scalar = data[:, :, 0] if data.ndim > 2 else data
-    scalar = np.asarray(scalar, dtype=np.float32)
-    return np.clip(scalar, 0.0, 1.0)
+    scalar = np.clip(np.asarray(scalar, dtype=np.float32), 0.0, 1.0)
+    if scalar.shape != (height, width):
+        scalar = _resize_scalar(scalar, height, width)
+    return scalar
 
 
 def _match_scalar_inputs(
@@ -347,6 +369,8 @@ def process_fakepbr_base_texture(
     metal_diffuse_suppression: float = 0.7,
     translucency: Optional[np.ndarray] = None,
     colored_metal_relief: float = 0.0,
+    tintmask: Optional[np.ndarray] = None,
+    tint_amount: Optional[float] = None,
 ) -> np.ndarray:
     """Bake Source 1 stock-compatible Fake PBR albedo.
 
@@ -354,6 +378,14 @@ def process_fakepbr_base_texture(
     metallic energy split. Alpha is normally opaque; when a translucency map
     is supplied (Source 2 ``TextureTranslucency``) we bake it into the alpha
     channel so $translucent / $alphatest VMTs see the right opacity.
+
+    ``tintmask`` (Source 2 ``TextureTintMask``) is the alternative alpha
+    payload for opaque tintable props: white = the pixel takes the entity's
+    render color through ``$blendtintbybasealpha``, black = keeps the
+    authored albedo. Translucency always wins the channel when both are
+    supplied — Source 1 can't honor transparency and masked tint at once.
+    ``tint_amount`` (Source 2 ``g_flModelTintAmount``, default 1.0) scales
+    the mask before baking.
 
     ``colored_metal_relief`` (0..1) reduces the metal diffuse suppression on
     chromatic pixels so colored metals (gold, copper, brass) keep more of
@@ -367,7 +399,9 @@ def process_fakepbr_base_texture(
     height, width = rgb.shape[:2]
     ao_value, _, metallic_value = _match_scalar_inputs(height, width, ao, None, metallic)
 
-    rgb_linear = srgb_to_linear(rgb)
+    # np.clip already handed us a private copy, so both transfer conversions
+    # below run in place — at 4K each full-size float32 buffer is 192 MiB.
+    rgb_linear = srgb_to_linear(rgb, out=rgb)
     rgb_linear *= np.power(ao_value[:, :, np.newaxis], ao_strength)
 
     relief = float(np.clip(colored_metal_relief, 0.0, 1.0))
@@ -377,7 +411,8 @@ def process_fakepbr_base_texture(
     else:
         suppression = np.full((height, width), float(metal_diffuse_suppression), dtype=np.float32)
     rgb_linear *= (1.0 - suppression[:, :, np.newaxis] * metallic_value[:, :, np.newaxis])
-    rgb_srgb = np.clip(linear_to_srgb(rgb_linear), 0.0, 1.0)
+    rgb_srgb = linear_to_srgb(rgb_linear, out=rgb_linear)
+    np.clip(rgb_srgb, 0.0, 1.0, out=rgb_srgb)
 
     if translucency is not None:
         # Translucency maps use a single channel; collapse to grayscale if RGB.
@@ -386,6 +421,19 @@ def process_fakepbr_base_texture(
         else:
             alpha = translucency
         alpha = np.clip(alpha.astype(np.float32), 0.0, 1.0)
+    elif tintmask is not None:
+        # Tint mask rides in alpha for $blendtintbybasealpha: 1.0 = fully
+        # tinted by the entity color, 0.0 = untouched albedo. Same polarity
+        # as Source 2's TextureTintMask, so it bakes through unchanged apart
+        # from the g_flModelTintAmount scale.
+        if tintmask.ndim == 3:
+            alpha = tintmask[:, :, 0]
+        else:
+            alpha = tintmask
+        alpha = np.clip(alpha.astype(np.float32), 0.0, 1.0)
+        amount = 1.0 if tint_amount is None else float(np.clip(tint_amount, 0.0, 1.0))
+        if amount < 1.0:
+            alpha = alpha * amount
     elif color.shape[2] >= 4:
         # Fall back to the color texture's own alpha channel.
         alpha = np.clip(color[:, :, 3].astype(np.float32), 0.0, 1.0)
@@ -441,7 +489,8 @@ def build_phong_mask(
 
         # Reproduce the same darkening that process_fakepbr_base_texture bakes
         # into the basetexture, so we divide by what the engine actually samples.
-        rgb_linear = srgb_to_linear(np.clip(color[:, :, :3], 0.0, 1.0))
+        rgb_clipped = np.clip(color[:, :, :3], 0.0, 1.0)
+        rgb_linear = srgb_to_linear(rgb_clipped, out=rgb_clipped)
         relief = float(np.clip(colored_metal_relief, 0.0, 1.0))
         if relief > 0.0:
             chroma = _albedo_chroma(rgb_linear)
@@ -554,10 +603,14 @@ def create_colored_envmap_mask(
     height, width = rgb.shape[:2]
     ao_value, roughness_value, metallic_value = _match_scalar_inputs(height, width, ao, roughness, metallic)
 
-    original_albedo_linear = srgb_to_linear(rgb)
-    f0_dielectric = np.full_like(original_albedo_linear, 0.04)
+    # In place on the clipped copy: 0.04·(1-m) + albedo·m is algebraically
+    # 0.04 + m·(albedo - 0.04), which avoids both the full-size 0.04 constant
+    # array and the two full-size products the mix used to build.
+    envmask_rgb = srgb_to_linear(rgb, out=rgb)
     metallic_3 = metallic_value[:, :, np.newaxis]
-    envmask_rgb = f0_dielectric * (1.0 - metallic_3) + original_albedo_linear * metallic_3
+    envmask_rgb -= 0.04
+    envmask_rgb *= metallic_3
+    envmask_rgb += 0.04
     envmask_rgb *= np.power(np.clip(1.0 - roughness_value, 0.0, 1.0), envmask_gamma)[:, :, np.newaxis]
     envmask_rgb *= ao_value[:, :, np.newaxis]
 

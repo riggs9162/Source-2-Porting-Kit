@@ -13,14 +13,12 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 from PySide6.QtCore import QThread, Signal
-from PySide6.QtWidgets import (
-    QGroupBox, QHBoxLayout, QLabel, QLineEdit, QPushButton,
-    QVBoxLayout, QFileDialog, QCheckBox
-)
+from PySide6.QtWidgets import QCheckBox
 
 from app.tools.base_tool import BaseTool
 from app.utils.image_processing import load_image, resize_to_match, extract_channel, to_uint8
-from app.core.settings import Settings
+
+IMAGE_FILTER = "Images (*.png *.tga *.jpg *.jpeg *.bmp)"
 
 
 class AlphaMaskWorker(QThread):
@@ -94,111 +92,39 @@ class AlphaMaskTool(BaseTool):
 
     def __init__(self):
         super().__init__("Alpha Mask")
-        self.worker: Optional[AlphaMaskWorker] = None
-        self.settings = Settings()
         self._setup_tool_ui()
 
     def _setup_tool_ui(self):
-        # Color texture input
-        color_group = QGroupBox("Color Texture")
-        color_layout = QHBoxLayout()
-        self.color_input = QLineEdit()
-        self.color_input.setPlaceholderText("Select color texture image (PNG/TGA/JPG)...")
-        color_layout.addWidget(self.color_input)
-        color_browse = QPushButton("Browse...")
-        color_browse.clicked.connect(self._browse_color)
-        color_layout.addWidget(color_browse)
-        color_group.setLayout(color_layout)
-        self.content_layout.addWidget(color_group)
+        self.color_picker = self.create_picker(
+            "open_file", "color texture",
+            placeholder="Select color texture image (PNG/TGA/JPG)...",
+            dialog_title="Select Color Texture", file_filter=IMAGE_FILTER)
+        self.add_group("Color Texture", self.color_picker)
 
-        # Mask input
-        mask_group = QGroupBox("Transparency Mask")
-        mask_layout = QHBoxLayout()
-        self.mask_input = QLineEdit()
-        self.mask_input.setPlaceholderText("Select black/white mask image (white=keep, black=transparent)...")
-        mask_layout.addWidget(self.mask_input)
-        mask_browse = QPushButton("Browse...")
-        mask_browse.clicked.connect(self._browse_mask)
-        mask_layout.addWidget(mask_browse)
-        mask_group.setLayout(mask_layout)
-        self.content_layout.addWidget(mask_group)
+        self.mask_picker = self.create_picker(
+            "open_file", "mask",
+            placeholder="Select black/white mask image (white=keep, black=transparent)...",
+            dialog_title="Select Transparency Mask", file_filter=IMAGE_FILTER)
+        self.add_group("Transparency Mask", self.mask_picker)
 
-        # Options
-        options_group = QGroupBox("Options")
-        options_layout = QVBoxLayout()
         self.threshold_check = QCheckBox("Use 50% threshold (white >= 128 keeps, black < 128 removes)")
         self.threshold_check.setChecked(True)
-        options_layout.addWidget(self.threshold_check)
-        options_group.setLayout(options_layout)
-        self.content_layout.addWidget(options_group)
+        self.add_group("Options", self.threshold_check)
 
-        # Output
-        out_group = QGroupBox("Output")
-        out_layout = QHBoxLayout()
-        self.output_input = QLineEdit()
-        self.output_input.setPlaceholderText("Output file (.png), default: <color>_masked.png next to source")
-        out_layout.addWidget(self.output_input)
-        out_browse = QPushButton("Browse...")
-        out_browse.clicked.connect(self._browse_output)
-        out_layout.addWidget(out_browse)
-        out_group.setLayout(out_layout)
-        self.content_layout.addWidget(out_group)
+        self.output_picker = self.create_picker(
+            "save_file", "output",
+            placeholder="Output file (.png), default: <color>_masked.png next to source",
+            dialog_title="Select Output PNG", file_filter="PNG Image (*.png)",
+            default_suffix=".png")
+        self.add_group("Output", self.output_picker)
 
-        # Action buttons
-        buttons = QHBoxLayout()
-        buttons.addStretch()
-        run_btn = QPushButton("Process")
-        run_btn.setMinimumWidth(140)
-        run_btn.clicked.connect(self._start)
-        buttons.addWidget(run_btn)
-        self.content_layout.addLayout(buttons)
+        self.run_btn = self.make_run_button("Process", self._start, min_width=140)
+        self.add_action_row(self.run_btn)
         self.content_layout.addStretch()
 
-    def _browse_color(self):
-        start_dir = self.settings.get('alpha_mask_last_color_dir', '') or ''
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select Color Texture",
-            start_dir,
-            "Images (*.png *.tga *.jpg *.jpeg *.bmp)"
-        )
-        if path:
-            self.color_input.setText(path)
-            self.settings.set('alpha_mask_last_color_dir', str(Path(path).parent))
-            self.settings.save()
-            self.log(f"Selected color: {path}", "INFO")
-
-    def _browse_mask(self):
-        start_dir = self.settings.get('alpha_mask_last_mask_dir', '') or ''
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select Transparency Mask",
-            start_dir,
-            "Images (*.png *.tga *.jpg *.jpeg *.bmp)"
-        )
-        if path:
-            self.mask_input.setText(path)
-            self.settings.set('alpha_mask_last_mask_dir', str(Path(path).parent))
-            self.settings.save()
-            self.log(f"Selected mask: {path}", "INFO")
-
-    def _browse_output(self):
-        start_dir = str(Path(self.color_input.text()).parent) if self.color_input.text() else ''
-        path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Select Output PNG",
-            start_dir,
-            "PNG Image (*.png)"
-        )
-        if path:
-            if not path.lower().endswith('.png'):
-                path += '.png'
-            self.output_input.setText(path)
-            self.log(f"Output path set: {path}", "INFO")
-
     def _start(self):
-        color_path = self.color_input.text().strip()
-        mask_path = self.mask_input.text().strip()
+        color_path = self.color_picker.path()
+        mask_path = self.mask_picker.path()
         if not color_path:
             self.log("Please select a color texture", "ERROR")
             return
@@ -207,28 +133,27 @@ class AlphaMaskTool(BaseTool):
             return
 
         color_p = Path(color_path)
-        mask_p = Path(mask_path)
         if not color_p.exists():
             self.log("Color texture does not exist", "ERROR")
             return
-        if not mask_p.exists():
+        if not Path(mask_path).exists():
             self.log("Mask file does not exist", "ERROR")
             return
 
         # Default output path
-        output_path = self.output_input.text().strip()
+        output_path = self.output_picker.path()
         if not output_path:
             output_path = str(color_p.with_name(color_p.stem + "_masked.png"))
-            self.output_input.setText(output_path)
+            self.output_picker.set_path(output_path)
 
         threshold = 0.5 if self.threshold_check.isChecked() else 0.0
 
-        self.clear_log()
-        self.emit_status("Applying mask...")
-        self.worker = AlphaMaskWorker(color_path, mask_path, output_path, threshold)
-        self.worker.progress.connect(self.log)
-        self.worker.finished.connect(self._finished)
-        self.worker.start()
+        self.start_worker(
+            AlphaMaskWorker(color_path, mask_path, output_path, threshold),
+            self._finished,
+            busy_widgets=(self.run_btn,),
+            status="Applying mask...",
+        )
         self.log("Processing started...", "INFO")
 
     def _finished(self, success: bool, output_path: str):

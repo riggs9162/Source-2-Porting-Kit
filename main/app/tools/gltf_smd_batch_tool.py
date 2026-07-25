@@ -16,6 +16,7 @@ import os
 import re
 import time
 import json
+import struct
 import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -27,10 +28,10 @@ from trimesh.resolvers import FilePathResolver
 
 
 from PySide6.QtWidgets import (
-    QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFileDialog,
+    QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QLineEdit, QGroupBox, QDoubleSpinBox, QCheckBox, QRadioButton,
-    QProgressBar, QFormLayout, QWidget, QTableWidget, QTableWidgetItem,
-    QHeaderView, QScrollArea, QSplitter, QTextEdit, QButtonGroup, QComboBox,
+    QFormLayout, QWidget, QTableWidget, QTableWidgetItem,
+    QScrollArea, QSplitter, QButtonGroup, QComboBox,
     QGridLayout, QSizePolicy, QAbstractItemView,
 )
 from PySide6.QtCore import Qt, QThread, Signal, QEvent
@@ -47,6 +48,7 @@ from .gltf_animation import (
     GltfClip, GltfSkin, load_buffer_bytes, parse_clips, parse_skin,
     parse_skin_vertex_data, peek_animations, sample_clip,
 )
+from ..ui import widgets
 from ..utils.helpers import get_config_dir
 
 
@@ -281,6 +283,33 @@ class GltfMeshLoader:
                 # Silently ignore missing texture/image files
                 return None
 
+    # GLB binary container magic ("glTF") and JSON chunk type ("JSON").
+    _GLB_MAGIC = 0x46546C67
+    _GLB_CHUNK_JSON = 0x4E4F534A
+
+    @staticmethod
+    def _read_glb_json(path: Path) -> Optional[dict]:
+        """Extract the JSON chunk from a binary .glb container.
+
+        Mirrors the JSON that ``json.load`` returns for a .gltf file so the
+        Source 2 Viewer detection and material/skin metadata paths work
+        identically for both containers. Returns None on any malformed read —
+        callers treat glTF JSON as best-effort enrichment, not a hard
+        dependency. The embedded BIN chunk is not decoded here (animation
+        export of GLB remains unsupported; see load_buffer_bytes).
+        """
+        try:
+            with open(path, 'rb') as f:
+                magic, _ver, _length = struct.unpack('<III', f.read(12))
+                if magic != GltfMeshLoader._GLB_MAGIC:
+                    return None
+                chunk_len, chunk_type = struct.unpack('<II', f.read(8))
+                if chunk_type != GltfMeshLoader._GLB_CHUNK_JSON:
+                    return None
+                return json.loads(f.read(chunk_len))
+        except Exception:
+            return None
+
     @staticmethod
     def preflight_check(path: Path) -> Tuple[bool, List[str]]:
         """Check if GLTF dependencies exist before loading.
@@ -344,9 +373,17 @@ class GltfMeshLoader:
         path = Path(path)
         
         try:
-            # Load glTF JSON to extract material names and UV transforms (best-effort)
+            # Load glTF JSON to extract material names, UV transforms, and the
+            # Source 2 Viewer signature (best-effort). Both containers must be
+            # parsed: .glb embeds the same JSON as a binary chunk, and without
+            # it the S2V native-units path never fires — which silently scales
+            # skinned .glb exports (ragdolls) ~40× too large, since trimesh's
+            # dump() doesn't bake the inches->meters root matrix for skinned
+            # meshes the way it does for static ones.
             gltf_data = None
-            if path.suffix.lower() == '.gltf':
+            if path.suffix.lower() == '.glb':
+                gltf_data = GltfMeshLoader._read_glb_json(path)
+            else:
                 try:
                     with open(path, 'r', encoding='utf-8') as f:
                         gltf_data = json.load(f)
@@ -471,11 +508,14 @@ class GltfMeshLoader:
             if is_s2v:
                 mesh.metadata['source2_native_units'] = True
 
-            # Surface parsed JSON + base dir so the animation pipeline can
-            # decode the .bin buffer without reparsing the file.
+            # Surface parsed JSON + base dir + source path so the animation
+            # pipeline can decode the buffer without reparsing the file —
+            # external .bin via base_dir, or the embedded BIN chunk via the
+            # .glb source path.
             if gltf_data is not None:
                 mesh.metadata['gltf_data'] = gltf_data
                 mesh.metadata['gltf_base_dir'] = path.parent
+                mesh.metadata['gltf_source_path'] = path
 
             return (mesh, "")
 
@@ -742,6 +782,7 @@ class QcWriter:
         coord: Optional[CoordinateMode] = None,
         animations: Optional[List[AnimMeta]] = None,
         material_skins: Optional[List[SkinDef]] = None,
+        vert_count: Optional[int] = None,
     ):
         """Write QC file with optional skeletal-animation block."""
         lines = []
@@ -749,6 +790,12 @@ class QcWriter:
 
         if cdmaterials:
             lines.append(f'$cdmaterials "{QcWriter._normalize_path(cdmaterials)}"')
+
+        # Raise MAXSTUDIOVERTS (65536) only when the model actually exceeds it:
+        # StudioMDL CE honors $maxverts, while older studiomdl builds reject
+        # the unknown command — models under the limit must stay compatible.
+        if vert_count is not None and vert_count > 65536:
+            lines.append(f'$maxverts {vert_count}')
 
         if surfaceprop:
             lines.append(f'$surfaceprop "{surfaceprop}"')
@@ -762,10 +809,11 @@ class QcWriter:
                 lines.append(f'    {{ {row} }} // {s.name}')
             lines.append('}')
 
-        if is_animated and skin is not None and coord is not None:
-            # Skinned model with animations — drop $staticprop, declare bones
-            # explicitly so studiomdl preserves the full hierarchy, and emit
-            # an $animation/$sequence pair per clip.
+        if skin is not None and coord is not None:
+            # Skinned model — drop $staticprop and declare every bone with
+            # $definebone so studiomdl preserves the full hierarchy (it strips
+            # bones that have no weighted vertices / animation otherwise).
+            # This branch runs whether or not the model has animation clips.
             lines.append(f'$body "body" "{name}.smd"')
             lines.append('')
             lines.extend(derive_definebone_lines(skin, coord))
@@ -774,21 +822,29 @@ class QcWriter:
             lines.append(f'$root "{root_name}"')
             lines.append('')
 
-            for am in (animations or []):
-                lines.append(
-                    f'$animation "a_{am.clip_name}" "{am.smd_filename}" fps {am.fps:g}'
-                )
-            lines.append('')
+            if animations:
+                for am in animations:
+                    lines.append(
+                        f'$animation "a_{am.clip_name}" "{am.smd_filename}" fps {am.fps:g}'
+                    )
+                lines.append('')
 
-            for am in (animations or []):
-                opts = [f'fps {am.fps:g}']
-                if am.loop:
-                    opts.append('loop')
-                opts_str = ' '.join(opts)
-                lines.append(
-                    f'$sequence "{am.clip_name}" {{ "a_{am.clip_name}" {opts_str} }}'
-                )
-            lines.append('')
+                for am in animations:
+                    opts = [f'fps {am.fps:g}']
+                    if am.loop:
+                        opts.append('loop')
+                    opts_str = ' '.join(opts)
+                    lines.append(
+                        f'$sequence "{am.clip_name}" {{ "a_{am.clip_name}" {opts_str} }}'
+                    )
+                lines.append('')
+            else:
+                # No animation clips, but studiomdl still needs at least one
+                # sequence. A 1-frame idle over the reference SMD's bind pose
+                # gives the (definebone-pinned) skeleton a home without
+                # inventing motion.
+                lines.append(f'$sequence "idle" "{name}.smd" fps 1')
+                lines.append('')
         else:
             lines.append('$staticprop')
             lines.append(f'$body "body" "{name}.smd"')
@@ -802,7 +858,7 @@ class QcWriter:
             lines.append('    $maxconvexpieces 10000')
             if mass is not None:
                 lines.append(f'    $mass {mass:.3f}')
-            
+
             # Add physics properties based on mesh characteristics
             if inertia is not None:
                 lines.append(f'    $inertia {inertia:.2f}')
@@ -810,7 +866,7 @@ class QcWriter:
                 lines.append(f'    $damping {damping:.4f}')
             if rotdamping is not None:
                 lines.append(f'    $rotdamping {rotdamping:.4f}')
-            
+
             lines.append('}')
 
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -858,6 +914,7 @@ class BatchRunner(QThread):
         auto_loop_detect: bool = True,
         skip_physics_for_large: bool = True,
         large_model_threshold: float = 1024.0,
+        force_manual_scale: bool = False,
     ):
         super().__init__()
         self.model_sets = model_sets
@@ -888,6 +945,7 @@ class BatchRunner(QThread):
         self.auto_loop_detect = auto_loop_detect
         self.skip_physics_for_large = skip_physics_for_large
         self.large_model_threshold = large_model_threshold
+        self.force_manual_scale = force_manual_scale
 
     def _get_output_dir(self, model_set: ModelSet) -> Path:
         """Calculate output directory for model."""
@@ -1000,42 +1058,57 @@ class BatchRunner(QThread):
             # need both ×40 and the +90°X back-rotation. When it's orphaned (skinned
             # models, source2_native_units=True) the geometry is already in vmdl Z-up
             # inches and needs neither.
+            # native_units drives the axis/basis conversion below and must stay
+            # the true detected value. force_manual_scale overrides ONLY the
+            # scale — a native-units mesh keeps its Z-up-inches orientation
+            # (no extra rotation) but gets multiplied by the manual scale.
             native_units = bool(render_mesh.metadata.get('source2_native_units'))
-            render_scale = 1.0 if native_units else self.scale
-            if render_scale != self.scale:
+            render_scale = 1.0 if (native_units and not self.force_manual_scale) else self.scale
+            if native_units and not self.force_manual_scale:
                 self.progress.emit(idx, total, f"{model_set.name}: Source-units glTF detected, using scale=1.0")
+            elif native_units and self.force_manual_scale:
+                self.progress.emit(idx, total, f"{model_set.name}: Source-units glTF detected, scale override on — using scale={self.scale:g}")
 
-            # Detect skin + animations. The buffer is loaded lazily — only when
-            # both export_animations is on and the file actually carries skin
-            # data — to keep the static-prop path's I/O cost unchanged.
+            # Detect skin + animations. Bones are preserved whenever the file
+            # carries a skin — independent of animations and of the
+            # export_animations toggle — so skinned models keep their full
+            # skeleton even with no clips. Animation clips are parsed on top
+            # only when export_animations is on and the file actually has
+            # them. The buffer is still loaded lazily (skinless props pay no
+            # I/O).
             skin: Optional[GltfSkin] = None
             clips: List[GltfClip] = []
             vertex_joints = None
             vertex_weights = None
             gltf_data = render_mesh.metadata.get('gltf_data')
             gltf_base_dir = render_mesh.metadata.get('gltf_base_dir')
-            if (self.export_animations and gltf_data is not None
-                    and gltf_base_dir is not None
-                    and gltf_data.get('skins') and gltf_data.get('animations')):
-                buf = load_buffer_bytes(gltf_data, gltf_base_dir)
+            gltf_src_path = render_mesh.metadata.get('gltf_source_path')
+            if (gltf_data is not None and gltf_base_dir is not None
+                    and gltf_data.get('skins')):
+                buf = load_buffer_bytes(gltf_data, gltf_base_dir, gltf_src_path)
                 if buf is not None:
                     skin = parse_skin(gltf_data, buf)
                     if skin is not None:
-                        clips = parse_clips(gltf_data, buf, skin)
                         vertex_joints, vertex_weights = parse_skin_vertex_data(gltf_data, buf)
+                        if self.export_animations and gltf_data.get('animations'):
+                            clips = parse_clips(gltf_data, buf, skin)
 
-            is_animated = bool(
-                skin and clips and vertex_joints is not None and vertex_weights is not None
+            # has_skin: the skeleton + per-vertex weights are available, so we
+            # write a skinned reference SMD (full bone tree) rather than a
+            # single-root static one. is_animated additionally requires clips.
+            has_skin = bool(
+                skin and vertex_joints is not None and vertex_weights is not None
             )
+            is_animated = bool(has_skin and clips)
 
             MeshProcessor.apply_scale(render_mesh, render_scale)
             apply_swap = self.axis_conversion and not native_units
             if apply_swap:
                 MeshProcessor.apply_axis_conversion(render_mesh)
-            # Skip sanitize() in the animated path — it calls
+            # Skip sanitize() for any skinned mesh — it calls
             # remove_unreferenced_vertices() which reorders the vertex array
             # and would silently desynchronise JOINTS_0 / WEIGHTS_0.
-            if not is_animated:
+            if not has_skin:
                 MeshProcessor.sanitize(render_mesh)
 
             coord = CoordinateMode(scale=render_scale, swap_axes=apply_swap)
@@ -1044,7 +1117,7 @@ class BatchRunner(QThread):
             # Write render SMD
             render_smd = out_dir / f"{model_set.name}.smd"
             if self.generate_smd:
-                if is_animated:
+                if has_skin:
                     assert skin is not None and vertex_joints is not None and vertex_weights is not None
                     success, uv_warning = SmdSkeletalExporter.write_skinned(
                         render_mesh, skin, vertex_joints, vertex_weights,
@@ -1058,7 +1131,8 @@ class BatchRunner(QThread):
                         self.progress.emit(idx, total, f"{model_set.name}: {uv_warning}")
                     self.progress.emit(
                         idx, total,
-                        f"{model_set.name}: skinned ref SMD ({len(skin.joints)} bones)"
+                        f"{model_set.name}: skinned ref SMD ({len(skin.joints)} bones"
+                        + (", no clips" if not is_animated else "") + ")"
                     )
 
                     # Per-clip animation SMDs.
@@ -1102,10 +1176,11 @@ class BatchRunner(QThread):
                             fps=self.animation_fps,
                             loop=loop,
                         ))
-                    self.progress.emit(
-                        idx, total,
-                        f"{model_set.name}: wrote {len(animations)} animation SMD(s)"
-                    )
+                    if clips:
+                        self.progress.emit(
+                            idx, total,
+                            f"{model_set.name}: wrote {len(animations)} animation SMD(s)"
+                        )
                 else:
                     success, uv_warning = SmdExporter.write_static(render_mesh, render_smd, model_set.name, self.flip_v, False, uv_mode=self.uv_mode)
                     if not success:
@@ -1161,7 +1236,7 @@ class BatchRunner(QThread):
                 if loaded_physics is not None:
                     physics_mesh = loaded_physics
                     physics_native = bool(physics_mesh.metadata.get('source2_native_units'))
-                    physics_scale = 1.0 if physics_native else self.scale
+                    physics_scale = 1.0 if (physics_native and not self.force_manual_scale) else self.scale
                     MeshProcessor.apply_scale(physics_mesh, physics_scale)
                     if self.axis_conversion and not physics_native:
                         MeshProcessor.apply_axis_conversion(physics_mesh)
@@ -1271,7 +1346,7 @@ class BatchRunner(QThread):
                         # inv(phys_root)*main_root cancels at runtime instead of
                         # rotating the collision hull off-axis.
                         physics_root_bind = (
-                            compute_root_bind_pyr(skin, coord) if is_animated and skin else None
+                            compute_root_bind_pyr(skin, coord) if has_skin and skin else None
                         )
                         # Pass smooth normals explicitly to ensure they're written to SMD
                         if self.generate_smd:
@@ -1325,10 +1400,12 @@ class BatchRunner(QThread):
                     damping=phys_props['damping'] if phys_props else None,
                     rotdamping=phys_props['rotdamping'] if phys_props else None,
                     is_animated=is_animated,
-                    skin=skin if is_animated else None,
-                    coord=coord if is_animated else None,
-                    animations=animations if is_animated else None,
+                    skin=skin if has_skin else None,
+                    coord=coord if has_skin else None,
+                    animations=animations if has_skin else None,
                     material_skins=model_set.skins or None,
+                    vert_count=(len(render_mesh.vertices)
+                                if render_mesh is not None else None),
                 )
 
             converted += 1
@@ -1358,7 +1435,6 @@ class GltfSmdBatchTool(BaseTool):
         self.model_sets: List[ModelSet] = []
         self.preview_models: List[PreviewModel] = []
         self.auto_rescan_enabled = False
-        self.thread: Optional[BatchRunner] = None
         self.recent_runs: List[Dict[str, str]] = []
         self.recent_runs_file = get_config_dir() / "gltf_smd_recent_runs.json"
         self.load_recent_runs()
@@ -1424,15 +1500,15 @@ class GltfSmdBatchTool(BaseTool):
         self.populate_recent_runs()
         form.addRow("Recent run:", self.recent_combo)
 
-        self.input_edit = QLineEdit()
-        input_btn = QPushButton("Browse...")
-        input_btn.clicked.connect(self.browse_input)
-        form.addRow("Input:", self._row_widget(self.input_edit, input_btn))
+        self.input_picker = self.create_picker(
+            "dir", "input folder", dialog_title="Select Input Folder")
+        self.input_picker.changed.connect(self._on_input_picked)
+        form.addRow("Input:", self.input_picker)
 
-        self.output_edit = QLineEdit()
-        output_btn = QPushButton("Browse...")
-        output_btn.clicked.connect(self.browse_output)
-        form.addRow("Output:", self._row_widget(self.output_edit, output_btn))
+        self.output_picker = self.create_picker(
+            "dir", "output folder", dialog_title="Select Output Folder")
+        self.output_picker.changed.connect(self._on_output_picked)
+        form.addRow("Output:", self.output_picker)
 
         # Inline warning for input==output — no longer floating after the
         # left column, since the right pane is the focal area now.
@@ -1454,7 +1530,7 @@ class GltfSmdBatchTool(BaseTool):
         self.scale_spin = QDoubleSpinBox()
         self.scale_spin.setRange(0.001, 10000.0)
         self.scale_spin.setValue(40.0)
-        self.scale_spin.setDecimals(3)
+        self.scale_spin.setDecimals(4)
         self.scale_spin.valueChanged.connect(self.update_preview)
         form.addRow("Scale:", self.scale_spin)
 
@@ -1622,6 +1698,12 @@ class GltfSmdBatchTool(BaseTool):
         self.skip_large_physics_check.toggled.connect(self.large_threshold_spin.setEnabled)
         form.addRow("  Skip threshold:", self.large_threshold_spin)
 
+        pointer = QLabel(
+            "Jointed ragdolls and playermodels: use the Ragdoll & Playermodel "
+            "Porter tool.")
+        pointer.setWordWrap(True)
+        form.addRow("", pointer)
+
         group.setLayout(form)
         return group
 
@@ -1639,6 +1721,15 @@ class GltfSmdBatchTool(BaseTool):
         self.axis_conversion_check.setChecked(True)
         self.axis_conversion_check.setToolTip("Convert Z-up (Blender) to Source engine coordinates")
         form.addRow("", self.axis_conversion_check)
+
+        self.force_manual_scale_check = QCheckBox("Force manual scale (ignore Source-units detection)")
+        self.force_manual_scale_check.setChecked(False)
+        self.force_manual_scale_check.setToolTip(
+            "Override the automatic 'Source-units glTF detected, using scale=1.0' behavior.\n"
+            "When on, the Scale value always applies, even for glTFs flagged as native\n"
+            "Source units. Only scale is affected — axis/orientation handling is unchanged."
+        )
+        form.addRow("", self.force_manual_scale_check)
 
         self.uv_mode_combo = QComboBox()
         self.uv_mode_combo.addItems([
@@ -1757,21 +1848,13 @@ class GltfSmdBatchTool(BaseTool):
         self.preview_table.installEventFilter(self)
         col.addWidget(self.preview_table, 1)
 
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setVisible(False)
-        col.addWidget(self.progress_bar)
-
         # Run controls live in the right pane next to the table.
-        run_row = QHBoxLayout()
-        run_row.addStretch()
         self.cancel_btn = QPushButton("Cancel")
         self.cancel_btn.setEnabled(False)
         self.cancel_btn.clicked.connect(self.cancel_batch)
         self.run_btn = QPushButton("Run Batch")
         self.run_btn.clicked.connect(self.run_batch)
-        run_row.addWidget(self.cancel_btn)
-        run_row.addWidget(self.run_btn)
-        col.addLayout(run_row)
+        col.addLayout(widgets.action_row(self.cancel_btn, self.run_btn))
 
         return pane
 
@@ -1842,35 +1925,24 @@ class GltfSmdBatchTool(BaseTool):
                 return True
         return super().eventFilter(obj, event)
 
-    def _row_widget(self, *widgets) -> QWidget:
-        """Create horizontal row of widgets."""
-        w = QWidget()
-        layout = QHBoxLayout(w)
-        layout.setContentsMargins(0, 0, 0, 0)
-        for widget in widgets:
-            layout.addWidget(widget)
-        return w
+    def _on_input_picked(self, folder: str):
+        """After the input folder is picked: warn on input==output and, if
+        auto-rescan is on, re-scan the new folder."""
+        self.check_input_output_same()
+        if self.auto_rescan_enabled:
+            self.scan_models()
 
-    def browse_input(self):
-        folder = QFileDialog.getExistingDirectory(self, "Select Input Folder")
-        if folder:
-            self.input_edit.setText(folder)
-            self.check_input_output_same()
-            if self.auto_rescan_enabled:
-                self.scan_models()
-
-    def browse_output(self):
-        folder = QFileDialog.getExistingDirectory(self, "Select Output Folder")
-        if folder:
-            self.output_edit.setText(folder)
-            self.check_input_output_same()
-            if self.auto_rescan_enabled:
-                self.update_preview()
+    def _on_output_picked(self, folder: str):
+        """After the output folder is picked: warn on input==output and, if
+        auto-rescan is on, refresh the overwrite/skip preview."""
+        self.check_input_output_same()
+        if self.auto_rescan_enabled:
+            self.update_preview()
 
     def check_input_output_same(self):
         """Check if input and output folders are the same and show warning."""
-        input_path = self.input_edit.text().strip()
-        output_path = self.output_edit.text().strip()
+        input_path = self.input_picker.path()
+        output_path = self.output_picker.path()
         if input_path and output_path:
             try:
                 same = Path(input_path).resolve() == Path(output_path).resolve()
@@ -1885,7 +1957,7 @@ class GltfSmdBatchTool(BaseTool):
 
     def scan_models(self):
         """Scan input folder for model sets."""
-        input_path = self.input_edit.text().strip()
+        input_path = self.input_picker.path()
         if not input_path:
             self.log("Input folder required", "WARNING")
             return
@@ -1908,13 +1980,13 @@ class GltfSmdBatchTool(BaseTool):
             self.preview_table.setRowCount(0)
             return
 
-        output_path = self.output_edit.text().strip()
+        output_path = self.output_picker.path()
         if not output_path:
             self.preview_table.setRowCount(0)
             return
 
         output_root = Path(output_path)
-        input_root = Path(self.input_edit.text().strip())
+        input_root = Path(self.input_picker.path())
 
         self.preview_models = []
         
@@ -2138,8 +2210,8 @@ class GltfSmdBatchTool(BaseTool):
 
     def run_batch(self):
         """Start batch conversion."""
-        input_path = self.input_edit.text().strip()
-        output_path = self.output_edit.text().strip()
+        input_path = self.input_picker.path()
+        output_path = self.output_picker.path()
 
         if not input_path or not output_path:
             self.log("Input and output folders required", "ERROR")
@@ -2166,11 +2238,6 @@ class GltfSmdBatchTool(BaseTool):
         input_root = Path(input_path)
         output_root = Path(output_path)
 
-        self.run_btn.setEnabled(False)
-        self.cancel_btn.setEnabled(True)
-        self.progress_bar.setVisible(True)
-        self.progress_bar.setRange(0, len(selected_sets))
-        self.progress_bar.setValue(0)
 
         # Map UI combo selection to uv_mode parameter
         uv_mode_map = {
@@ -2181,7 +2248,7 @@ class GltfSmdBatchTool(BaseTool):
         }
         uv_mode = uv_mode_map.get(self.uv_mode_combo.currentIndex(), 'preserve')
 
-        self.thread = BatchRunner(
+        worker = BatchRunner(
             model_sets=selected_sets,
             input_root=input_root,
             output_root=output_root,
@@ -2210,33 +2277,36 @@ class GltfSmdBatchTool(BaseTool):
             auto_loop_detect=self.auto_loop_check.isChecked(),
             skip_physics_for_large=self.skip_large_physics_check.isChecked(),
             large_model_threshold=self.large_threshold_spin.value(),
+            force_manual_scale=self.force_manual_scale_check.isChecked(),
         )
-        self.thread.progress.connect(self.on_progress)
-        self.thread.finished.connect(self.on_finished)
-        self.thread.start()
+        self.start_worker(
+            worker,
+            self.on_finished,
+            progress_slot=self.on_progress,
+            busy_widgets=(self.run_btn,),
+            cancel_button=self.cancel_btn,
+            clear_log=False,
+            progress_total=len(selected_sets),
+        )
 
     def on_progress(self, current: int, total: int, message: str):
-        self.progress_bar.setMaximum(total)
-        self.progress_bar.setValue(current)
+        self.set_progress(current, total)
         self.log(message, "INFO")
 
     def on_finished(self, success: bool, message: str, stats: dict):
-        self.run_btn.setEnabled(True)
-        self.cancel_btn.setEnabled(False)
-        self.progress_bar.setVisible(False)
-        
+        # Button busy-state and the shared progress bar are restored by
+        # start_worker's finish wrapper.
         log_type = "SUCCESS" if success else "WARNING"
         self.log(message, log_type)
-        
+
         # Log errors
         if 'error_list' in stats:
             for error in stats['error_list']:
                 self.log(error, "ERROR")
 
     def cancel_batch(self):
-        if self.thread and self.thread.isRunning():
-            self.thread.requestInterruption()
-            self.log("Cancelling...", "INFO")
+        self.request_cancel()
+
     def load_recent_runs(self):
         """Load recent runs from JSON file."""
         try:
@@ -2285,6 +2355,7 @@ class GltfSmdBatchTool(BaseTool):
             # Advanced options
             'flip_v': self.flip_v_check.isChecked(),
             'axis_conversion': self.axis_conversion_check.isChecked(),
+            'force_manual_scale': self.force_manual_scale_check.isChecked(),
             'export_physics': self.export_physics_check.isChecked(),
             'skip_physics_for_large': self.skip_large_physics_check.isChecked(),
             'large_model_threshold': self.large_threshold_spin.value(),
@@ -2340,9 +2411,9 @@ class GltfSmdBatchTool(BaseTool):
             output_path = run.get('output', '')
             
             if input_path:
-                self.input_edit.setText(input_path)
+                self.input_picker.set_path(input_path)
             if output_path:
-                self.output_edit.setText(output_path)
+                self.output_picker.set_path(output_path)
             
             # Restore processing options
             if 'scale' in run:
@@ -2381,6 +2452,8 @@ class GltfSmdBatchTool(BaseTool):
                 self.flip_v_check.setChecked(run['flip_v'])
             if 'axis_conversion' in run:
                 self.axis_conversion_check.setChecked(run['axis_conversion'])
+            if 'force_manual_scale' in run:
+                self.force_manual_scale_check.setChecked(run['force_manual_scale'])
             if 'export_physics' in run:
                 self.export_physics_check.setChecked(run['export_physics'])
             if 'skip_physics_for_large' in run:

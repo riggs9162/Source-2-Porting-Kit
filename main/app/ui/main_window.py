@@ -11,6 +11,7 @@ from PySide6.QtCore import Qt, QRect
 from PySide6.QtGui import QAction, QActionGroup, QScreen
 from app.core.settings import Settings
 from app.ui.styling import StyleManager, Theme
+from app.ui.preferences_dialog import PreferencesDialog
 from app.tools.search_replace_tool import SearchReplaceTool
 from app.tools.filename_sanitizer_tool import FilenameSanitizerTool
 from app.tools.pbr_tool import PBRTool
@@ -26,6 +27,7 @@ from app.tools.fake_pbr_reverse_tool import FakePBRReverseTool
 from app.tools.vmat_pbr_tool import VmatPBRTool
 from app.tools.vtf_clamp_tool import VtfClampTool
 from app.tools.gltf_smd_batch_tool import GltfSmdBatchTool
+from app.tools.ragdoll_pm_porter_tool import RagdollPmPorterTool
 from app.tools.hotspot_editor_tool import HotspotEditorTool
 from app.tools.vrf_batch_export_tool import VrfBatchExportTool
 
@@ -37,9 +39,16 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.settings = settings
         self.current_tool = None
+        # Display name of the currently-shown tool, or '' for the welcome
+        # page. Persisted across runs when `remember_last_tool` is on.
+        self._active_tool_name = ""
         self.tools = {}
+        # Sidebar buttons keyed by tool display name; used to keep exactly
+        # one button checked.
+        self.tool_buttons: dict = {}
         self.setup_ui()
         self.restore_window_state()
+        self._restore_last_tool()
         
     def setup_ui(self):
         """Initialize the user interface"""
@@ -116,11 +125,17 @@ class MainWindow(QMainWindow):
         tools_layout.setContentsMargins(0, 0, 0, 0)
         tools_layout.setSpacing(4)
         
+        # Catalogue of all tool classes indexed by their sidebar label.
+        # Populated as tool buttons are created below; used by
+        # `_restore_last_tool()` to look up the class for a saved tool name.
+        self._tool_catalogue: dict = {}
+
         # Add tool buttons grouped by category
         tool_categories = {
             "Models": [
                 ("Bone Backport", BoneBackportTool),
                 ("GLTF Batch SMD", GltfSmdBatchTool),
+                ("Ragdoll && Playermodel Porter", RagdollPmPorterTool),
                 ("VRF Batch Export", VrfBatchExportTool),
             ],
             "Materials": [
@@ -159,6 +174,7 @@ class MainWindow(QMainWindow):
             
             # Add tool buttons
             for tool_name, tool_class in tools:
+                self._tool_catalogue[tool_name] = tool_class
                 self.add_tool_button(tools_layout, tool_name, tool_class)
         
         # Add more tool buttons here in the future
@@ -187,37 +203,15 @@ class MainWindow(QMainWindow):
         """)
         btn.clicked.connect(lambda: self.show_tool(tool_name, tool_class))
         layout.addWidget(btn)
-        
-        # Store button reference
-        if not hasattr(self, 'tool_buttons'):
-            self.tool_buttons = []
-        self.tool_buttons.append(btn)
-    
+        self.tool_buttons[tool_name] = btn
+
     def show_tool(self, tool_name: str, tool_class):
         """Show the selected tool"""
-        # Find the button that was clicked
-        clicked_button = None
-        for btn in self.tool_buttons:
-            if btn.text() == tool_name:
-                clicked_button = btn
-                break
-        
-        # If the button is already checked, keep it checked (prevent deselection)
-        if clicked_button and clicked_button.isChecked():
-            # Uncheck all other buttons
-            for btn in self.tool_buttons:
-                if btn != clicked_button:
-                    btn.setChecked(False)
-        else:
-            # Re-check the clicked button (in case it was unchecked by clicking again)
-            if clicked_button:
-                clicked_button.setChecked(True)
-            
-            # Uncheck all other buttons
-            for btn in self.tool_buttons:
-                if btn.text() != tool_name:
-                    btn.setChecked(False)
-        
+        # Exactly one sidebar button stays checked; re-clicking the active
+        # tool must not deselect it.
+        for name, btn in self.tool_buttons.items():
+            btn.setChecked(name == tool_name)
+
         # Create tool instance if not exists
         if tool_name not in self.tools:
             tool_instance = tool_class()
@@ -227,6 +221,7 @@ class MainWindow(QMainWindow):
         
         # Show the tool
         self.content_stack.setCurrentWidget(self.tools[tool_name])
+        self._active_tool_name = tool_name
         # Replace && with & for display in status bar
         display_name = tool_name.replace("&&", "&")
         self.statusBar().showMessage(f"{display_name} tool active")
@@ -278,9 +273,17 @@ class MainWindow(QMainWindow):
         theme_group.addAction(system_action)
         theme_menu.addAction(system_action)
         
+        # Settings menu
+        settings_menu = menubar.addMenu("&Settings")
+
+        prefs_action = QAction("&Preferences...", self)
+        prefs_action.setShortcut("Ctrl+,")
+        prefs_action.triggered.connect(self.show_preferences)
+        settings_menu.addAction(prefs_action)
+
         # Help menu
         help_menu = menubar.addMenu("&Help")
-        
+
         about_action = QAction("&About", self)
         about_action.triggered.connect(self.show_about)
         help_menu.addAction(about_action)
@@ -348,8 +351,31 @@ class MainWindow(QMainWindow):
         self.settings.set('window_width', self.width())
         self.settings.set('window_height', self.height())
         self.settings.set('window_maximized', self.isMaximized())
+        # Persist the last-active tool so the next launch can restore it.
+        # Stored even when remember_last_tool is off — that way toggling the
+        # preference on later still has a valid name to restore.
+        self.settings.set('last_opened_tool', self._active_tool_name or '')
         self.settings.save()
         event.accept()
+
+    def _restore_last_tool(self):
+        """Reopen the tool that was active when the app last closed."""
+        if not bool(self.settings.get('remember_last_tool', True)):
+            return
+        last_name = str(self.settings.get('last_opened_tool', '') or '')
+        if not last_name:
+            return
+        tool_class = self._tool_catalogue.get(last_name)
+        if tool_class is None:
+            # Tool was removed/renamed since the previous run — fall back
+            # to the welcome page silently rather than logging a warning
+            # the user can't act on.
+            return
+        try:
+            self.show_tool(last_name, tool_class)
+        except Exception:
+            # Never let a tool failing to construct block app startup.
+            self._active_tool_name = ""
         
     def show_about(self):
         """Show about dialog"""
@@ -359,3 +385,9 @@ class MainWindow(QMainWindow):
             "Source 2 Porting Kit v2.1.2\n\n"
             "A tool for porting Source 2 content"
         )
+
+    def show_preferences(self):
+        """Open the application-wide preferences dialog."""
+        dialog = PreferencesDialog(self.settings, parent=self)
+        if dialog.exec():
+            self.statusBar().showMessage("Preferences saved", 3000)

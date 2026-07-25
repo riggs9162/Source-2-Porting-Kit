@@ -24,6 +24,7 @@ Port models, materials, sounds, and more from games like Half-Life: Alyx back to
 ### Models
 - **Bone Backport** — Backport bone data for Source 1 compatibility
 - **GLTF Batch SMD** — Batch-convert GLTF models to SMD, with QC scaffolding and `$texturegroup` skin support
+- **Ragdoll & Playermodel Porter** — One-click Source 2 GLB → GMod ragdoll or playermodel sources: PHYS-exact `$collisionjoints` (real Rubikon hulls/limits, hitboxes, distal mass bias) for ragdolls; donor-exact ValveBiped conform with a working death ragdoll for playermodels; optional StudioMDL CE compile
 - **VRF Batch Export** — Batch-extract `.vmdl_c` / `.vmat_c` / `.vtex_c` from VPKs via Source2Viewer-CLI, staged into a Source 1 sibling layout (`modelsrc/`, `materialsrc/`)
 
 ### Materials
@@ -35,7 +36,7 @@ Port models, materials, sounds, and more from games like Half-Life: Alyx back to
 - **Fake PBR Reverse** — Reverse Source 1 "fake PBR" composites back into separate maps
 - **Manual PBR Converter** — Hands-on PBR-to-Source 1 conversion for individual materials
 - **Texture Folder PBR Batch** — Recursively batch-process PBR textures across a folder tree
-- **VMAT PBR Batch Converter** — Convert Source 2 `.vmat` PBR materials to Source 1 `.vmt`
+- **VMAT PBR Batch Converter** — Convert Source 2 `.vmat` PBR materials to Source 1 `.vmt`, incl. tintable props (`F_TINT_MASK` → `$blendtintbybasealpha`)
 
 </td>
 <td width="50%" valign="top">

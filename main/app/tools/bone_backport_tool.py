@@ -1,95 +1,17 @@
 import os
 import shutil
-import logging
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
-    QLineEdit, QPushButton, QCheckBox, QGroupBox, 
-    QTextEdit, QFileDialog, QMessageBox, QScrollArea
+    QLabel, QPushButton, QCheckBox, QTextEdit, QMessageBox
 )
-from PySide6.QtCore import Qt, QThread, Signal
-from .base_tool import BaseTool
+from PySide6.QtCore import QThread, Signal
+from app.tools.base_tool import BaseTool
+from app.ui import widgets
+from app.core.bone_maps import SOURCE2_TO_VALVEBIPED
 
-# Bone mapping from Source 2 to ValveBiped (Source 1)
-BONE_MAPPING = {
-    # Root
-    "pelvis":        "ValveBiped.Bip01_Pelvis",
-
-    # Spine
-    "spine_0":       "ValveBiped.Bip01_Spine",
-    "spine_1":       "ValveBiped.Bip01_Spine1",
-    "spine_2":       "ValveBiped.Bip01_Spine2",
-    "spine_3":       "ValveBiped.Bip01_Spine4",  # optional
-
-    # Neck & Head
-    "neck_0":        "ValveBiped.Bip01_Neck1",
-    "head":          "ValveBiped.Bip01_Head1",
-
-    # Left Arm
-    "clavicle_L":            "ValveBiped.Bip01_L_Clavicle",
-    "arm_upper_L":           "ValveBiped.Bip01_L_UpperArm",
-    "arm_lower_L":           "ValveBiped.Bip01_L_Forearm",
-    "hand_L":                "ValveBiped.Bip01_L_Hand",
-
-    # Left Fingers
-    "finger_thumb_0_L":      "ValveBiped.Bip01_L_Finger0",
-    "finger_thumb_1_L":      "ValveBiped.Bip01_L_Finger01",
-    "finger_thumb_2_L":      "ValveBiped.Bip01_L_Finger02",
-
-    "finger_index_meta_L":   "ValveBiped.Bip01_L_Finger1",
-    "finger_index_0_L":      "ValveBiped.Bip01_L_Finger11",
-    "finger_index_1_L":      "ValveBiped.Bip01_L_Finger12",
-
-    "finger_middle_meta_L":  "ValveBiped.Bip01_L_Finger2",
-    "finger_middle_0_L":     "ValveBiped.Bip01_L_Finger21",
-    "finger_middle_1_L":     "ValveBiped.Bip01_L_Finger22",
-
-    "finger_ring_meta_L":    "ValveBiped.Bip01_L_Finger3",
-    "finger_ring_0_L":       "ValveBiped.Bip01_L_Finger31",
-    "finger_ring_1_L":       "ValveBiped.Bip01_L_Finger32",
-
-    "finger_pinky_meta_L":   "ValveBiped.Bip01_L_Finger4",
-    "finger_pinky_0_L":      "ValveBiped.Bip01_L_Finger41",
-    "finger_pinky_1_L":      "ValveBiped.Bip01_L_Finger42",
-
-    # Right Arm
-    "clavicle_R":            "ValveBiped.Bip01_R_Clavicle",
-    "arm_upper_R":           "ValveBiped.Bip01_R_UpperArm",
-    "arm_lower_R":           "ValveBiped.Bip01_R_Forearm",
-    "hand_R":                "ValveBiped.Bip01_R_Hand",
-
-    # Right Fingers
-    "finger_thumb_0_R":      "ValveBiped.Bip01_R_Finger0",
-    "finger_thumb_1_R":      "ValveBiped.Bip01_R_Finger01",
-    "finger_thumb_2_R":      "ValveBiped.Bip01_R_Finger02",
-
-    "finger_index_meta_R":   "ValveBiped.Bip01_R_Finger1",
-    "finger_index_0_R":      "ValveBiped.Bip01_R_Finger11",
-    "finger_index_1_R":      "ValveBiped.Bip01_R_Finger12",
-
-    "finger_middle_meta_R":  "ValveBiped.Bip01_R_Finger2",
-    "finger_middle_0_R":     "ValveBiped.Bip01_R_Finger21",
-    "finger_middle_1_R":     "ValveBiped.Bip01_R_Finger22",
-
-    "finger_ring_meta_R":    "ValveBiped.Bip01_R_Finger3",
-    "finger_ring_0_R":       "ValveBiped.Bip01_R_Finger31",
-    "finger_ring_1_R":       "ValveBiped.Bip01_R_Finger32",
-
-    "finger_pinky_meta_R":   "ValveBiped.Bip01_R_Finger4",
-    "finger_pinky_0_R":      "ValveBiped.Bip01_R_Finger41",
-    "finger_pinky_1_R":      "ValveBiped.Bip01_R_Finger42",
-
-    # Left Leg
-    "leg_upper_L":           "ValveBiped.Bip01_L_Thigh",
-    "leg_lower_L":           "ValveBiped.Bip01_L_Calf",
-    "ankle_L":               "ValveBiped.Bip01_L_Foot",
-    "ball_L":                "ValveBiped.Bip01_L_Toe0",
-
-    # Right Leg
-    "leg_upper_R":           "ValveBiped.Bip01_R_Thigh",
-    "leg_lower_R":           "ValveBiped.Bip01_R_Calf",
-    "ankle_R":               "ValveBiped.Bip01_R_Foot",
-    "ball_R":                "ValveBiped.Bip01_R_Toe0",
-}
+# Bone mapping from Source 2 to ValveBiped (Source 1). Canonical definition
+# lives in core/bone_maps.py so the ragdoll pipeline can share it without
+# importing this Qt widget module.
+BONE_MAPPING = SOURCE2_TO_VALVEBIPED
 
 class ProcessingThread(QThread):
     """Thread for processing files to avoid freezing the UI"""
@@ -246,54 +168,30 @@ class BoneBackportTool(BaseTool):
         self.processing_thread = None
 
     def setup_tool_ui(self):
-        # Input section
-        input_group = QGroupBox("Input")
-        input_layout = QHBoxLayout()
-        
-        input_layout.addWidget(QLabel("QC/SMD Folder:"))
-        self.folder_input = QLineEdit()
-        self.folder_input.setPlaceholderText("Select folder containing QC and SMD files...")
-        input_layout.addWidget(self.folder_input)
-        
-        browse_btn = QPushButton("Browse")
-        browse_btn.clicked.connect(self.browse_folder)
-        input_layout.addWidget(browse_btn)
-        
-        input_group.setLayout(input_layout)
-        self.content_layout.addWidget(input_group)
+        self.folder_picker = self.create_picker(
+            "dir", "folder", label="QC/SMD Folder:",
+            placeholder="Select folder containing QC and SMD files...",
+            dialog_title="Select Folder")
+        self.add_group("Input", self.folder_picker)
 
-        # Options section
-        options_group = QGroupBox("Options")
-        options_layout = QVBoxLayout()
-        
         self.backup_check = QCheckBox("Create backups (.bak)")
         self.backup_check.setChecked(True)
         self.backup_check.setToolTip(
             "Save the original alongside the modified copy."
         )
-        options_layout.addWidget(self.backup_check)
-        
+
         self.process_qc_check = QCheckBox("Process QC files")
         self.process_qc_check.setChecked(True)
-        options_layout.addWidget(self.process_qc_check)
-        
+
         self.process_qci_check = QCheckBox("Process QCIs")
         self.process_qci_check.setChecked(True)
-        options_layout.addWidget(self.process_qci_check)
-        
+
         self.process_smd_check = QCheckBox("Process SMD files")
         self.process_smd_check.setChecked(True)
-        options_layout.addWidget(self.process_smd_check)
-        
-        options_group.setLayout(options_layout)
-        self.content_layout.addWidget(options_group)
 
-        # Custom mapping section
-        mapping_group = QGroupBox("Custom Bone Mapping")
-        mapping_layout = QVBoxLayout()
-        
-        mapping_layout.addWidget(QLabel("Add custom bone mappings (Source2Name = Source1Name):"))
-        
+        self.add_group("Options", self.backup_check, self.process_qc_check,
+                       self.process_qci_check, self.process_smd_check)
+
         self.mapping_text = QTextEdit()
         self.mapping_text.setPlaceholderText(
             "# Example custom mappings (one per line):\n"
@@ -301,33 +199,20 @@ class BoneBackportTool(BaseTool):
             "# weapon_bone = ValveBiped.weapon_bone"
         )
         self.mapping_text.setMinimumHeight(100)
-        mapping_layout.addWidget(self.mapping_text)
-        
-        mapping_group.setLayout(mapping_layout)
-        self.content_layout.addWidget(mapping_group)
+        self.add_group("Custom Bone Mapping",
+                       QLabel("Add custom bone mappings (Source2Name = Source1Name):"),
+                       self.mapping_text)
 
-        # Action buttons
-        btn_layout = QHBoxLayout()
-        
+        # Action buttons: mapping viewer on the left, Process on the right.
         self.default_mapping_btn = QPushButton("View Default Mapping")
         self.default_mapping_btn.clicked.connect(self.show_default_mapping)
-        btn_layout.addWidget(self.default_mapping_btn)
+        self.process_btn = self.make_run_button("Process", self.process_files)
+        btn_row = widgets.hbox(self.default_mapping_btn, stretch_after=True)
+        btn_row.addWidget(self.process_btn)
+        self.content_layout.addLayout(btn_row)
 
-        btn_layout.addStretch()
-
-        self.process_btn = QPushButton("Process")
-        self.process_btn.clicked.connect(self.process_files)
-        btn_layout.addWidget(self.process_btn)
-        
-        self.content_layout.addLayout(btn_layout)
-        
         # Add stretch to push everything up
         self.content_layout.addStretch()
-
-    def browse_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, "Select Folder")
-        if folder:
-            self.folder_input.setText(folder)
 
     def get_custom_mapping(self):
         custom_mapping = {}
@@ -351,7 +236,7 @@ class BoneBackportTool(BaseTool):
         return full_mapping
 
     def process_files(self):
-        folder_path = self.folder_input.text()
+        folder_path = self.folder_picker.path()
         if not folder_path:
             QMessageBox.warning(self, "Error", "Please select a folder first.")
             return
@@ -369,18 +254,21 @@ class BoneBackportTool(BaseTool):
 
         bone_mapping = self.get_full_mapping()
 
-        # Disable UI
-        self.process_btn.setEnabled(False)
-        self.log("Starting processing...")
-
+        # The worker's signals are non-standard, so wire progress/errors
+        # manually before start_worker (which only auto-connects `progress`).
         self.processing_thread = ProcessingThread(folder_path, bone_mapping, options)
         self.processing_thread.progress_signal.connect(self.log)
         self.processing_thread.error_signal.connect(self.log_error)
-        self.processing_thread.finished_signal.connect(self.on_processing_finished)
-        self.processing_thread.start()
+        self.start_worker(
+            self.processing_thread,
+            self.on_processing_finished,
+            finished_signal=self.processing_thread.finished_signal,
+            busy_widgets=(self.process_btn,),
+            status="Backporting bones...",
+        )
+        self.log("Starting processing...")
 
     def on_processing_finished(self, processed, changes, errors):
-        self.process_btn.setEnabled(True)
         self.log(f"Processing complete. Processed: {processed}, Changes: {changes}, Errors: {errors}")
         QMessageBox.information(self, "Complete", 
                               f"Processing Complete\n\n"

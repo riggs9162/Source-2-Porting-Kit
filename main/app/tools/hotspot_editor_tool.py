@@ -7,6 +7,7 @@ and export in the Valve .rect text format used by hotspot texturing.
 
 import os
 import random
+import re
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QRectF, QPointF, Signal
@@ -17,13 +18,13 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QGraphicsView, QGraphicsScene, QGraphicsRectItem, QGraphicsPixmapItem,
     QGroupBox, QHBoxLayout, QVBoxLayout, QLabel, QLineEdit, QPushButton,
-    QFileDialog, QCheckBox, QComboBox, QSpinBox, QTreeWidget, QTreeWidgetItem,
+    QCheckBox, QComboBox, QSpinBox, QTreeWidget, QTreeWidgetItem,
     QSplitter, QWidget, QMessageBox, QHeaderView, QDialog, QDoubleSpinBox,
     QFormLayout, QDialogButtonBox, QMenu,
 )
 
 from app.tools.base_tool import BaseTool
-from app.core.settings import Settings
+from app.ui import widgets
 
 
 # ---------------------------------------------------------------------------
@@ -458,11 +459,13 @@ class HotspotEditorTool(BaseTool):
 
     def __init__(self):
         super().__init__("Hotspot Editor")
-        self.settings = Settings()
         self.rect_items: list[HotspotRectItem] = []
         self.selected_index: int | None = None
         self.pixmap_item: QGraphicsPixmapItem | None = None
         self.image_path = ""
+        # Path of the VMT the image was loaded from (if any); saving a .rect
+        # will write %rectanglemap back into this VMT.
+        self.source_vmt_path = ""
         self.image_width = 0
         self.image_height = 0
         self.grid_lines: list = []
@@ -488,7 +491,7 @@ class HotspotEditorTool(BaseTool):
         img_row = QHBoxLayout()
         img_row.addWidget(QLabel("Image:"))
         self.image_input = QLineEdit()
-        self.image_input.setPlaceholderText("Select texture image (PNG/TGA/JPG/BMP)...")
+        self.image_input.setPlaceholderText("Select texture image (PNG/TGA/JPG/BMP) or material (VMT/VTF)...")
         img_row.addWidget(self.image_input)
         img_browse = QPushButton("Browse...")
         img_browse.clicked.connect(self._browse_image)
@@ -768,15 +771,15 @@ class HotspotEditorTool(BaseTool):
     # ---------------------------------------------------------------
 
     def _browse_image(self):
-        start_dir = self.settings.get("hotspot_last_image_dir", "") or ""
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Select Texture Image", start_dir,
-            "Images (*.png *.jpg *.jpeg *.tga *.bmp);;All files (*.*)",
+        path = widgets.browse_open_file(
+            self, "Select Texture Image or Material",
+            file_filter="Textures (*.png *.jpg *.jpeg *.tga *.bmp *.vtf *.vmt);;"
+                        "Images (*.png *.jpg *.jpeg *.tga *.bmp);;"
+                        "Materials (*.vmt *.vtf);;All files (*.*)",
+            settings=self.settings, remember_key=f"{self.tool_name}/image",
         )
         if path:
             self.image_input.setText(path)
-            self.settings.set("hotspot_last_image_dir", str(Path(path).parent))
-            self.settings.save()
             self._load_image(path)
 
     def _load_image_from_input(self):
@@ -784,16 +787,67 @@ class HotspotEditorTool(BaseTool):
         if path:
             self._load_image(path)
 
+    def _pixmap_from_path(self, path: str) -> QPixmap | None:
+        """Load any supported source (image, VTF, or VMT) into a QPixmap."""
+        ext = os.path.splitext(path)[1].lower()
+        if ext == ".vtf":
+            return self._pixmap_from_vtf(path)
+        if ext == ".vmt":
+            return self._pixmap_from_vmt(path)
+        return QPixmap(path)
+
+    def _pixmap_from_vtf(self, path: str) -> QPixmap | None:
+        """Decode a VTF (mip 0, frame 0, face 0, slice 0) into a QPixmap."""
+        try:
+            from sourcepp import vtfpp
+        except ImportError:
+            self.log("sourcepp is required to load VTF files", "ERROR")
+            return None
+        try:
+            vtf = vtfpp.VTF(str(path))
+            w, h = int(vtf.width), int(vtf.height)
+            rgba = vtf.get_image_data_as_rgba8888(0, 0, 0, 0)
+            if len(rgba) != w * h * 4:
+                self.log(f"VTF decode size mismatch for {os.path.basename(path)}", "ERROR")
+                return None
+            image = QImage(bytes(rgba), w, h, QImage.Format.Format_RGBA8888)
+            return QPixmap.fromImage(image.copy())
+        except Exception as e:
+            self.log(f"Failed to decode VTF: {e}", "ERROR")
+            return None
+
+    def _pixmap_from_vmt(self, path: str) -> QPixmap | None:
+        """Resolve a VMT's $basetexture to a VTF and decode it."""
+        try:
+            from app.tools.fake_pbr_reverse_tool import (
+                _parse_vmt_texture_refs, _resolve_vtf_ref,
+            )
+        except ImportError as e:
+            self.log(f"Cannot load VMT support: {e}", "ERROR")
+            return None
+        vmt_path = Path(path)
+        ref = _parse_vmt_texture_refs(vmt_path).get("color")
+        if not ref:
+            self.log(f"VMT has no $basetexture: {os.path.basename(path)}", "ERROR")
+            return None
+        vtf_path = _resolve_vtf_ref(ref, vmt_path.parent, vmt_path.parent)
+        if vtf_path is None:
+            self.log(f"Could not resolve $basetexture '{ref}' to a VTF file", "ERROR")
+            return None
+        self.log(f"Resolved $basetexture -> {vtf_path.name}", "INFO")
+        return self._pixmap_from_vtf(str(vtf_path))
+
     def _load_image(self, path: str):
         if not os.path.isfile(path):
             self.log(f"File not found: {path}", "ERROR")
             return
-        pixmap = QPixmap(path)
-        if pixmap.isNull():
+        pixmap = self._pixmap_from_path(path)
+        if pixmap is None or pixmap.isNull():
             self.log(f"Failed to load image: {path}", "ERROR")
             return
 
         self.image_path = path
+        self.source_vmt_path = path if os.path.splitext(path)[1].lower() == ".vmt" else ""
         self.image_width = pixmap.width()
         self.image_height = pixmap.height()
 
@@ -1199,19 +1253,39 @@ class HotspotEditorTool(BaseTool):
     # Auto-detect grid cells by alpha
     # ---------------------------------------------------------------
 
+    def _current_pil_image(self):
+        """Convert the currently loaded pixmap to a PIL RGBA image.
+
+        Works for any source (PNG/TGA/VTF/VMT) since it reads back the decoded
+        pixels rather than re-opening the original file.
+        """
+        try:
+            from PIL import Image
+        except ImportError:
+            return None
+        if self.pixmap_item is None:
+            return None
+        qimg = self.pixmap_item.pixmap().toImage().convertToFormat(
+            QImage.Format.Format_RGBA8888
+        )
+        w, h = qimg.width(), qimg.height()
+        if w == 0 or h == 0:
+            return None
+        buf = qimg.constBits().tobytes()
+        return Image.frombytes("RGBA", (w, h), buf)
+
     def _auto_detect(self):
         if self.image_width == 0:
             self.log("Load an image first", "WARNING")
             return
-        try:
-            from PIL import Image
-        except ImportError:
-            self.log("Pillow (PIL) is required for auto-detect", "ERROR")
+
+        img = self._current_pil_image()
+        if img is None:
+            self.log("Pillow (PIL) is required for auto-detect, or no image is loaded", "ERROR")
             return
 
         self._save_undo()
 
-        img = Image.open(self.image_path).convert("RGBA")
         alpha = img.split()[3]
         g = self.grid_size_combo.currentData() or 16
         iw, ih = self.image_width, self.image_height
@@ -1280,16 +1354,14 @@ class HotspotEditorTool(BaseTool):
     # ---------------------------------------------------------------
 
     def _open_rect_file(self):
-        start_dir = self.settings.get("hotspot_last_rect_dir", "") or ""
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Open .rect File", start_dir,
-            "Rect files (*.rect);;All files (*.*)",
+        path = widgets.browse_open_file(
+            self, "Open .rect File",
+            file_filter="Rect files (*.rect);;All files (*.*)",
+            settings=self.settings, remember_key=f"{self.tool_name}/rect",
         )
         if not path:
             return
         self.rect_input.setText(path)
-        self.settings.set("hotspot_last_rect_dir", str(Path(path).parent))
-        self.settings.save()
         self._load_rect_file(path)
 
     def _load_rect_file(self, path: str):
@@ -1341,24 +1413,21 @@ class HotspotEditorTool(BaseTool):
             self.log(f"Failed to read .rect file: {e}", "ERROR")
 
     def _save_rect_file(self):
-        start_dir = self.settings.get("hotspot_last_rect_dir", "") or ""
-        # Default filename from image name
-        default_name = ""
+        # Default beside the loaded source (so the .rect sits next to its VMT/VTF),
+        # falling back to the last-used directory.
+        fallback = ""
         if self.image_path:
-            default_name = Path(self.image_path).stem + ".rect"
-        path, _ = QFileDialog.getSaveFileName(
+            fallback = str(Path(self.image_path).with_suffix(".rect"))
+        path = widgets.browse_save_file(
             self, "Save .rect File",
-            os.path.join(start_dir, default_name) if default_name else start_dir,
-            "Rect files (*.rect);;All files (*.*)",
+            file_filter="Rect files (*.rect);;All files (*.*)",
+            settings=self.settings, remember_key=f"{self.tool_name}/rect",
+            fallback=fallback, default_suffix=".rect",
         )
         if not path:
             return
-        if not path.lower().endswith(".rect"):
-            path += ".rect"
 
         self.rect_input.setText(path)
-        self.settings.set("hotspot_last_rect_dir", str(Path(path).parent))
-        self.settings.save()
 
         try:
             with open(path, "w", encoding="utf-8") as f:
@@ -1381,20 +1450,64 @@ class HotspotEditorTool(BaseTool):
             self.emit_status(f"Saved {os.path.basename(path)}")
         except Exception as e:
             self.log(f"Failed to save .rect file: {e}", "ERROR")
+            return
+
+        # If loaded from a VMT, wire the rect into it via %rectanglemap.
+        if self.source_vmt_path and os.path.isfile(self.source_vmt_path):
+            self._inject_rectanglemap(self.source_vmt_path, path)
+
+    def _inject_rectanglemap(self, vmt_path: str, rect_path: str):
+        """Add or update a `%rectanglemap` entry in the VMT so it references the
+        saved .rect (by its materials-relative path)."""
+        rel = self._material_relative_path(rect_path)
+        try:
+            text = Path(vmt_path).read_text(encoding="utf-8", errors="replace")
+        except OSError as e:
+            self.log(f"Could not read VMT to update: {e}", "ERROR")
+            return
+
+        new_line = f'"%rectanglemap" "{rel}"'
+        # Match an existing entry (quoted or bare key, any case/spacing).
+        existing = re.compile(r'(?im)^([ \t]*)"?%rectanglemap"?[ \t]+\S.*$')
+        if existing.search(text):
+            new_text = existing.sub(lambda m: f"{m.group(1)}{new_line}", text, count=1)
+            action = "Updated"
+        else:
+            # Insert as the first line inside the top-level shader block.
+            brace = text.find("{")
+            if brace == -1:
+                self.log("VMT has no shader block to update", "ERROR")
+                return
+            new_text = f"{text[:brace + 1]}\n    {new_line}{text[brace + 1:]}"
+            action = "Added"
+
+        if new_text == text:
+            return
+        try:
+            Path(vmt_path).write_text(new_text, encoding="utf-8")
+        except OSError as e:
+            self.log(f"Could not write VMT: {e}", "ERROR")
+            return
+        self.log(f'{action} %rectanglemap "{rel}" in {os.path.basename(vmt_path)}', "SUCCESS")
 
     # ---------------------------------------------------------------
     # VMT snippet
     # ---------------------------------------------------------------
 
+    @staticmethod
+    def _material_relative_path(path: str) -> str:
+        """Return a path stripped of extension and made relative to the nearest
+        `materials/` folder (forward slashes), suitable for a VMT texture ref."""
+        stem = os.path.splitext(path)[0]
+        lower = stem.replace("\\", "/").lower()
+        idx = lower.rfind("/materials/")
+        if idx != -1:
+            return stem[idx + len("/materials/"):].replace("\\", "/")
+        return os.path.basename(stem)
+
     def _update_vmt_snippet(self):
         if not self.image_path:
             self.vmt_label.setText('%rectanglemap "<materials/path/to/texture>"')
             return
-        stem = os.path.splitext(self.image_path)[0]
-        lower = stem.replace("\\", "/").lower()
-        idx = lower.rfind("/materials/")
-        if idx != -1:
-            rel = stem[idx + len("/materials/"):].replace("\\", "/")
-        else:
-            rel = os.path.basename(stem)
+        rel = self._material_relative_path(self.image_path)
         self.vmt_label.setText(f'%rectanglemap "{rel}"')
