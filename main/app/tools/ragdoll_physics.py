@@ -213,6 +213,11 @@ def build_per_bone_hulls(
     hulls: List[Tuple[int, trimesh.Trimesh]] = []
     skipped: List[Tuple[int, str]] = []
 
+    backend = hull_backend_error()
+    if backend is not None:
+        # Every part would fail identically; report it once, not per bone.
+        return hulls, [(sim_bones[0][0], backend)] if sim_bones else []
+
     for joint_idx, _name in sim_bones:
         mask = vert_sim == joint_idx
         count = int(np.count_nonzero(mask))
@@ -507,6 +512,23 @@ def _quat_to_mat33(q) -> np.ndarray:
         [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
         [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
     ])
+
+
+def hull_backend_error() -> Optional[str]:
+    """Why convex hulls are unavailable, or None when they work.
+
+    trimesh delegates ``convex_hull`` to ``scipy.spatial`` (qhull). When scipy
+    is missing — an isolated build venv, or a frozen build that excluded it —
+    every hull raises the same ImportError, which used to surface as one
+    "hull failed" line per bone followed by an unexplained "no per-bone hulls
+    could be built". Detect it once so the real cause is named.
+    """
+    try:
+        import scipy.spatial  # noqa: F401
+    except Exception as exc:  # noqa: BLE001 - any import failure disables hulls
+        return (f"convex hulls need scipy (trimesh uses scipy.spatial/qhull) "
+                f"- {exc.__class__.__name__}: {exc}")
+    return None
 
 
 def _mat33_to_quat(m: np.ndarray) -> np.ndarray:
