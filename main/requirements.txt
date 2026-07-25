@@ -4,3 +4,6 @@ PySide6>=6.5.0
 sourcepp>=2025.11.5
 srctools>=2.6
 trimesh>=4.0.0
+# trimesh delegates convex hulls to scipy.spatial (qhull); without it every
+# ragdoll collision hull fails and $collisionjoints is silently dropped.
+scipy>=1.10.0

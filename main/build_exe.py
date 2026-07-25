@@ -390,7 +390,11 @@ def build_command(args: argparse.Namespace) -> list[str]:
         "tkinter", "test", "unittest", "pydoc_data",
         # Scientific Python stragglers — none of these are used by this
         # project, but if a build venv ever has them they'd be huge.
-        "scipy", "pymeshlab", "matplotlib", "pandas", "torch", "lightning",
+        # NOTE: scipy must NOT be listed here. trimesh delegates convex hulls
+        # to scipy.spatial (qhull), so excluding it builds fine and then fails
+        # at runtime with "hull failed: No module named 'scipy'" on every
+        # ragdoll part, silently dropping $collisionjoints.
+        "pymeshlab", "matplotlib", "pandas", "torch", "lightning",
         "torchaudio", "torchvision", "tensorflow", "sklearn",
     ]
     for module_name in pyside6_excludes + extra_excludes:
