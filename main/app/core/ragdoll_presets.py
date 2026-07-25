@@ -101,6 +101,12 @@ def constraints_for(bone_name: str) -> List[JointConstraint]:
 DEFAULT_INERTIA = 10.0
 DEFAULT_DAMPING = 0.10
 DEFAULT_ROTDAMPING = 3.00
+
+# Rotational damping for a ValveBiped-conformed humanoid (playermodel path).
+# HL2's own humanoid ragdolls use 0.2; the 3.00 above is Valve's zombie-tuned
+# value and on a player rig reads as a stiff, sluggish ragdoll that barely
+# rotates. Matches the hand-made reference port of the combine grunt.
+DONOR_ROTDAMPING = 0.20
 # Typical Source humanoid ragdoll total mass (lbs-ish engine units) used when
 # the caller has no better volume-derived figure.
 DEFAULT_TOTAL_MASS = 90.0
