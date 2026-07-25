@@ -51,6 +51,12 @@ class ConformResult:
     prop_frame: Dict[int, Tuple[np.ndarray, np.ndarray, np.ndarray]]
     poseparam_lines: List[str] = field(default_factory=list)
     donor_basename: str = ""
+    # {joint_idx: 3x3} the per-bone ANATOMICAL rotation the re-skin applied,
+    # mapping a direction in the SOURCE model space to the conformed one.
+    # The two spaces differ by a global yaw plus each bone's own axis
+    # convention, so anything carried across (e.g. physics joint axes) must go
+    # through this rather than assuming raw coordinates transfer.
+    anat_rotations: Dict[int, np.ndarray] = field(default_factory=dict)
 
 
 def _quat_to_mat(q: np.ndarray) -> np.ndarray:
@@ -264,6 +270,8 @@ def conform_to_donor(
         bind_frame[i] = (bl[:3, 3].copy(), _mat_to_quat(bl[:3, :3]), _ONE.copy())
         prop_frame[i] = (pl[:3, 3].copy(), _mat_to_quat(pl[:3, :3]), _ONE.copy())
 
+    anat_rotations: Dict[int, np.ndarray] = {}
+
     # -- DQS re-skin ---------------------------------------------------------
     # This IS "rename, shift onto the donor skeleton, rotate": the per-bone
     # transform is a translation to the new joint head plus a rotation. What
@@ -459,6 +467,7 @@ def conform_to_donor(
             m4[:3, :3] = R
             m4[:3, 3] = npos - R @ op + straighten.get(i, 0.0)
             anat[i] = m4
+            anat_rotations[i] = R.copy()
 
         dq: List[Tuple[np.ndarray, np.ndarray]] = []
         for i in range(n):
@@ -555,6 +564,7 @@ def conform_to_donor(
         prop_frame=prop_frame,
         poseparam_lines=pp_lines,
         donor_basename=donor_mdl.name,
+        anat_rotations=anat_rotations,
     )
 
 
