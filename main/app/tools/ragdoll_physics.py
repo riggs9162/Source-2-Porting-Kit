@@ -926,7 +926,11 @@ def build_ragdoll(
     total_mass: float,
     generate_smd: bool,
     physics_mesh: Optional[trimesh.Trimesh] = None,
+    prebuilt_hulls: Optional[List[Tuple[int, trimesh.Trimesh]]] = None,
+    constraint_rows: Optional[List[str]] = None,
     min_hull_verts: int = 8,
+    constraint_source: str = "symmetric",
+    rotdamping: float = presets.DEFAULT_ROTDAMPING,
     on_log: LogFn = print,
 ) -> Tuple[Optional[List[str]], Optional[str]]:
     """Build the per-bone hulls, write the ragdoll physics SMD, and return the
@@ -957,7 +961,16 @@ def build_ragdoll(
             bone_ref[ji] = rverts[sel].mean(axis=0)
 
     hulls: List[Tuple[int, trimesh.Trimesh]] = []
-    if physics_mesh is not None and bone_ref:
+    if prebuilt_hulls:
+        # Caller already has real PHYS hulls in this skin's space (the
+        # playermodel path pushes the Rubikon shapes through the same conform
+        # as the render mesh, so they land in donor bind space).
+        hulls = [(ji, h) for ji, h in prebuilt_hulls if ji in set(sim_indices)]
+        dropped = len(prebuilt_hulls) - len(hulls)
+        on_log(f"  hull source: Source 2 PHYS shapes ({len(hulls)} part(s)"
+               + (f", {dropped} not in the simulated set" if dropped else "")
+               + ")")
+    if not hulls and physics_mesh is not None and bone_ref:
         real = build_hulls_from_physics_mesh(physics_mesh, bone_ref, on_log=on_log)
         # Guard against single-mesh / non-ragdoll collision (or a recovery that
         # collapses): if it covers too few bones, the weight hulls give better
@@ -996,7 +1009,15 @@ def build_ragdoll(
 
     simulated_names = [skin.joints[i].name for i, _ in hulls]
     lines = build_collisionjoints_block(
-        phys_smd_name, simulated_names, root_name, mass=total_mass
+        phys_smd_name, simulated_names, root_name, mass=total_mass,
+        rotdamping=rotdamping, constraint_source=constraint_source,
+        constraint_rows=constraint_rows,
     )
+    if constraint_rows is None and constraint_source == "valvebiped_donor":
+        hinged = sum(1 for n in simulated_names
+                     if presets.donor_constraints_for(n) is not None)
+        on_log(f"  constraints: {hinged} joint(s) from the ValveBiped donor "
+               f"table (anatomical hinges), "
+               f"{len(simulated_names) - hinged - 1} symmetric")
     on_log(f"  ragdoll: {len(hulls)} simulated part(s), root='{root_name}'")
     return lines, None
