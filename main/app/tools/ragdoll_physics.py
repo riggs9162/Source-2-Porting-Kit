@@ -252,11 +252,22 @@ def build_collisionjoints_block(
     inertia: float = presets.DEFAULT_INERTIA,
     damping: float = presets.DEFAULT_DAMPING,
     rotdamping: float = presets.DEFAULT_ROTDAMPING,
+    constraint_source: str = "symmetric",
+    constraint_rows: Optional[List[str]] = None,
 ) -> List[str]:
     """Build the ``$collisionjoints { ... }`` QC lines for a ragdoll.
 
     Globals live inside the block; every simulated bone except the root gets
-    its preset ``$jointconstrain`` rows.
+    its ``$jointconstrain`` rows.
+
+    ``constraint_source``:
+      - ``"symmetric"`` — conservative +-deg on x/y/z (`presets.constraints_for`).
+        Safe on ANY skeleton because it assumes nothing about which axis is the
+        hinge, but it gives elbows and knees three degrees of freedom, so they
+        bend sideways and hyperextend.
+      - ``"valvebiped_donor"`` — Valve's anatomical rows, which make the elbow
+        and knee true hinges (x/y pinned to 0). ONLY valid when the bones carry
+        true ValveBiped orientations, i.e. a pose-conformed retarget.
     """
     lines: List[str] = []
     lines.append(f'$collisionjoints "{phys_smd_name}" {{')
@@ -265,15 +276,45 @@ def build_collisionjoints_block(
     lines.append(f'    $damping {damping:.2f}')
     lines.append(f'    $rotdamping {rotdamping:.2f}')
     lines.append(f'    $rootbone "{root_bone_name}"')
+    # Parity with the PHYS-driven path — these are what make a ragdoll settle
+    # like a body rather than a puppet, and their absence here is why the
+    # playermodel ragdoll felt worse than the standalone one:
+    #   $noselfcollisions - parts stop jamming/jittering against each other
+    #   $jointmassbias    - distal weighting so limbs swing with momentum
+    #                       instead of every part massing by hull volume alone
+    lines.append('    $noselfcollisions')
+    for name in simulated_bone_names:
+        # keyed by ValveBiped name, so map native names through as well
+        bias = presets.DISTAL_MASS_BIAS.get(valvebiped_name(name))
+        if bias:
+            lines.append(f'    $jointmassbias "{name}" {bias:.2f}')
     lines.append('')
+    if constraint_rows is not None:
+        # Caller supplied the model's own converted limits; nothing generic.
+        lines.extend(constraint_rows)
+        lines.append('    $animatedfriction 1.0 1000.0 0.8 0.5 0.0')
+        lines.append('}')
+        return lines
     for name in simulated_bone_names:
         if name == root_bone_name:
+            continue
+        donor = (presets.donor_constraints_for(name)
+                 if constraint_source == "valvebiped_donor" else None)
+        if donor is not None:
+            for axis, lo, hi, fric in donor:
+                # studiomdl multiplies friction by 0.2 on the way into the
+                # .phy, so emit /0.2 to land on the donor's value.
+                lines.append(f'    $jointconstrain "{name}" {axis} limit '
+                             f'{lo:.2f} {hi:.2f} {fric / 0.2:.2f}')
             continue
         for axis, mode, mn, mx, fr in presets.constraints_for(name):
             lines.append(
                 f'    $jointconstrain "{name}" {axis} {mode} '
                 f'{mn:.2f} {mx:.2f} {fr:.2f}'
             )
+    # Friction ramp for the animation -> physics handoff; without it the
+    # ragdoll drops into simulation with no damping and flails on spawn.
+    lines.append('    $animatedfriction 1.0 1000.0 0.8 0.5 0.0')
     lines.append('}')
     return lines
 
