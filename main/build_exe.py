@@ -454,14 +454,36 @@ def output_exe_path(app_name: str, onefile: bool) -> Path:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Build Source 2 Porting Kit executable. By default the build is "
-            "incremental: dependencies are NOT reinstalled and PyInstaller's "
-            "analysis cache is reused, so re-runs are ~10x faster than a full "
-            "rebuild. Pass --clean for a full rebuild, --install-deps to refresh "
-            "Python packages."
+            "Build Source 2 Porting Kit executable. Produces a single "
+            "self-contained .exe by default (pass --onedir for a folder "
+            "distribution). The build is incremental: dependencies are NOT "
+            "reinstalled and PyInstaller's analysis cache is reused, so re-runs "
+            "are ~10x faster than a full rebuild. Pass --clean for a full "
+            "rebuild, --install-deps to refresh Python packages, and --release "
+            "for a distribution build (clean + isolated venv)."
         )
     )
-    parser.add_argument("--onefile", action="store_true", help="Build a single-file executable (slower startup)")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--onefile",
+        dest="onefile",
+        action="store_true",
+        default=True,
+        help=(
+            "Build one self-contained .exe with no side files (default). "
+            "Bundled data is extracted to %%TEMP%% on launch, so startup costs "
+            "a couple of seconds."
+        ),
+    )
+    mode.add_argument(
+        "--onedir",
+        dest="onefile",
+        action="store_false",
+        help=(
+            "Build a folder distribution instead: faster startup, but the .exe "
+            "only runs alongside the DLLs and data next to it."
+        ),
+    )
     parser.add_argument("--console", action="store_true", help="Show console window for debugging")
     parser.add_argument("--debug", action="store_true", help="Enable PyInstaller debug mode")
     parser.add_argument(
@@ -478,12 +500,12 @@ def parse_args() -> argparse.Namespace:
         "--release",
         action="store_true",
         help=(
-            "Produce a distribution-ready single-file build. Implies --onefile, "
-            "--clean, and --use-venv. Onefile mode extracts to %%TEMP%% on launch "
-            "which gives PyInstaller's bootloader a flat DLL search directory and "
-            "avoids the 'Failed to load Python DLL' error seen on some end-user "
-            "machines with the onedir layout (GitHub issue #2). Slower startup "
-            "(~2-5s) but more robust on clean Windows installs."
+            "Produce a distribution-ready build: forces --onefile (in case "
+            "--onedir was also passed) and adds --clean and --use-venv. Onefile "
+            "extracts to %%TEMP%% on launch, which gives PyInstaller's bootloader "
+            "a flat DLL search directory and avoids the 'Failed to load Python "
+            "DLL' error seen on some end-user machines with the onedir layout "
+            "(GitHub issue #2)."
         ),
     )
     parser.add_argument(
