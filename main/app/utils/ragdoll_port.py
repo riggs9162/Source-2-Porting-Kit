@@ -142,6 +142,8 @@ def build_ragdoll_collision(
     physics_glb: Optional[Path] = None,
     total_mass: float = presets.DEFAULT_TOTAL_MASS,
     constraint_source: str = "s2",
+    prebuilt_hulls=None,
+    constraint_rows: Optional[List[str]] = None,
     phys_smd_name: Optional[str] = None,
     on_log: Optional[LogFn] = None,
 ) -> Tuple[Optional[List[str]], Optional[List[str]], Optional[str]]:
@@ -183,11 +185,21 @@ def build_ragdoll_collision(
 
     mesh, vj, vw = concat_prims(all_arrays)
     physics_mesh = load_glb_tri_mesh(physics_glb) if physics_glb else None
+    # A conformed rig carries true ValveBiped bone axes, so Valve's anatomical
+    # rows apply: elbows and knees become real hinges instead of the symmetric
+    # fallback's three-degrees-of-freedom, which lets them bend sideways.
+    donor_axes = constraint_source == "valvebiped_donor"
     lines, err = build_ragdoll(
         render_mesh=mesh, vertex_joints=vj, vertex_weights=vw, skin=skin,
         coord=coord, phys_smd_path=phys_smd_path,
         phys_smd_name=phys_smd_name, total_mass=total_mass,
-        generate_smd=True, physics_mesh=physics_mesh, on_log=_rlog)
+        generate_smd=True, physics_mesh=physics_mesh,
+        prebuilt_hulls=prebuilt_hulls,
+        constraint_rows=constraint_rows,
+        constraint_source=constraint_source,
+        rotdamping=(presets.DONOR_ROTDAMPING if donor_axes
+                    else presets.DEFAULT_ROTDAMPING),
+        on_log=_rlog)
     if lines is None:
         return None, None, err
     return lines, None, None
