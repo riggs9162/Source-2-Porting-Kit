@@ -1,6 +1,10 @@
 # Configuration
 config.json
-main/config
+v2/config
+
+# v3 runtime state (settings, per-tool history, preview cache)
+v3/config/
+v3/.cache/
 
 # Python cache
 __pycache__/
@@ -8,6 +12,7 @@ __pycache__/
 *.pyo
 *.pyd
 .Python
+.pytest_cache/
 
 # PyInstaller build artifacts
 build/

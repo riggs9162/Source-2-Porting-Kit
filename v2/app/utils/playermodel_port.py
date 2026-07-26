@@ -37,11 +37,16 @@ from .glb_skin_io import (LogFn, _acc, _mat_to_euler_xyz, _q2m,  # noqa: F401
 # (grunt worst edge 4.75u -> 3.86u) while weights only travel this many edges,
 # so a low count keeps finger and elbow definition crisp.
 _WEIGHT_RELAX_PASSES = 3
+
+# Total skin weight a donor-less bone must carry to be kept as a helper. Well
+# above rounding noise, well below anything that actually shapes the mesh.
+_HELPER_MIN_WEIGHT = 1.0
 from ..core.bone_maps import valvebiped_name
 from ..tools.ragdoll_physics import (conformed_s2_constraint_rows,
                                      hulls_from_point_clouds, load_phys_dump,
                                      phys_part_point_clouds)
 from .mdl_bones import read_mdl_bones
+from .procedural_bones import write_vrd
 from .ragdoll_port import build_ragdoll_collision, discover_sidecars
 from .studiomdl_run import compile_qc
 
@@ -67,13 +72,35 @@ def _bone_worlds(skin: GltfSkin) -> Dict[int, np.ndarray]:
 
 
 def _prune_to_mapped(skin: GltfSkin, donor_names: set,
-                     meshes: List[dict], log: LogFn) -> GltfSkin:
+                     meshes: List[dict], log: LogFn,
+                     keep_helpers: bool = True) -> GltfSkin:
     """ValveBiped-only prune: keep joints whose map target exists in the
     donor; fold every pruned joint's weights onto its nearest kept ancestor
     through the JOINT tree (the single fold rule). Mesh vj arrays are
     remapped in place (duplicate targets per vertex merge their weights)."""
     keep = [i for i, j in enumerate(skin.joints)
             if SOURCE2_TO_VALVEBIPED.get(j.name) in donor_names]
+    if keep_helpers:
+        # Bones the donor lacks but that actually drive geometry — twists,
+        # scapulae, pectorals, finger metacarpals. Folding their weight onto a
+        # parent collapses the deformation they exist to provide (on the
+        # metrocop the arm/leg twists alone dominate ~6000 verts). Pure rig
+        # scaffolding (IK targets, root motion, *_end tips) carries no weight
+        # and is still dropped.
+        weight = np.zeros(len(skin.joints))
+        for em in meshes:
+            vj, vw = em["vj"], em["vw"]
+            for k in range(len(vj)):
+                for s in range(vj.shape[1]):
+                    w = float(vw[k][s])
+                    if w > 0.0:
+                        weight[int(vj[k][s])] += w
+        extra = [i for i in range(len(skin.joints))
+                 if i not in keep and weight[i] >= _HELPER_MIN_WEIGHT]
+        if extra:
+            keep = sorted(set(keep) | set(extra))
+            log(f"keeping {len(extra)} weight-bearing helper bone(s) the "
+                f"donor lacks", "INFO")
     keep_set = set(keep)
     fold: Dict[int, int] = {}
     for i, j in enumerate(skin.joints):
@@ -295,6 +322,17 @@ def port_playermodel(
         if f'$ikchain "{chain}"' in "\n".join(L):
             L.append(f'$ikautoplaylock "{chain}" 1 0.1')
     L.append("")
+
+    # Procedural helper bones. The kept twist bones are plain children here —
+    # Source 2 drove them with constraints that the glTF export bakes away, so
+    # without these rules they follow their parent rigidly and contribute no
+    # twist at all (keeping them measured identical to dropping them).
+    helpers = write_vrd(out_dir / f"{name_base}_pm.vrd", sorted(have))
+    if helpers:
+        L.append(f'$proceduralbones "{name_base}_pm.vrd"')
+        L.append("")
+        log(f"procedural helpers driven: {len(helpers)} "
+            f"({', '.join(h.split('_', 1)[-1] for h in helpers[:4])}...)")
 
     # -- player fit-out ------------------------------------------------------
     # Emitted so the model behaves as a playermodel rather than a bare mesh:

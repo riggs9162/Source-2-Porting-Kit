@@ -58,6 +58,20 @@ Port models, materials, sounds, and more from games like Half-Life: Alyx back to
 
 ---
 
+## Repository Layout
+
+The kit has been rewritten twice; each generation lives in its own self-contained tree with its own dependencies and entry point.
+
+| Tree | Generation | Entry point | Status |
+| --- | --- | --- | --- |
+| [v1/](v1/) | Original Tkinter porter (`tools/` plugin registry, VTFLib-based) | `python v1/porter.py` | Frozen — kept for backward compatibility, not extended |
+| [v2/](v2/) | PySide6 desktop app (current release) | `python v2/main.py` | **Active** — this is what the released `.exe` builds from |
+| [v3/](v3/) | Flet rebuild with a uniform tool framework | `python v3/run.py` | In development — see [v3/README.md](v3/README.md) |
+
+The trees share no code. Unless stated otherwise, everything below refers to **v2**.
+
+---
+
 ## Getting Started
 
 There are three ways to use the Source 2 Porting Kit:
@@ -76,12 +90,12 @@ The easiest way to get started. Download the latest `.exe` from the [Releases](h
 
 2. Install dependencies:
    ```bash
-   pip install -r main/requirements.txt
+   pip install -r v2/requirements.txt
    ```
 
 3. Run the application:
    ```bash
-   python main/main.py
+   python v2/main.py
    ```
 
 ### Option 3 — Build the Executable Yourself
@@ -89,11 +103,11 @@ The easiest way to get started. Download the latest `.exe` from the [Releases](h
 Follow the same clone and install steps as Option 2, then build a standalone `.exe` with PyInstaller:
 
 ```bash
-cd main
+cd v2
 python build_exe.py
 ```
 
-The output will be placed in `main/dist/`.
+The output will be placed in `v2/dist/`.
 
 > **Note:** Some audio tools require [FFmpeg](https://ffmpeg.org/) to be available on your system PATH.
 

@@ -256,20 +256,6 @@ def conform_to_donor(
                 loc = np.linalg.inv(bind_world[p]) @ bind_world[i]
                 prop_world[i] = prop_world[p] @ loc
 
-    # -- write back names + rest TRS; build result frames --------------------
-    bind_frame: Dict[int, Tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
-    prop_frame: Dict[int, Tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
-    for i in order:
-        p = joints[i].parent_joint_idx
-        bl = bind_world[i] if p is None else np.linalg.inv(bind_world[p]) @ bind_world[i]
-        pl = prop_world[i] if p is None else np.linalg.inv(prop_world[p]) @ prop_world[i]
-        joints[i].name = new_name[i]
-        joints[i].rest_translation = bl[:3, 3].copy()
-        joints[i].rest_rotation = _mat_to_quat(bl[:3, :3])
-        joints[i].rest_scale = _ONE.copy()
-        bind_frame[i] = (bl[:3, 3].copy(), _mat_to_quat(bl[:3, :3]), _ONE.copy())
-        prop_frame[i] = (pl[:3, 3].copy(), _mat_to_quat(pl[:3, :3]), _ONE.copy())
-
     anat_rotations: Dict[int, np.ndarray] = {}
 
     # -- DQS re-skin ---------------------------------------------------------
@@ -395,8 +381,30 @@ def conform_to_donor(
         for i in order:
             op = old_world[i][:3, 3]
             npos = bind_world[i][:3, 3]
+            par_i = joints[i].parent_joint_idx
+            if (i not in mapped and par_i is not None
+                    and anat[par_i] is not None):
+                # A bone the donor has no counterpart for (twist, scapula,
+                # pectoral, metacarpal...) has no anatomy of its own to align
+                # to: its "segment" points at another helper, and deriving a
+                # rotation from that is meaningless. It rides with the bone it
+                # hangs off, exactly as its flesh should.
+                m4 = np.eye(4)
+                R = anat[par_i][:3, :3]
+                m4[:3, :3] = R
+                m4[:3, 3] = npos - R @ op + straighten.get(i, 0.0)
+                anat[i] = m4
+                anat_rotations[i] = R.copy()
+                continue
+            # A real bone takes its axis from real anatomy. Helper children
+            # (twists, scapulae) lie along or beside the bone, so once they are
+            # kept they would otherwise compete to define its orientation.
+            cand = child_of.get(i, [])
+            mapped_kids = [c for c in cand if c in mapped]
+            if mapped_kids:
+                cand = mapped_kids
             segs = []
-            for c in child_of.get(i, []):
+            for c in cand:
                 od = old_world[c][:3, 3] - op
                 nd = bind_world[c][:3, 3] - npos
                 lo = float(np.linalg.norm(od))
@@ -468,6 +476,23 @@ def conform_to_donor(
             m4[:3, 3] = npos - R @ op + straighten.get(i, 0.0)
             anat[i] = m4
             anat_rotations[i] = R.copy()
+
+        # Place donor-less helper BONES with the same anatomical transform
+        # their flesh gets. Their bind was provisionally rigid-followed from
+        # the parent's frame delta, which is a DIFFERENT rotation to the
+        # anatomical one — so the bone sat in one place and its verts moved to
+        # another, displacing everything weighted to it. Mapped bones are
+        # untouched, so the donor-exact bind is preserved.
+        for i in order:
+            p = joints[i].parent_joint_idx
+            if i in mapped or p is None or anat[p] is None:
+                continue
+            bind_world[i] = anat[p] @ old_world[i]
+            anat[i] = anat[p].copy()
+            anat_rotations[i] = anat[p][:3, :3].copy()
+            # prop_world tracks bind for unmapped bones (delta zero)
+            prop_world[i] = prop_world[p] @ (
+                np.linalg.inv(bind_world[p]) @ bind_world[i])
 
         dq: List[Tuple[np.ndarray, np.ndarray]] = []
         for i in range(n):
@@ -546,6 +571,22 @@ def conform_to_donor(
             _reskin(np.asarray(em["vertices"]),
                     em.get("normals"), em["vj"], em["vw"])
 
+    # -- write back names + rest TRS; build result frames --------------------
+    # AFTER the re-skin: that block re-places donor-less helper bones onto the
+    # anatomical transform their flesh uses, and the rest pose must reflect it.
+    bind_frame: Dict[int, Tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+    prop_frame: Dict[int, Tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+    for i in order:
+        p = joints[i].parent_joint_idx
+        bl = bind_world[i] if p is None else np.linalg.inv(bind_world[p]) @ bind_world[i]
+        pl = prop_world[i] if p is None else np.linalg.inv(prop_world[p]) @ prop_world[i]
+        joints[i].name = new_name[i]
+        joints[i].rest_translation = bl[:3, 3].copy()
+        joints[i].rest_rotation = _mat_to_quat(bl[:3, :3])
+        joints[i].rest_scale = _ONE.copy()
+        bind_frame[i] = (bl[:3, 3].copy(), _mat_to_quat(bl[:3, :3]), _ONE.copy())
+        prop_frame[i] = (pl[:3, 3].copy(), _mat_to_quat(pl[:3, :3]), _ONE.copy())
+
     # -- donor pose parameters ----------------------------------------------
     pp_lines: List[str] = []
     for p in read_mdl_poseparams(donor_mdl):
@@ -553,8 +594,15 @@ def conform_to_donor(
         pp_lines.append(
             f'$poseparameter "{p.name}" {p.start:.6f} {p.end:.6f}{loop}')
 
+    # Split the report: a bone the donor lacks still gets a proper ValveBiped
+    # name when bone_maps knows one (the twist/helper bones) — only the rest
+    # fall back to z_*, and conflating the two made the log claim z_ bones that
+    # are not in the model.
+    n_z = sum(1 for i, nm in new_name.items()
+              if i not in mapped and nm.startswith("z_"))
     log(f"conformed {len(mapped)} bone(s) to donor bind "
-        f"({donor_mdl.name}); {renamed_native} native bone(s) renamed z_*")
+        f"({donor_mdl.name}); {renamed_native - n_z} helper bone(s) named "
+        f"from the ValveBiped map, {n_z} renamed z_*")
     if pp_lines:
         log(f"mirrored {len(pp_lines)} donor $poseparameter(s)")
     return ConformResult(

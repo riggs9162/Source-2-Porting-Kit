@@ -85,6 +85,44 @@ SOURCE2_TO_VALVEBIPED: Dict[str, str] = {
     "finger_pinky_1_R":      "ValveBiped.Bip01_R_Finger41",
     "finger_pinky_2_R":      "ValveBiped.Bip01_R_Finger42",
 
+    # Helper/deform bones. HL2 animation libraries do NOT contain these, so
+    # they never become "mapped" (no donor-exact bind) — but naming them here
+    # gives the kept helpers proper ValveBiped identities instead of z_*
+    # fallbacks. Names follow the community Source 2 -> Source 1 rename script;
+    # the *_TWIST leg/neck ones have no stock counterpart and keep a
+    # descriptive name. These carry real skin weight (on the metrocop the arm
+    # and leg twists dominate ~6000 verts), so dropping them collapses the
+    # twist deformation into the parent bone.
+    "arm_upper_L_TWIST":     "ValveBiped.Bip01_L_Shoulder",
+    "arm_upper_L_TWIST1":    "ValveBiped.Bip01_L_Bicep",
+    "arm_lower_L_TWIST":     "ValveBiped.Bip01_L_Ulna",
+    "arm_lower_L_TWIST1":    "ValveBiped.Bip01_L_Wrist",
+    "arm_upper_R_TWIST":     "ValveBiped.Bip01_R_Shoulder",
+    "arm_upper_R_TWIST1":    "ValveBiped.Bip01_R_Bicep",
+    "arm_lower_R_TWIST":     "ValveBiped.Bip01_R_Ulna",
+    "arm_lower_R_TWIST1":    "ValveBiped.Bip01_R_Wrist",
+    "scap_0_L":              "ValveBiped.Bip01_L_Trapezius",
+    "scap_0_R":              "ValveBiped.Bip01_R_Trapezius",
+    "pect_0_L":              "ValveBiped.Bip01_L_Pectoral",
+    "pect_0_R":              "ValveBiped.Bip01_R_Pectoral",
+    "neck_0_TWIST":          "ValveBiped.Bip01_Neck2",
+
+    # Finger metacarpals. ValveBiped's own convention for these is Finger{N}m
+    # hanging off the hand (seen in Valve/community HL2 rigs); the phalanges
+    # stay Finger{N}/{N}1/{N}2. Index=1, middle=2, ring=3, pinky=4.
+    "finger_index_meta_L":   "ValveBiped.Bip01_L_Finger1m",
+    "finger_middle_meta_L":  "ValveBiped.Bip01_L_Finger2m",
+    "finger_ring_meta_L":    "ValveBiped.Bip01_L_Finger3m",
+    "finger_pinky_meta_L":   "ValveBiped.Bip01_L_Finger4m",
+    "finger_index_meta_R":   "ValveBiped.Bip01_R_Finger1m",
+    "finger_middle_meta_R":  "ValveBiped.Bip01_R_Finger2m",
+    "finger_ring_meta_R":    "ValveBiped.Bip01_R_Finger3m",
+    "finger_pinky_meta_R":   "ValveBiped.Bip01_R_Finger4m",
+    "leg_upper_L_TWIST":     "ValveBiped.Bip01_L_Thigh_TWIST",
+    "leg_upper_L_TWIST1":    "ValveBiped.Bip01_L_Thigh_TWIST1",
+    "leg_upper_R_TWIST":     "ValveBiped.Bip01_R_Thigh_TWIST",
+    "leg_upper_R_TWIST1":    "ValveBiped.Bip01_R_Thigh_TWIST1",
+
     # Left Leg
     "leg_upper_L":           "ValveBiped.Bip01_L_Thigh",
     "leg_lower_L":           "ValveBiped.Bip01_L_Calf",
