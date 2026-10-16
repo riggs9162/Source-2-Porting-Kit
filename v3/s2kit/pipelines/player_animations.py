@@ -18,7 +18,6 @@ from scipy.spatial.transform import Rotation
 
 from s2kit.pipelines.gltf_animation import GltfSkin
 from s2kit.pipelines.porting import check_cancelled
-from s2kit.pipelines.skeleton_retarget import skin_world_matrices
 
 
 SOURCE_REVISION = "9a588af0cb1a2d53de35496ba1737305a877e50c"
@@ -288,15 +287,13 @@ def write_animation_smd(path: Path, skin: GltfSkin, frames: np.ndarray,
 
 def retarget_animation(animation: SmdAnimation, bind: SmdAnimation,
                        target: GltfSkin) -> np.ndarray:
-    """Transfer donor motion while leaving the target's bind and limb lengths intact."""
+    """Apply canonical donor rotations while retaining source-sized joint offsets."""
     donor_rotation, donor_position = animation_worlds(animation)
-    bind_rotation, bind_position = animation_worlds(bind)
-    target_world = dict(enumerate(skin_world_matrices(target)))
+    _, bind_position = animation_worlds(bind)
     source_names = {name.lower(): index for index, name in enumerate(animation.names)}
     bind_names = {name.lower(): index for index, name in enumerate(bind.names)}
     frames = np.zeros((len(animation.frames), len(target.joints), 6), dtype=np.float64)
     world_rotations = {}
-    target_bind_rotations = {index: matrix[:3, :3] for index, matrix in target_world.items()}
     for index, joint in enumerate(target.joints):
         name = joint.name.lower()
         source = source_names.get(name)
@@ -304,8 +301,7 @@ def retarget_animation(animation: SmdAnimation, bind: SmdAnimation,
         parent = joint.parent_joint_idx
         local_bind = Rotation.from_quat(joint.rest_rotation).as_matrix()
         if source is not None and rest is not None:
-            correction = bind_rotation[0, rest].T @ target_bind_rotations[index]
-            world = donor_rotation[:, source] @ correction
+            world = donor_rotation[:, source]
         elif parent is not None:
             world = world_rotations[parent] @ local_bind
         else:

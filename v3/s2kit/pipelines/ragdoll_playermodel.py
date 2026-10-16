@@ -121,7 +121,7 @@ def _source_bone_names(source: GltfSkin) -> tuple[dict[int, str], list[str]]:
 
 def build_player_rig(source: GltfSkin, coord: CoordinateMode, donor_bind,
                      *, align_yaw: float | None = None) -> PlayerRig:
-    """Keep all source joint positions while adapting axes and hierarchy for GMod IK."""
+    """Keep source joint worlds and establish canonical axes for GMod motion and IK."""
     if not is_humanoid_skin(source):
         raise ValueError("This model has no supported humanoid playermodel skeleton")
     original = _native_worlds(source, coord)
@@ -171,7 +171,7 @@ def build_player_rig(source: GltfSkin, coord: CoordinateMode, donor_bind,
             continue
         reference = donor[name]
         candidates = [child for child in children.get(index, []) if names[child] in donor]
-        if candidates:
+        if candidates and name != "ValveBiped.Bip01_Pelvis":
             axis = reference[:3, 0]
             child = max(candidates, key=lambda item: float(np.dot(
                 donor[names[item]][:3, 3] - reference[:3, 3], axis)) /
@@ -206,6 +206,7 @@ def build_player_rig(source: GltfSkin, coord: CoordinateMode, donor_bind,
                   maximum_joint_position_error=worst, source_bones=len(source.joints),
                   target_bones=len(target.joints), source_alignment_yaw_degrees=yaw,
                   compiler_basis_yaw_degrees=90.0, bone_axes_adapted=changed_axes,
+                  canonical_nonsegment_axes=["ValveBiped.Bip01_Pelvis"],
                   compatibility_bones=compatibility,
                   thumb_metacarpal_channels=adapted_thumbs,
                   reparented_root_helpers=[source.joints[index].name for index in sorted(ancestors)])
@@ -473,7 +474,9 @@ def player_ik_lines(skin: GltfSkin) -> list[str]:
 
 def _write_reference(path: Path, skin: GltfSkin, primitives: list[dict], rig: PlayerRig,
                      cancel=None) -> None:
-    """Write the original vertices and weights after only unit/facing conversion."""
+    """Write unit/facing-converted geometry with Source 1's three-influence skin limit."""
+    from s2kit.pipelines.ragdoll_appearance import source1_skin_links
+
     ok, error = SmdAnimationExporter.write_animation(
         skin, [derive_bind_pose_local(skin)], path, CoordinateMode())
     if not ok:
@@ -496,13 +499,13 @@ def _write_reference(path: Path, skin: GltfSkin, primitives: list[dict], rig: Pl
                     if not links:
                         raise ValueError("Playermodel vertex has no source skin weights")
                     values = [*vertices[vertex], *normals[vertex], uv[0], 1.0 - uv[1]]
-                    output.write(smd_vertex_line(values, list(links.items())))
+                    output.write(smd_vertex_line(values, source1_skin_links(links.items())))
         output.write("end\n")
 
 
 def _attachment_lines(rig: PlayerRig, source: GltfSkin, metadata_path: Path | None,
                        audit: list[dict] | None = None) -> list[str]:
-    """Rebase supported authored attachments and add GMod's required hand attachments."""
+    """Retain source attachment frames under aliases when GMod reserves their names."""
     from s2kit.pipelines.model_metadata import (
         ModelMetadata, attachment_qc_lines, load_model_metadata,
     )
@@ -510,9 +513,11 @@ def _attachment_lines(rig: PlayerRig, source: GltfSkin, metadata_path: Path | No
     output = []
     audit = audit if audit is not None else []
     authored = set()
+    reserved = {f"anim_attachment_{side}".casefold() for side in ("RH", "LH")}
     target_names = {joint.name: index for index, joint in enumerate(rig.skin.joints)}
     if metadata_path and metadata_path.is_file():
         metadata = load_model_metadata(metadata_path)
+        used_names = {attachment.name.casefold() for attachment in metadata.attachments} | reserved
         source_names = {joint.name: index for index, joint in enumerate(source.joints)}
         rebased = ModelMetadata()
         for attachment in metadata.attachments:
@@ -535,17 +540,28 @@ def _attachment_lines(rig: PlayerRig, source: GltfSkin, metadata_path: Path | No
             placed[:3, :3] = turn @ placed[:3, :3]
             placed[:3, 3] = turn @ placed[:3, 3]
             local = np.linalg.inv(rig.world[target_names[name]]) @ placed
-            rebased.attachments.append(replace(attachment, bone=name,
+            output_name = attachment.name
+            entry = dict(name=output_name, bone=name, status="preserved")
+            if output_name.casefold() in reserved:
+                base = f"hla_{output_name}"
+                output_name = base
+                suffix = 1
+                while output_name.casefold() in used_names:
+                    output_name = f"{base}_{suffix}"
+                    suffix += 1
+                used_names.add(output_name.casefold())
+                entry.update(name=output_name, source_name=attachment.name, status="adapted",
+                             adaptation="Source frame retained under an alias for a reserved GMod attachment")
+            rebased.attachments.append(replace(attachment, name=output_name, bone=name,
                                                 position=tuple(local[:3, 3]),
                                                 rotation=tuple(Rotation.from_matrix(local[:3, :3]).as_quat())))
-            authored.add(attachment.name)
-            audit.append(dict(name=attachment.name, bone=name, status="preserved"))
+            authored.add(output_name.casefold())
+            audit.append(entry)
         output.extend(attachment_qc_lines(rebased))
     for side in ("RH", "LH"):
         name = f"anim_attachment_{side}"
-        if name not in authored:
-            output.append(f'$attachment "{name}" "ValveBiped.Anim_Attachment_{side}" 0 0 0 rotate -90 0 -90')
-            audit.append(dict(name=name, status="generated", purpose="GMod animation attachment"))
+        output.append(f'$attachment "{name}" "ValveBiped.Anim_Attachment_{side}" 0 0 0 rotate -90 0 -90')
+        audit.append(dict(name=name, status="generated", purpose="GMod animation attachment"))
     if "eyes" not in authored:
         output.append('$attachment "eyes" "ValveBiped.Bip01_Head1" 0 0 0')
         audit.append(dict(name="eyes", status="generated", purpose="GMod eye attachment"))
@@ -718,6 +734,9 @@ def port_ragdoll_playermodel(glb_path: Path, out_dir: Path, *, modelname: str,
     path = out_dir / "playermodel_report.json"
     attachment_warnings = [f'{item["name"]}: PM attachment requires manual authoring ({item["reason"]})'
                            for item in attachment_audit if item["status"] == "unsupported"]
+    attachment_warnings.extend(
+        f'{item["source_name"]}: source frame is available as {item["name"]}; GMod uses its canonical hand frame'
+        for item in attachment_audit if item.get("source_name"))
     hitbox_warnings = [f'{item["name"]}: PM hitbox requires manual authoring ({item["reason"]})'
                        for item in hitbox_audit if item["status"] == "unsupported"]
     if not hitbox_audit:
