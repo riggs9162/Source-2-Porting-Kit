@@ -268,6 +268,7 @@ class RagdollPhysicsResult:
     body_reports: list[dict] = field(repr=False)
     joint_reports: list[dict] = field(repr=False)
     friction_scale: float = 1.0
+    rigid_helpers: dict[int, tuple[int, np.ndarray]] = field(default_factory=dict, repr=False)
 
     def remap_frame(self, frame: dict) -> dict:
         """Preserve original animated bone worlds while adding moving physical helper frames."""
@@ -275,6 +276,8 @@ class RagdollPhysicsResult:
         worlds = {self.index_map[index]: matrix for index, matrix in enumerate(source)}
         for part, helper in self.helper_by_part.items():
             worlds[helper] = source[self.part_sources[part]] @ self.helper_offsets[part]
+        for helper, (parent, local) in self.rigid_helpers.items():
+            worlds[helper] = worlds[parent] @ local
         result = {}
         for index, joint in enumerate(self.skin.joints):
             parent = joint.parent_joint_idx
@@ -400,6 +403,18 @@ def _part_hierarchy(document: dict) -> tuple[dict[int, dict], int, list[int]]:
     return incoming, root, order
 
 
+def _compiler_gimbal_loss(rotation: np.ndarray) -> float:
+    """Measure Source MatrixAngles' roll-zero canonicalization below its 0.001 horizontal threshold."""
+    horizontal = math.hypot(float(rotation[0, 0]), float(rotation[1, 0]))
+    if horizontal > 0.001:
+        return 0.0
+    pitch = math.atan2(float(-rotation[2, 0]), horizontal)
+    yaw = math.atan2(float(-rotation[0, 1]), float(rotation[1, 1]))
+    cp, sp, cy, sy = math.cos(pitch), math.sin(pitch), math.cos(yaw), math.sin(yaw)
+    canonical = np.array([[cp * cy, -sy, sp * cy], [cp * sy, cy, sp * sy], [-sp, 0, cp]])
+    return float(np.max(np.abs(canonical - rotation)))
+
+
 def _combined_skin(skin, source_worlds, part_sources, bind, incoming, root, order):
     """Insert physical helpers without changing the world bind of any original bone."""
     names = set(name.casefold() for name in skin.joint_names)
@@ -416,7 +431,29 @@ def _combined_skin(skin, source_worlds, part_sources, bind, incoming, root, orde
         helper_worlds[part] = bind[part] @ frame
         offsets[part] = np.linalg.inv(source_worlds[part_sources[part]]) @ helper_worlds[part]
     originals_by_source = {source: part for part, source in enumerate(part_sources)}
-    pending = [('helper', part) for part in order] + [('source', index) for index in range(len(skin.joints))]
+    source_parents = {
+        index: (('helper', originals_by_source[index]) if index in originals_by_source else
+                ('source', joint.parent_joint_idx) if joint.parent_joint_idx is not None else
+                ('helper', root)) for index, joint in enumerate(skin.joints)
+    }
+    bind_worlds = {('source', index): world for index, world in enumerate(source_worlds)}
+    bind_worlds.update({('helper', part): world for part, world in helper_worlds.items()})
+    axis_names, axis_worlds = {}, {}
+    axis_turn = np.array([[1, 0, 0, 0], [0, 0, -1, 0], [0, 1, 0, 0], [0, 0, 0, 1]], dtype=float)
+    for index, parent_key in source_parents.items():
+        local = np.linalg.inv(bind_worlds[parent_key]) @ source_worlds[index]
+        if _compiler_gimbal_loss(local[:3, :3]) <= 0.000001:
+            continue
+        name = f'__s2_bind_{index:03d}'
+        while name.casefold() in names:
+            name += '_'
+        names.add(name.casefold())
+        axis_names[index] = name
+        axis_worlds[index] = bind_worlds[parent_key] @ axis_turn
+    if len(skin.joints) + len(helper_names) + len(axis_names) > MAX_BONES:
+        raise RagdollPhysicsError('Physical and bind-axis helpers exceed the 256-bone limit')
+    pending = ([('helper', part) for part in order] + [('axis', index) for index in axis_names]
+               + [('source', index) for index in range(len(skin.joints))])
     new_indices = {}
     worlds = []
     joints = []
@@ -426,11 +463,12 @@ def _combined_skin(skin, source_worlds, part_sources, bind, incoming, root, orde
             if kind == 'helper':
                 parent_key = ('helper', int(incoming[index]['m_nBody1'])) if index in incoming else None
                 name, world, node = helper_names[index], helper_worlds[index], -1
+            elif kind == 'axis':
+                parent_key = source_parents[index]
+                name, world, node = axis_names[index], axis_worlds[index], -1
             else:
                 original = skin.joints[index]
-                parent_key = (('helper', originals_by_source[index]) if index in originals_by_source else
-                              ('source', original.parent_joint_idx) if original.parent_joint_idx is not None else
-                              ('helper', root))
+                parent_key = ('axis', index) if index in axis_names else source_parents[index]
                 name, world, node = original.name, source_worlds[index], original.gltf_node_idx
             if parent_key is not None and parent_key not in new_indices:
                 remaining.append((kind, index))
@@ -445,8 +483,10 @@ def _combined_skin(skin, source_worlds, part_sources, bind, incoming, root, orde
             raise RagdollPhysicsError('Cannot construct an acyclic physical helper skeleton')
         pending = remaining
     combined = GltfSkin(joints, new_indices[('helper', root)], skin.skin_idx)
+    rigid_helpers = {new_indices[('axis', index)]: (new_indices[source_parents[index]], axis_turn.copy())
+                     for index in axis_names}
     return (combined, {index: new_indices[('source', index)] for index in range(len(skin.joints))},
-            {part: new_indices[('helper', part)] for part in order}, offsets)
+            {part: new_indices[('helper', part)] for part in order}, offsets, rigid_helpers)
 
 
 def _joint_report(joint: dict, bind, helpers, bodies) -> dict:
@@ -541,7 +581,7 @@ def prepare_ragdoll_physics(
     for part, index in enumerate(part_sources):
         if not np.allclose(bind[part], source_worlds[index], atol=0.005, rtol=0):
             raise RagdollPhysicsError(f'PHYS/render bind disagreement on {part_names[part]}')
-    combined, index_map, helper_map, offsets = _combined_skin(
+    combined, index_map, helper_map, offsets, rigid_helpers = _combined_skin(
         skin, source_worlds, part_sources, bind, incoming, root, order)
     hashes = document.get('m_surfacePropertyHashes') or []
     properties = surface_properties or {}
@@ -625,6 +665,12 @@ def prepare_ragdoll_physics(
     warnings.append('Source surface density determines automatic masses; stock Source 1 surface response and Rubikon solver behavior differ.')
     report = {'mode': 'generated_from_ao_proxy' if generated else 'authored_helper_ragdoll',
               'source_body_count': len(parts), 'helper_bone_count': len(parts),
+              'bind_axis_helper_count': len(rigid_helpers),
+              'bind_axis_helpers': [dict(name=combined.joints[index].name,
+                                         parent=combined.joints[parent].name,
+                                         local_transform=local.tolist(),
+                                         purpose='Avoid Source 1 near-gimbal bind canonicalization without moving source bones')
+                                    for index, (parent, local) in rigid_helpers.items()],
               'original_bone_count': len(skin.joints), 'combined_bone_count': len(combined.joints),
               'root_bone': helpers[root], 'source_root_part': root,
               'shape_count': len(shapes), 'source_joint_count': len(joints),
@@ -642,7 +688,7 @@ def prepare_ragdoll_physics(
               'warnings': warnings}
     return RagdollPhysicsResult(combined, index_map, helpers[root], document, report, warnings,
                                 helper_map, skin, coord, offsets, part_sources, shapes, bodies,
-                                joints, friction_scale)
+                                joints, friction_scale, rigid_helpers=rigid_helpers)
 
 
 def adapt_physics_to_playermodel(
