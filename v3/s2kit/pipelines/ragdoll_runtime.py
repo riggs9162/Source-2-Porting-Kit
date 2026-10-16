@@ -754,17 +754,27 @@ local function InitializeModel(entity)
         return
     end
 
-    local state = {}
-    watched[entity] = state
+    local defaults = {}
 
     if ( !previous or !previous.watched[entity] ) then
         for name, choice in pairs(config.bodygroup_defaults or {}) do
             local index = entity:FindBodygroupByName(name)
 
+            if ( !isnumber(index) ) then
+                return
+            end
+
             if ( index >= 0 ) then
-                entity:SetBodygroup(index, choice)
+                defaults[index] = choice
             end
         end
+    end
+
+    local state = {}
+    watched[entity] = state
+
+    for index, choice in pairs(defaults) do
+        entity:SetBodygroup(index, choice)
     end
 
     if ( CLIENT ) then
