@@ -29,25 +29,11 @@ _NPTYPES = {5120: np.int8, 5121: np.uint8, 5122: np.int16, 5123: np.uint16,
 
 
 def _acc(gltf: dict, buf: bytes, idx: int) -> np.ndarray:
-    """Read a glTF accessor into an (count, ncomp) numpy array."""
-    a = gltf["accessors"][idx]
-    bv = gltf["bufferViews"][a["bufferView"]]
-    off = bv.get("byteOffset", 0) + a.get("byteOffset", 0)
-    n = a["count"]
-    nc = _NCOMP[a["type"]]
-    dt = np.dtype(_NPTYPES[a["componentType"]]).newbyteorder("<")
-    item = dt.itemsize * nc
-    stride = bv.get("byteStride", item)
-    if stride == item:
-        out = np.frombuffer(buf, dtype=dt, count=n * nc, offset=off)
-        out = out.reshape(n, nc)
-    else:
-        # interleaved view: strided window then slice the leading components
-        window = np.frombuffer(buf, dtype=np.uint8,
-                               count=(n - 1) * stride + item, offset=off)
-        out = np.lib.stride_tricks.as_strided(
-            window[:].view(dt), shape=(n, nc), strides=(stride, dt.itemsize))
-    return out.astype(np.float64 if dt.kind == "f" else np.int64)
+    """Read a dense, sparse or normalized accessor as a two-dimensional array."""
+    from s2kit.pipelines.gltf_accessors import decode_accessor
+
+    values = decode_accessor(gltf, buf, idx)
+    return values.reshape(len(values), -1) if values.ndim == 1 else values
 
 
 def _mat_to_euler_xyz(R: np.ndarray) -> Tuple[float, float, float]:

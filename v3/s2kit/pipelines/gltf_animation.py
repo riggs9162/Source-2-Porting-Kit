@@ -218,60 +218,10 @@ def load_buffer_bytes(gltf_data: dict, base_dir: Path,
 
 
 def read_accessor(gltf_data: dict, buffer: bytes, accessor_idx: int) -> np.ndarray:
-    """Decode a glTF accessor into a numpy array.
+    """Decode bounded, interleaved, normalized and sparse glTF accessor streams."""
+    from s2kit.pipelines.gltf_accessors import decode_accessor
 
-    Returns a 2D array of shape (count, n_components) for vector/matrix types,
-    or shape (count,) for SCALAR. Honors bufferView.byteStride for interleaved
-    attributes. Sparse accessors are not supported (rare; raises ValueError).
-    """
-    acc = gltf_data['accessors'][accessor_idx]
-    if 'sparse' in acc:
-        raise ValueError(f"Sparse accessor {accessor_idx} not supported")
-
-    component_type = acc['componentType']
-    type_str = acc['type']
-    count = acc['count']
-    fmt_char, comp_size, np_dtype = _COMPONENT[component_type]
-    n_components = _TYPE_COUNT[type_str]
-    elem_size = comp_size * n_components
-
-    bv = gltf_data['bufferViews'][acc['bufferView']]
-    bv_offset = bv.get('byteOffset', 0)
-    acc_offset = acc.get('byteOffset', 0)
-    base = bv_offset + acc_offset
-    stride = bv.get('byteStride', elem_size)
-
-    if stride == elem_size:
-        # Tightly packed; one slice + frombuffer is fastest.
-        end = base + elem_size * count
-        raw = np.frombuffer(buffer, dtype=np_dtype, count=count * n_components, offset=base)
-        arr = raw.copy()  # writable view
-    else:
-        # Interleaved; pull each element separately.
-        arr = np.empty(count * n_components, dtype=np_dtype)
-        for i in range(count):
-            off = base + i * stride
-            chunk = np.frombuffer(buffer, dtype=np_dtype, count=n_components, offset=off)
-            arr[i * n_components:(i + 1) * n_components] = chunk
-
-    if type_str == 'SCALAR':
-        out = arr.reshape(count)
-    else:
-        out = arr.reshape(count, n_components)
-
-    # Honor `normalized` for integer accessors (e.g. unit-norm WEIGHTS_0 stored as ushort).
-    if acc.get('normalized') and component_type in (5120, 5121, 5122, 5123):
-        out = out.astype(np.float32)
-        if component_type == 5120:
-            out = np.maximum(out / 127.0, -1.0)
-        elif component_type == 5121:
-            out = out / 255.0
-        elif component_type == 5122:
-            out = np.maximum(out / 32767.0, -1.0)
-        elif component_type == 5123:
-            out = out / 65535.0
-
-    return out
+    return decode_accessor(gltf_data, buffer, accessor_idx)
 
 
 # ---------------------------------------------------------------------------
