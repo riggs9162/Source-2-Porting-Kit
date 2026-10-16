@@ -203,10 +203,19 @@ def prepare_corrective_drivers(data: dict) -> dict[str, Any]:
     attachments_by_hash = {string_token(name): name for name in attachments}
     available = set(data.get('available_flexes') or [])
     twists = {int(item['source_index']): item for item in data.get('twist_constraints', [])}
+    native = {int(item['source_index']): item for item in data.get('native_procedurals', [])}
+    definitions = data.get('source_constraints', [])
+    if len(native) != len(data.get('native_procedurals', [])):
+        raise CorrectiveError('Native procedural ownership contains duplicate source indices')
+    for index, record in native.items():
+        if not 0 <= index < len(definitions) or definitions[index].get('_class') != record.get('source_type'):
+            raise CorrectiveError('Native procedural ownership does not match its preserved source constraint')
     constraints, unsupported, inert = [], [], []
-    for index, definition in enumerate(data.get('source_constraints', [])):
+    for index, definition in enumerate(definitions):
         kind = definition.get('_class', '')
         try:
+            if index in native:
+                continue
             if index in twists:
                 constraints.append(dict(twists[index], kind='twist'))
                 continue
@@ -276,6 +285,7 @@ def prepare_corrective_drivers(data: dict) -> dict[str, Any]:
     return {'runtime_constraints': constraints, 'unsupported_runtime_constraints': unsupported,
             'inert_runtime_constraints': inert,
             'runtime_constraint_summary': {'resolved': len(constraints), 'inert': len(inert),
+                                           'native': len(native),
                                            'unsupported': len(unsupported),
                                            'pose_morphs': sum(item['kind'] == 'pose_morph' for item in constraints),
                                            'pose_bones': sum(item['kind'] == 'pose_bone' for item in constraints)}}

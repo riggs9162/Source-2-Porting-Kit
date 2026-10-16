@@ -614,6 +614,7 @@ def port_ragdoll_playermodel(glb_path: Path, out_dir: Path, *, modelname: str,
                                       fidelity=fidelity_data, modelname=modelname,
                                       bone_name_map=rig.names, primitive_transform=transform_primitives,
                                       source_model_rotation=yaw_matrix(rig.report["source_alignment_yaw_degrees"]),
+                                      include_source_animations=include_source_animations,
                                       cancel=cancel)
         body_lines.extend(appearance.qc_lines)
         files.extend(appearance.files)

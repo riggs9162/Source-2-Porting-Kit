@@ -155,6 +155,13 @@ membership, supported morph rigs, procedural corrections and genuine jiggle
 bones. Original morph animation uses a model-scoped GMod flex callback;
 unsupported Source 2 simulation remains documented alongside its source data.
 
+Authored bone helpers with exact native equivalents use `.vrd` sources and
+`$proceduralbones`. Compiled validation checks their procedural types, control
+frames, flags and quaternion triggers. Each constraint has one owner across the
+native and addon evaluators. Partial blends, multi-target constraints, RBF
+correctives and helpers whose original animation moves their origins retain
+the source-aware addon evaluator.
+
 Compiled morph validation checks the rendered vertices of every material and
 LOD against the retained source deformations. When the compiler shares vertices
 that need different morph deltas, finalization separates their storage while

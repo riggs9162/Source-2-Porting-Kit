@@ -447,6 +447,7 @@ def _compile(options, asset, log, cancel, *, playermodel=False) -> list[Path]:
         if geometry:
             from s2kit.pipelines.compiled_model_audit import audit_compiled_model
             from s2kit.pipelines.compiled_morph_geometry import audit_compiled_morph_geometry
+            from s2kit.pipelines.procedural_native import audit_native_procedurals
             from s2kit.pipelines.ragdoll_animation_audit import (
                 audit_source_clip_timing, audit_source_flex_programs,
             )
@@ -458,8 +459,11 @@ def _compile(options, asset, log, cancel, *, playermodel=False) -> list[Path]:
             model_audit["morph_geometry_finalization"] = morph_finalization
             model_audit["source_morph_geometry"] = audit_compiled_morph_geometry(
                 mdl, qc, descriptor.get("report", {}).get("appearance", {}), cancel=cancel)
+            model_audit["native_procedurals"] = audit_native_procedurals(
+                mdl, descriptor.get("report", {}).get("appearance", {}).get("procedural", {}).get(
+                    "native_procedurals", []))
             for detail in (model_audit["source_animation_timing"], model_audit["source_flex_programs"],
-                           model_audit["source_morph_geometry"]):
+                           model_audit["source_morph_geometry"], model_audit["native_procedurals"]):
                 model_audit["errors"].extend(detail["errors"])
             model_audit["ok"] = not model_audit["errors"]
             if not model_audit["ok"]:
@@ -701,18 +705,18 @@ def _stage_signature(kind: str) -> str:
     names = {
         "extract": ["vrf", "model_fidelity", "model_metadata", "native_lods"],
         "native": ["ragdoll_port", "ragdoll_physics", "ragdoll_appearance", "model_fidelity",
-                   "gltf_accessors", "morph_atlas", "ragdoll_flex", "ragdoll_runtime", "ragdoll_correctives",
+                   "gltf_accessors", "morph_atlas", "ragdoll_flex", "ragdoll_runtime", "ragdoll_correctives", "procedural_native",
                    "ragdoll_attachments", "ragdoll_animations", "morph_animation", "model_metadata", "smd_animation_export",
                    "gltf_animation", "glb_skin", "native_port", "skeleton_retarget"],
         "player": ["ragdoll_playermodel", "player_animations", "ragdoll_appearance", "morph_atlas", "procedural_bones",
-                   "ragdoll_physics", "ragdoll_flex", "ragdoll_runtime", "ragdoll_correctives",
+                   "ragdoll_physics", "ragdoll_flex", "ragdoll_runtime", "ragdoll_correctives", "procedural_native",
                    "ragdoll_animations", "morph_animation", "model_metadata", "smd_animation_export",
                    "gltf_animation", "glb_skin", "native_port", "skeleton_retarget"],
         "materials": ["materials", "vmat", "vmt", "pbr_maps", "textures"],
         "compile": ["studiomdl", "phy_audit", "phy_geometry", "ragdoll_flex", "compiled_model_audit",
-                    "compiled_morph_geometry", "compiled_lod_vertices", "ragdoll_animation_audit"],
+                    "compiled_morph_geometry", "compiled_lod_vertices", "ragdoll_animation_audit", "procedural_native"],
         "compile_pm": ["studiomdl", "phy_audit", "phy_geometry", "ragdoll_flex", "compiled_model_audit",
-                       "compiled_morph_geometry", "compiled_lod_vertices", "ragdoll_animation_audit", "player_animations"],
+                       "compiled_morph_geometry", "compiled_lod_vertices", "ragdoll_animation_audit", "player_animations", "procedural_native"],
         "calibrate": ["phy_audit"],
     }.get(kind, [])
     function = {"extract": _extract, "native": _convert, "player": _convert,

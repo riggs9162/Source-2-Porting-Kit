@@ -88,7 +88,8 @@ def port_ragdoll(glb_path: Path, out_dir: Path, *, modelname: str,
         model_data=fidelity["source_data"], friction_scale=friction_scale)
     appearance = write_appearance(
         document, buffer, skin, coord, out_dir, fidelity=fidelity,
-        modelname=modelname, cancel=cancel)
+        modelname=modelname, include_source_animations=include_source_animations,
+        procedural_skin=physics.skin, cancel=cancel)
     from s2kit.pipelines.ragdoll_attachments import adapt_native_metadata, load_attachment_influences
 
     raw_attachments = (load_attachment_influences(fidelity, glb_path.parent)

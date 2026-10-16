@@ -846,7 +846,8 @@ def _write_authored_lods(gltf, skin, coord, fidelity, lookup, source_specs, outp
 def write_appearance(gltf: dict, buffer: bytes, skin, coord, out_dir: Path, *,
                      fidelity: dict | Path, modelname: str = "", bone_name_map=None,
                      reference_writer=None, morph_transform=None, primitive_transform=None,
-                     source_model_rotation=None, cancel=None) -> AppearanceResult:
+                     source_model_rotation=None, include_source_animations: bool = False,
+                     procedural_skin=None, cancel=None) -> AppearanceResult:
     """Write exact source-mask bodygroups and material identities without name inference."""
     fidelity = load_model_fidelity(fidelity)
     output = Path(out_dir)
@@ -943,6 +944,19 @@ def write_appearance(gltf: dict, buffer: bytes, skin, coord, out_dir: Path, *,
 
     prepared = prepare_corrective_drivers(result.addon_drivers)
     result.addon_drivers.update(prepared)
+    from s2kit.pipelines.procedural_native import write_native_procedurals
+
+    native_procedurals = write_native_procedurals(
+        result.addon_drivers, procedural_skin or skin, output,
+        gltf=gltf if include_source_animations else None,
+        buffer=buffer if include_source_animations else None,
+    )
+    result.addon_drivers["native_procedurals"] = native_procedurals["records"]
+    if native_procedurals["records"]:
+        prepared = prepare_corrective_drivers(result.addon_drivers)
+        result.addon_drivers.update(prepared)
+        result.qc_lines.extend(native_procedurals["qc_lines"])
+        result.files.extend(native_procedurals["files"])
     corrective_controllers = {name for constraint in prepared["runtime_constraints"]
                               if constraint["kind"] == "pose_morph" for name in constraint["outputs"]}
     corrective_targets = {}
@@ -955,6 +969,9 @@ def write_appearance(gltf: dict, buffer: bytes, skin, coord, out_dir: Path, *,
     translated = {record["source_index"] for record in twists}
     translated.update(record["source_index"] for record in prepared["runtime_constraints"])
     translated.update(record["source_index"] for record in prepared["inert_runtime_constraints"])
+    translated.update(record["source_index"] for record in native_procedurals["records"])
+    procedural_report["native_procedurals"] = native_procedurals["records"]
+    procedural_report["native_procedural_fallbacks"] = native_procedurals["rejected"]
     procedural_report["runtime_twists"] = twists
     procedural_report["runtime_constraint_summary"] = prepared["runtime_constraint_summary"]
     procedural_report["morph_output_precedence"] = dict(
