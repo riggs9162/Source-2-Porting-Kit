@@ -10,22 +10,29 @@ from s2kit.ui.tool_page import ToolPage
 
 
 @tool(id="port-workflow", title="Porting Workflow", category="Models", order=0,
-      icon="ACCOUNT_TREE", description="Plan a port, inspect its inputs, and resume a saved batch across conversion stages.",
-      keywords=("guided", "preflight", "queue", "resume", "report"))
+      icon="ACCOUNT_TREE", description="Port Source 2 ragdolls into a complete GMod addon, with optional playermodels.",
+      keywords=("ragdoll", "playermodel", "vpk", "guided", "preflight", "queue", "resume", "report"))
 class PortingWorkflow(ToolPage):
     """Shared tool chrome around the framework-free workflow runner."""
 
-    RUN_LABEL = "Plan / run"
+    RUN_LABEL = "Port"
     PARAMS = [
-        ChoiceParam("action", "Action", default="inspect", group="Workflow", style="segmented",
-                    choices=options(("inspect", "Plan and check"), ("run", "Run / resume"))),
+        ChoiceParam("model_mode", "Port type", default="ragdoll", group="Workflow",
+                    choices=options(("ragdoll", "GMod ragdoll addon"), ("generic", "General asset workflow"))),
+        ChoiceParam("action", "Action", default="run", group="Workflow", style="segmented",
+                    choices=options(("run", "Port / resume"), ("inspect", "Plan and check"))),
         ChoiceParam("target", "Target", default="sources", group="Workflow",
+                    depends_on=("model_mode", "generic"),
                     choices=options(("sources", "Source 1 model sources (SMD / QC)"),
                                     ("compiled", "Compiled Source 1 models"),
                                     ("materials", "Source 1 materials (VMT / VTF)")),
-                    help="Native skeleton conversion only. For ValveBiped NPCs or playermodels use Direct Port."),
-        ChoiceParam("input_kind", "Source type", default="folder", group="Input",
-                    choices=options(("folder", "Exported folder"), ("file", "Asset or VPK"))),
+                    help="Select the output stage for the general asset workflow."),
+        ChoiceParam("input_kind", "Source type", default="urls", group="Input",
+                    choices=options(("urls", "Pasted VPK model URLs"), ("folder", "Exported folder"), ("file", "Asset or VPK"))),
+        TextParam("source_urls", "Source 2 Viewer model URLs", lines=6, max_lines=12,
+                  required=True, group="Input", depends_on=("input_kind", "urls"),
+                  hint="vpk:S:/SteamLibrary/.../pak01_dir.vpk:models/characters/model.vmdl_c",
+                  help="Paste one model URL per line. Each model is processed independently."),
         PathParam("source_folder", "Exported source folder", mode="directory", required=True,
                   group="Input", depends_on=("input_kind", "folder")),
         PathParam("source_file", "Source asset or VPK", mode="open_file", required=True,
@@ -34,65 +41,90 @@ class PortingWorkflow(ToolPage):
         TextParam("vpk_filter", "Paths inside VPK", group="Input", depends_on=("input_kind", "file"),
                   help="Required for VPKs. Use a model/material path or subtree, as in VRF Batch Export."),
         PathParam("material_source", "VMAT / texture folder (optional)", mode="directory", group="Input",
-                  help="Otherwise uses materialsrc inside the source/export. Material outputs are staged for review."),
+                  help="Otherwise uses materialsrc from the selected models or VPK extraction."),
         PathParam("project", "Workflow project folder", mode="directory", must_exist=False,
                   required=True, group="Output", help="Choose a separate folder outside the source tree. Reuse it to resume the same settings."),
         TextParam("namespace", "Output namespace", default="ports", required=True, group="Output",
                   help="Lowercase folder path used under models and materials/models, for example my_addon/props."),
-        BoolParam("collision", "Generate model collision", default=True, group="Conversion"),
+        BoolParam("collision", "Generate model collision", default=True, group="Conversion",
+                  depends_on=("model_mode", "generic")),
+        BoolParam("include_source_animations", "Include original Alyx animations", default=False,
+                  group="Conversion", depends_on=("model_mode", "ragdoll")),
+        BoolParam("create_playermodels", "Also create humanoid playermodels", default=False,
+                  group="Conversion", depends_on=("model_mode", "ragdoll"),
+                  help="Keep original body proportions while retargeting the standard GMod player animation set."),
         BoolParam("emit_normal", "Ship material normal maps", default=True, group="Conversion",
-                  help="Turn off for baked prop_static lighting. Uses the existing material conversion pipeline."),
+                  help="Preserve supported source normal maps through the material conversion pipeline."),
         PathParam("compiler", "studiomdl executable", mode="open_file", must_exist=False,
-                  group="Compile", depends_on=("target", "compiled"),
-                  help="Empty uses Preferences. Compiling writes models into the selected game's models folder."),
+                  group="Compile",
+                  help="Empty uses Preferences. Ragdoll addons compile in an isolated project folder."),
         PathParam("game", "Compile game folder", mode="directory", must_exist=False,
-                  group="Compile", depends_on=("target", "compiled"), help="Empty uses Preferences; gameinfo.txt must exist."),
+                  group="Compile", help="Empty uses Preferences; gameinfo.txt must exist."),
+        BoolParam("install", "Install completed addon into GMod", default=False,
+                  group="Installation", depends_on=("model_mode", "ragdoll")),
+        PathParam("gmod_addons", "GMod addons folder", mode="directory",
+                  group="Installation", depends_on=("install", True),
+                  help="Editable sources and reports remain in the workflow project."),
     ]
-    HELP = """### Plan, run and resume
+    HELP = """### One-click ragdoll addons
 
-Choose the source, target and a separate project folder, then **Plan and check**.
-Output lists the suggested stages and measured preflight findings. Planning
-writes reports only. Compiled Source 2 assets need extraction before their mesh,
-texture and skeleton checks can run; the plan labels those checks deferred.
+Choose **GMod ragdoll addon**, paste Source 2 Viewer model URLs one per line,
+and choose a separate project folder and output namespace. Set the compiler
+and its game folder here or in Preferences, then click **Port**.
 
-**Run / resume** carries extracted files into the existing model and material
-converters, then optionally studiomdl. Items run one at a time. Failed items do
-not stop independent items, but their dependent compile is blocked. Fix a
-transient problem and run again. Cancel pauses at a checkpoint; an interrupted
-item restarts rather than continuing halfway through its file.
+The project contains editable model sources, original extraction data, detailed
+conversion reports, and a ready-to-install **addon** folder. Original animations,
+source-proportioned humanoid playermodels, and installation are independent options.
 
-The project retains `workflow-queue.json`, `port-report.json`, and
-`port-report.md`. Completed items are reused only when their output hashes
-still match. Changed source files rebuild the queue. Changed workflow settings
-require a new project folder. A project cannot run in two sessions at once.
+Native ragdolls retain source-sized geometry and source-derived collision.
+Reports distinguish preserved values, Source 1 adaptations and generated physics.
+The Alyx metrocop choreo model has no collision; its labelled fallback uses
+authored AO capsules with generated humanoid joint settings.
 
-This is native-skeleton conversion, not a ValveBiped retargeting wizard.
-Preflight checks resource existence, skeleton structure/weights and compiler
-paths. It does not certify animation alignment or in-game collision. Materials
-are staged under the project, not installed. The report lists remaining checks.
+Models run serially. One failed model does not stop other ports. Cancel saves
+a checkpoint; **Port** resumes intact outputs and retries interrupted stages.
+Resume verifies output hashes and converter versions. Use another project folder
+when changing the batch settings. The **Plan and check** action writes reports
+without running extraction or compilation.
+
+**General asset workflow** retains the existing source/model/material targets.
 """
 
     def run_job(self, ctx: JobContext) -> None:
         """Run the planned stages without touching controls from the worker."""
         values = ctx.params
+        input_kind = values["input_kind"]
+        if input_kind == "urls" and values["model_mode"] != "ragdoll":
+            raise ValueError("Pasted model URLs require the GMod ragdoll addon port type")
+        source = values["source_folder"] if input_kind == "folder" else values["source_file"] if input_kind == "file" else ""
         settings = WorkflowOptions(
-            source=str(values["source_folder"] if values["input_kind"] == "folder" else values["source_file"]),
-            project=str(values["project"]), target=str(values["target"]),
+            source=str(source),
+            project=str(values["project"]),
+            target="compiled" if values["model_mode"] == "ragdoll" else str(values["target"]),
             material_source=str(values["material_source"] or ""), namespace=str(values["namespace"]),
             vpk_filter=str(values["vpk_filter"] or ""),
             vrf_executable=str(ctx.prefs.get("vrf_cli_path", "") or ""),
             compiler=str(values["compiler"] or ctx.prefs.get("studiomdl_path", "") or ""),
             game=str(values["game"] or ctx.prefs.get("gameinfo_path", "") or ""),
-            collision=bool(values["collision"]), emit_normal=bool(values["emit_normal"]))
+            collision=bool(values["collision"]), emit_normal=bool(values["emit_normal"]),
+            model_mode=str(values["model_mode"]),
+            source_urls=str(values["source_urls"]) if input_kind == "urls" else "",
+            include_source_animations=bool(values["include_source_animations"]),
+            create_playermodels=bool(values["create_playermodels"]),
+            install=bool(values["install"]), gmod_addons=str(values["gmod_addons"] or ""))
         state = run_workflow(settings, inspect_only=values["action"] == "inspect",
                              log=ctx.log, progress=ctx.progress, cancel=ctx.cancel_event)
-        ctx.table("Workflow queue", ["Step", "Stage", "Status", "Issue"],
-                  [[key, record["kind"], record["status"], record.get("error", "")]
+        assets = {asset["key"]: asset["relative"] for asset in state.get("assets", [])}
+        ctx.table("Workflow queue", ["Model", "Stage", "Status", "Issue"],
+                  [[assets.get(key.partition(":")[2], Path(record.get("source", "")).name or "Addon"),
+                    record["kind"], record["status"], record.get("error", "")]
                    for key, record in state["tasks"].items()])
         ctx.table("Preflight", ["Level", "Asset", "Finding"],
                   [[item["severity"], item["asset"], item["message"]] for item in state["findings"]])
         for name in ("port-report.md", "port-report.json"):
             ctx.artifact(Path(settings.project) / name)
+        if (Path(settings.project) / "addon-manifest.json").is_file():
+            ctx.artifact(Path(settings.project) / "addon-manifest.json")
         successful = sum(record["status"] == "success" for record in state["tasks"].values())
         ctx.metric("Completed items", successful)
         ctx.summary(f"{state['status'].title()}: {successful}/{len(state['tasks'])} items complete")

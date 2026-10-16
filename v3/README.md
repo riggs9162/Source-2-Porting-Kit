@@ -109,6 +109,62 @@ or a headless CLI.
 
 ## Ported tools
 
+### One-click ragdoll addons
+
+Open **Porting Workflow**, leave **GMod ragdoll addon** selected, and paste
+Source 2 Viewer VPK model URLs one per line. Choose a project folder outside
+the source installation and a lowercase output namespace. Set StudioMDL CE and
+its compile game folder here or in Preferences, then press **Port**. These
+settings and the batch inputs are saved.
+
+The default produces native ragdolls. **Include original Alyx animations**,
+**Also create humanoid playermodels**, and **Install completed addon into GMod**
+are independent options, initially off. The player option builds a separate
+`_pm` companion with the source character's dimensions, a complete retargeted
+GMod animation library, weapon attachments and uninterrupted limb IK chains.
+The published animation sources are cached at revision
+`9a588af0cb1a2d53de35496ba1737305a877e50c`, with provenance beside the sources.
+Headcrabs keep their native rig.
+
+The project contains:
+
+| Path | Contents |
+| --- | --- |
+| `addon/` | Validated model, material and Lua runtime files ready for GMod |
+| `modelsrc/` | Editable SMD, DMX and QC sources, animation library and feature audits |
+| `extracted/` | Exported glTF, textures and original authoring metadata |
+| `port-report.md`, `port-report.json` | Per-model outcomes and links to detailed audits |
+| `workflow-queue.json` | Versioned checkpoints and output hashes for resume |
+| `addon-manifest.json` | Exact packaged file list and SHA-256 hashes |
+
+Extraction, conversion, materials, compilation and packaging run serially.
+Independent models continue after a failure. **Cancel** retains completed
+stages; **Port** verifies their hashes and resumes the same project. Use a
+separate project when changing batch settings. **Plan and check** prepares the
+queue without running conversion. Installation copies only manifest-owned
+files into the selected addons folder and verifies their hashes.
+
+Reports distinguish preserved, adapted, generated and unsupported features.
+The native path retains authored bodygroups, skin material identities, LOD
+membership, supported morph rigs, procedural corrections and genuine jiggle
+bones. Original morph animation uses a model-scoped GMod flex callback;
+unsupported Source 2 simulation remains documented alongside its source data.
+
+Source 1 imposes differences that the report measures. Capsule and sphere
+tessellation targets at most 0.05 inches surface error and 1% volume error
+before compilation; the compiler can simplify those convex meshes further.
+The compiled PHY audit records that change, body masses and constraint values.
+Coupled swing cones become independent-axis envelopes, motors become calibrated
+friction where possible, and weighted attachments receive an explicit binding
+adaptation. The Alyx metrocop choreo model has no authored PHYS; its labelled
+generated fallback uses its 18 AO capsules and a humanoid joint preset.
+
+Only successful compiled models with complete materials enter the addon.
+Binary audits check skeleton binds, bodygroups, skins, material resources,
+LODs, attachments, hitboxes, flex data and physical bodies. Reports keep actual
+GMod rendering, movement and physics validation separate from compiler checks.
+Source models are limited to 256 total bones and 32 simulated bodies.
+
 ### Native model porting
 
 **Model Porter** now has a native mode alongside the ValveBiped character path.
