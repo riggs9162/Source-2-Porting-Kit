@@ -32,9 +32,21 @@ class WorkflowOptions:
     game: str = ""
     collision: bool = True
     emit_normal: bool = True
+    model_mode: str = "generic"
+    source_urls: str = ""
+    include_source_animations: bool = False
+    create_playermodels: bool = False
+    install: bool = False
+    gmod_addons: str = ""
+    animation_cache: str = ""
 
     def validate(self) -> None:
         """Reject ambiguous targets and overlapping source/output trees."""
+        if self.model_mode == "ragdoll":
+            from s2kit.pipelines.ragdoll_workflow import validate_options
+
+            validate_options(self)
+            return
         source, project = Path(self.source).resolve(), Path(self.project).resolve()
         if not source.exists():
             raise ValueError(f"Source does not exist: {source}")
@@ -126,10 +138,13 @@ def project_lock(project: Path):
 def source_stamp(options: WorkflowOptions) -> str:
     """Detect changed inputs/settings before reusing a checkpoint."""
     source = Path(options.source).resolve()
-    roots = [source if source.is_dir() else source.parent]
+    roots = [source]
     if options.material_source:
         roots.append(Path(options.material_source).resolve())
-    files = sorted({p for root in roots for p in root.rglob("*") if p.is_file()})
+    files = sorted({p for root in roots for p in (root.rglob("*") if root.is_dir() else [root]) if p.is_file()})
+    if source.suffix.lower() == ".vpk":
+        prefix = source.stem.removesuffix("_dir")
+        files.extend(sorted(source.parent.glob(prefix + "_[0-9]*.vpk")))
     digest = hashlib.sha256(json.dumps(asdict(options), sort_keys=True).encode())
     for path in files:
         stat = path.stat()
@@ -363,6 +378,21 @@ def write_report(project: Path, state: dict) -> Path:
         lines.append(f"- {key}: {record['status']}" + (f" - {record['error']}" if record.get("error") else ""))
         lines.extend(f"  - {level}: {message}" for level, message in record.get("messages", []) if level in {"WARNING", "ERROR"})
         lines.extend(f"  - Output: {path}" for path in record.get("outputs", {}))
+    if state.get("options", {}).get("model_mode") == "ragdoll":
+        lines.extend(["", "## Conversion audits", ""])
+        for record in state.get("tasks", {}).values():
+            for name in record.get("outputs", {}):
+                path = Path(name)
+                if path.name in {"ragdoll-report.json", "playermodel-report.json", "compiled-report.json", "material-report.json"}:
+                    lines.append(f"- [{path.name}]({path.as_posix()})")
+        lines.extend(["", "## Validation", "",
+                      "- Compiled outputs are packaged only after file-consistency checks and available physics audits.",
+                      "- Source primitives, joint envelopes, shader conversion and generated physics retain their individual adaptation reports.",
+                      "- In-game appearance, movement and physical behavior require an explicit engine validation record.",
+                      "- Editable sources and reports remain outside the addon; installation is optional."])
+        report = project / "port-report.md"
+        report.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return report
     lines.extend(["", "## Still to verify", "",
                   "- Material names and paths against the model's SMD/QC references; material output is staged, not installed in the game.",
                   "- In-game appearance, animation alignment, collision behavior and performance have not been tested.",
@@ -379,6 +409,11 @@ def run_workflow(options: WorkflowOptions, *, inspect_only: bool = False,
                  cancel: threading.Event | None = None,
                  executor: Callable = execute_task) -> dict:
     """Run serially with atomic checkpoints, output verification and retryable failures."""
+    if options.model_mode == "ragdoll":
+        from s2kit.pipelines.ragdoll_workflow import run_ragdoll_workflow
+
+        return run_ragdoll_workflow(options, inspect_only=inspect_only, log=log,
+                                    progress=progress, cancel=cancel)
     options.validate()
     cancel = cancel or threading.Event()
     project = Path(options.project).resolve()
@@ -388,7 +423,9 @@ def run_workflow(options: WorkflowOptions, *, inspect_only: bool = False,
         state = {"version": 1, "signature": stamp, "options": asdict(options), "tasks": {}, "findings": [], "status": "planned"}
         if checkpoint.exists() and not inspect_only:
             state = json.loads(checkpoint.read_text(encoding="utf-8"))
-            if state.get("version") != 1 or state.get("options") != asdict(options):
+            saved_options = state.get("options", {})
+            normalized = asdict(WorkflowOptions(**saved_options))
+            if state.get("version") != 1 or normalized != asdict(options):
                 raise ValueError("Settings changed since this queue was created. Use a new project folder.")
             if state.get("signature") != stamp:
                 log("Inputs changed; all queued items will be checked and rebuilt", "WARNING")
