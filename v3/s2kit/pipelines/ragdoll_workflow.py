@@ -354,15 +354,17 @@ def _materials(options, asset, log, cancel) -> list[Path]:
         entry = vmat.VmatParser(texture_root=root).parse(path, root=root)
         if not entry.buildable:
             raise ValueError(f"No resolved base color for {path}")
-        material_path = f"models/{options.namespace}/{PurePosixPath(relative).parent.as_posix()}"
+        target_resource = resource_path(required.get(relative, relative))
+        material_path = f"models/{options.namespace}/{target_resource.parent.as_posix()}"
         settings = materials.MaterialOptions(
             emit_normal=options.emit_normal, translucent=entry.translucent,
             alphatest=entry.alphatest, tintable=entry.tintable)
         result = materials.build_material(
             entry.to_source(), payload / "materials" / material_path,
-            path.stem, material_path, settings, log=log, cancel=cancel)
+            target_resource.name, material_path, settings, log=log, cancel=cancel)
         written.extend(result.written)
-        audits.append({"source": relative, "status": "adapted", "notes": [*entry.warnings, *result.notes],
+        audits.append({"source": relative, "target": target_resource.as_posix(),
+                       "status": "adapted", "notes": [*entry.warnings, *result.notes],
                        "shader": entry.shader, "target_shader": settings.shader})
     written.append(_write_json(destination / "material-report.json", {"materials": audits}))
     return written

@@ -372,9 +372,13 @@ def _audit_materials(compiled: dict, appearance: dict, payload, mdl: Path, error
     if len(authored) > 1 and len(compiled["skins"]) != len(authored):
         errors.append(f"Compiled skin family count {len(compiled['skins'])} differs from source {len(authored)}")
     if authored and compiled["skins"]:
-        original = [str(token).casefold() for token in authored[0].get("materials", [])]
+        aliases = {str(source).casefold(): str(target).casefold()
+                   for source, target in appearance.get("material_map", {}).items()}
+        original = [aliases.get(str(token).casefold(), str(token).casefold())
+                    for token in authored[0].get("materials", [])]
         for family_index, source in enumerate(authored[:len(compiled["skins"])]):
-            replacements = dict(zip(original, [str(token).casefold() for token in source.get("materials", [])]))
+            replacements = dict(zip(original, [aliases.get(str(token).casefold(), str(token).casefold())
+                                               for token in source.get("materials", [])]))
             for slot, base in enumerate(compiled["skins"][0]):
                 target = compiled["skins"][family_index][slot].casefold()
                 wanted = replacements.get(base.casefold(), base.casefold())
