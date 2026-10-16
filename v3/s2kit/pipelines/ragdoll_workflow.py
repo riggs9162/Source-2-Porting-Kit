@@ -329,16 +329,21 @@ def _material_sources(options, asset) -> Path:
 def _materials(options, asset, log, cancel) -> list[Path]:
     """Convert full resource-relative material paths into an isolated addon."""
     from s2kit.pipelines import materials, vmat
+    from s2kit.pipelines.model_fidelity import resource_token
 
     root = _material_sources(options, asset)
     _, destination, payload = _paths(options, asset)
     descriptor = json.loads((destination / "build.json").read_text(encoding="utf-8"))
-    required = descriptor.get("report", {}).get("material_map", {})
+    report = descriptor.get("report", {})
+    required = report.get("material_map", {})
+    aliases = report.get("material_aliases", {})
+    for alias, source in aliases.items():
+        resource_path(alias)
+        if resource_token(source) not in required:
+            raise ValueError(f"Unmapped material source for compiler alias {alias}: {source}")
     paths = sorted(root.rglob("*.vmat")) if root.is_dir() else []
     selected = [(path.relative_to(root).with_suffix("").as_posix(), path) for path in paths]
     if required:
-        from s2kit.pipelines.model_fidelity import resource_token
-
         keys = {resource_token(str(key)) for key in required}
         selected = []
         missing = set()
@@ -375,7 +380,31 @@ def _materials(options, asset, log, cancel) -> list[Path]:
         audits.append({"source": relative, "target": target_resource.as_posix(),
                        "status": "adapted", "notes": [*entry.warnings, *result.notes],
                        "shader": entry.shader, "target_shader": settings.shader})
-    written.append(_write_json(destination / "material-report.json", {"materials": audits}))
+    original_vmts = {
+        payload / "materials" / "models" / options.namespace / (entry["target"] + ".vmt")
+        for entry in audits
+    }
+    alias_audits = []
+    alias_sources = {}
+    for alias, source in sorted(aliases.items()):
+        check_cancelled(cancel)
+        token = resource_token(alias)
+        source_token = resource_token(source)
+        if token in alias_sources and alias_sources[token] != source_token:
+            raise ValueError(f"Conflicting compiler material alias: {token}")
+        alias_sources[token] = source_token
+        source_target = resource_path(required[source_token]).as_posix()
+        original = payload / "materials" / "models" / options.namespace / (source_target + ".vmt")
+        target = payload / "materials" / "models" / options.namespace / (token + ".vmt")
+        content = original.read_bytes()
+        if target in original_vmts and target.read_bytes() != content:
+            raise ValueError(f"Compiler material alias replaces another source material: {token}")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+        written.append(target)
+        alias_audits.append(dict(target=token, source=source_token, source_target=source_target,
+                                 status="generated", vmt_bytes_preserved=True, additional_textures=0))
+    written.append(_write_json(destination / "material-report.json", {"materials": audits, "aliases": alias_audits}))
     return written
 
 
@@ -404,7 +433,9 @@ def _compile(options, asset, log, cancel, *, playermodel=False) -> list[Path]:
             raise ValueError("; ".join(check.problems()))
         outputs = [mdl, *check.siblings]
         morph_finalization = None
+        material_finalization = None
         if geometry:
+            from s2kit.pipelines.compiled_materials import finalize_lod_material_replacements
             from s2kit.pipelines.compiled_morph_geometry import repair_compiled_morph_geometry
             from s2kit.pipelines.ragdoll_flex import install_source_flex_rig
 
@@ -417,6 +448,12 @@ def _compile(options, asset, log, cancel, *, playermodel=False) -> list[Path]:
             check_cancelled(cancel)
             if not morph_finalization["ok"]:
                 raise ValueError("Compiled morph restoration failed: " + "; ".join(morph_finalization["errors"]))
+            material_finalization = finalize_lod_material_replacements(
+                mdl, qc, backup_dir=destination / "compiler-backups" / qc.stem / "materials",
+                cancel=cancel, on_log=log)
+            check_cancelled(cancel)
+            if not material_finalization["ok"]:
+                raise ValueError("Compiled LOD material restoration failed: " + "; ".join(material_finalization["errors"]))
             check = studiomdl.check_compiled_model(mdl, require_geometry=True)
             if not check.ok:
                 raise ValueError("; ".join(check.problems()))
@@ -457,6 +494,7 @@ def _compile(options, asset, log, cancel, *, playermodel=False) -> list[Path]:
             model_audit["source_flex_programs"] = audit_source_flex_programs(
                 mdl, descriptor.get("report", {}).get("appearance", {}).get("flexes", {}))
             model_audit["morph_geometry_finalization"] = morph_finalization
+            model_audit["lod_material_finalization"] = material_finalization
             model_audit["source_morph_geometry"] = audit_compiled_morph_geometry(
                 mdl, qc, descriptor.get("report", {}).get("appearance", {}), cancel=cancel)
             model_audit["native_procedurals"] = audit_native_procedurals(
@@ -704,18 +742,18 @@ def _stage_signature(kind: str) -> str:
     """Invalidate affected cached stages when their production converter changes."""
     names = {
         "extract": ["vrf", "model_fidelity", "model_metadata", "native_lods"],
-        "native": ["ragdoll_port", "ragdoll_physics", "ragdoll_contacts", "ragdoll_appearance", "model_fidelity",
+        "native": ["ragdoll_port", "ragdoll_physics", "ragdoll_contacts", "ragdoll_appearance", "lod_materials", "model_fidelity",
                    "gltf_accessors", "morph_atlas", "ragdoll_flex", "ragdoll_runtime", "ragdoll_correctives", "procedural_native",
                    "ragdoll_attachments", "ragdoll_animations", "morph_animation", "model_metadata", "smd_animation_export",
                    "gltf_animation", "glb_skin", "native_port", "skeleton_retarget"],
-        "player": ["ragdoll_playermodel", "player_animations", "ragdoll_appearance", "morph_atlas", "procedural_bones",
+        "player": ["ragdoll_playermodel", "player_animations", "ragdoll_appearance", "lod_materials", "morph_atlas", "procedural_bones",
                    "ragdoll_physics", "ragdoll_contacts", "ragdoll_flex", "ragdoll_runtime", "ragdoll_correctives", "procedural_native",
                    "ragdoll_animations", "morph_animation", "model_metadata", "smd_animation_export",
                    "gltf_animation", "glb_skin", "native_port", "skeleton_retarget"],
         "materials": ["materials", "vmat", "vmt", "pbr_maps", "textures"],
-        "compile": ["studiomdl", "phy_audit", "phy_geometry", "ragdoll_flex", "compiled_model_audit", "compiled_render_coverage",
+        "compile": ["studiomdl", "phy_audit", "phy_geometry", "ragdoll_flex", "compiled_model_audit", "compiled_render_coverage", "compiled_materials",
                     "compiled_morph_geometry", "compiled_lod_vertices", "ragdoll_animation_audit", "procedural_native"],
-        "compile_pm": ["studiomdl", "phy_audit", "phy_geometry", "ragdoll_flex", "compiled_model_audit", "compiled_render_coverage",
+        "compile_pm": ["studiomdl", "phy_audit", "phy_geometry", "ragdoll_flex", "compiled_model_audit", "compiled_render_coverage", "compiled_materials",
                        "compiled_morph_geometry", "compiled_lod_vertices", "ragdoll_animation_audit", "player_animations", "procedural_native"],
         "calibrate": ["phy_audit"],
     }.get(kind, [])

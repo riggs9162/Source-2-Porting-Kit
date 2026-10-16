@@ -769,23 +769,58 @@ def _write_choice_source(stem: str, output: Path, selected: list[dict], skin, co
     return dmx.name
 
 
+def _load_authored_lod_meshes(gltf, skin, fidelity, lookup, rename, primitive_transform,
+                              result, cancel, selected_indices: set[int]) -> dict:
+    """Decode retained authored LOD meshes before assigning stable compiler material slots."""
+    from s2kit.pipelines.native_port import coordinate_mode
+    from s2kit.pipelines.morph_atlas import load_mesh_morphs
+
+    source_coord = coordinate_mode(gltf)
+    sidecar_directory = Path(fidelity.get("_sidecar_directory", "."))
+    sources = fidelity.get("dmx_sources", {})
+    loaded = dict(lookup)
+    for mesh in fidelity["meshes"]:
+        check_cancelled(cancel)
+        index = mesh["index"]
+        if index in loaded or index not in selected_indices or not mesh["lod_mask"]:
+            continue
+        relative = sources.get(str(index))
+        if not relative:
+            raise ValueError(f"Authored lower-LOD source is missing for {mesh['name']}; preserve model LOD sources first")
+        path = sidecar_directory / relative
+        atlas_morphs = load_mesh_morphs(fidelity, mesh)
+        morph_report = {}
+        primitives = _read_dmx_primitives(path, skin, source_coord, rename,
+            atlas_morphs=atlas_morphs, morph_report=morph_report)
+        if morph_report:
+            result.report.setdefault("lod_morphs", []).append(dict(mesh=index, **morph_report))
+        _map_primitive_materials(primitives)
+        if primitive_transform is not None:
+            transformed = primitive_transform(primitives)
+            if transformed is not None:
+                primitives = transformed
+        loaded[index] = primitives
+    return loaded
+
+
+def _record_lod_material_sources(result, specification: dict, level: int, source: str | None) -> None:
+    """Attach the emitted compiler file to independently auditable per-material topology records."""
+    for record in result.report["lod_material_slots"]:
+        if record["specification"] == specification["name"] and record["lod"] == level:
+            record["source"] = source
+
+
 def _write_authored_lods(gltf, skin, coord, fidelity, lookup, source_specs, output,
                           writer, rig, result, rename, primitive_transform, morph_transform,
-                          cancel) -> list[str]:
+                          cancel, material_plan) -> list[str]:
     """Compose each bodygroup's authored lower-level meshes without flattening groups."""
-    from s2kit.pipelines.native_port import coordinate_mode
-
     distances = [float(value) for value in fidelity.get("lod_distances", [])]
     if len(distances) < 2:
         return []
     if not all(math.isfinite(value) and value >= 0 for value in distances) or any(
             second <= first for first, second in zip(distances, distances[1:])):
         raise ValueError("Authored LOD thresholds must be finite and increase")
-    sidecar_directory = Path(fidelity.get("_sidecar_directory", "."))
-    source_coord = coordinate_mode(gltf)
     mesh_by_index = {mesh["index"]: mesh for mesh in fidelity["meshes"]}
-    mesh_lookup = dict(lookup)
-    sources = fidelity.get("dmx_sources", {})
     qc = []
     for level, distance in enumerate(distances[1:], start=1):
         check_cancelled(cancel)
@@ -797,6 +832,7 @@ def _write_authored_lods(gltf, skin, coord, fidelity, lookup, source_specs, outp
             base_indices = [index for index in source["meshes"]
                             if mesh_by_index[index]["lod_mask"] & 1]
             if selected_indices == base_indices:
+                _record_lod_material_sources(result, source, level, source["source"])
                 continue
             if not source["source"]:
                 if selected_indices:
@@ -806,36 +842,16 @@ def _write_authored_lods(gltf, skin, coord, fidelity, lookup, source_specs, outp
                 qc.append(f'    removemodel {_quoted(source["source"])}')
                 replacements.append(dict(base=source["source"], replacement=None))
                 continue
-            for index in selected_indices:
-                if index in mesh_lookup:
-                    continue
-                relative = sources.get(str(index))
-                if not relative:
-                    raise ValueError(f"Authored lower-LOD source is missing for {mesh_by_index[index]['name']}; preserve model LOD sources first")
-                path = sidecar_directory / relative
-                from s2kit.pipelines.morph_atlas import load_mesh_morphs
-
-                atlas_morphs = load_mesh_morphs(fidelity, mesh_by_index[index])
-                morph_report = {}
-                prims = _read_dmx_primitives(path, skin, source_coord, rename,
-                    atlas_morphs=atlas_morphs, morph_report=morph_report)
-                if morph_report:
-                    result.report.setdefault("lod_morphs", []).append(dict(mesh=index, **morph_report))
-                _map_primitive_materials(prims)
-                if primitive_transform is not None:
-                    transformed = primitive_transform(prims)
-                    if transformed is not None:
-                        prims = transformed
-                mesh_lookup[index] = prims
-            selected = [primitive for index in selected_indices for primitive in mesh_lookup[index]]
+            selected = material_plan["streams"][(source["name"], level)]
             stem = "appearance_" + _filename(source["name"]) + f"_lod{level}"
             destination = _write_choice_source(stem, output, selected, skin, coord, writer,
                                                rig, result, morph_transform)
             qc.append(f'    replacemodel {_quoted(source["source"])} {_quoted(destination)}')
+            _record_lod_material_sources(result, source, level, destination)
             replacements.append(dict(base=source["source"], replacement=destination,
                                      source_meshes=selected_indices))
-            for primitive in selected:
-                result.report["material_map"][primitive.get("source_material", primitive["material"])] = primitive["material"]
+        for first, second in sorted(material_plan["replacements"][level].items()):
+            qc.append(f"    replacematerial {_quoted(first)} {_quoted(second)}")
         qc.append("}")
         result.report["lods"].append(dict(level=level, source_threshold=distance,
                                           target_distance=distance, replacements=replacements,
@@ -884,10 +900,24 @@ def write_appearance(gltf: dict, buffer: bytes, skin, coord, out_dir: Path, *,
         for choice in group["choices"]:
             source_specs.append(dict(name=f"{group['name']}_{choice['value']}", group=group["name"],
                                      choice=choice["value"], meshes=choice["meshes"]))
+    part_indices = {None: 0} if automatic else {}
+    part_indices.update({group["name"]: index + bool(automatic) for index, group in enumerate(groups)})
+    for source in source_specs:
+        source["part"] = part_indices[source["group"]]
+        source["compiled_choice"] = source["choice"] if source["choice"] is not None else 0
+    lookup = _load_authored_lod_meshes(gltf, skin, fidelity, lookup, rename, primitive_transform,
+                                      result, cancel, {index for source in source_specs for index in source["meshes"]})
+    from s2kit.pipelines.lod_materials import dmx_skin_material_qc, plan_lod_materials
+
+    material_plan = plan_lod_materials(source_specs,
+        {mesh["index"]: mesh for mesh in fidelity["meshes"]}, lookup, fidelity, target_material_token)
+    result.report["lod_material_slots"] = material_plan["records"]
+    result.report["material_aliases"] = material_plan["aliases"]
+    result.report["material_slot_skins"] = material_plan["skin_slots"]
     written_names = set()
     for source in source_specs:
         check_cancelled(cancel)
-        selected = [primitive for index in source["meshes"] for primitive in lookup.get(index, [])]
+        selected = material_plan["streams"][(source["name"], 0)]
         if not selected:
             source["source"] = None
             continue
@@ -897,6 +927,7 @@ def write_appearance(gltf: dict, buffer: bytes, skin, coord, out_dir: Path, *,
         written_names.add(stem.casefold())
         source["source"] = _write_choice_source(stem, output, selected, skin, coord,
                                                  writer, rig, result, morph_transform)
+        _record_lod_material_sources(result, source, 0, source["source"])
     for source in source_specs:
         if source["group"] is None and source["source"]:
             result.qc_lines.append(f'$body "automatic" {_quoted(source["source"])}')
@@ -917,14 +948,27 @@ def write_appearance(gltf: dict, buffer: bytes, skin, coord, out_dir: Path, *,
         sizes = {len(family["m_materials"]) for family in skins}
         if len(sizes) != 1:
             raise ValueError("Source material families have incompatible slot counts")
-        result.qc_lines.extend(['$texturegroup "skinfamilies"', "{"])
-        for family in result.report["skins"]:
-            result.qc_lines.append("    { " + " ".join(_quoted(token) for token in family["target_materials"]) + " }")
-        result.qc_lines.append("}")
+        skin_qc, skin_references = dmx_skin_material_qc(source_specs, material_plan, len(skins))
+        result.report["material_skin_references"] = skin_references
+        if skin_qc:
+            result.qc_lines.extend(skin_qc)
+        else:
+            result.qc_lines.extend(['$texturegroup "skinfamilies"', "{"])
+            for skin_index, family in enumerate(result.report["skins"]):
+                tokens = [*family["target_materials"],
+                          *(slot["skin_materials"][skin_index] for slot in material_plan["skin_slots"])]
+                result.qc_lines.append("    { " + " ".join(_quoted(token) for token in tokens) + " }")
+            result.qc_lines.append("}")
     result.report["material_map"] = {material: target_material_token(material) for material in sorted(materials)}
+    for selected in material_plan["streams"].values():
+        for primitive in selected:
+            source = primitive["source_material"]
+            result.report["material_map"][source] = target_material_token(source)
+    for source in material_plan["aliases"].values():
+        result.report["material_map"][source] = target_material_token(source)
     result.qc_lines.extend(_write_authored_lods(
         gltf, skin, coord, fidelity, lookup, source_specs, output, writer, rig, result,
-        rename, primitive_transform, morph_transform, cancel,
+        rename, primitive_transform, morph_transform, cancel, material_plan,
     ))
     result.addon_drivers = dict(
         bodygroup_defaults={group["name"]: group["default"] for group in groups},
@@ -993,6 +1037,12 @@ def write_appearance(gltf: dict, buffer: bytes, skin, coord, out_dir: Path, *,
     result.report["material_adaptations"] = [dict(source=source, target=target,
         reason="Source 1 discards geometry with this reserved token; original texture and slot preserved")
         for source, target in result.report["material_map"].items() if source != target]
+    result.report["lod_material_adaptations"] = [dict(target=target, source=source,
+        reason="Choice-local stable LOD0 carrier; identical original VMT bytes and explicit per-LOD/skin replacements")
+        for target, source in result.report["material_aliases"].items()]
+    if result.report["lod_material_adaptations"]:
+        result.report["warnings"].append("Lower-LOD-only authored materials use stable choice-local compiler slots "
+            "with identical base VMT aliases and explicit per-LOD/skin material replacements; all source triangles retained.")
     for adaptation in result.report["material_adaptations"]:
         result.report["warnings"].append(f"Authored material {adaptation['source']} uses safe target alias "
                                          f"{adaptation['target']} to preserve its geometry and textures.")

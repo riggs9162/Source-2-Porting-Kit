@@ -175,6 +175,11 @@ that need different morph deltas, finalization separates their storage while
 keeping vertex attributes and triangle topology unchanged. Reports measure the
 extra vertex-buffer space, compiler welding and Source 1 morph precision.
 
+Lower LODs with different materials use stable compiler slots and explicit
+per-LOD, per-skin QC material replacements. Generated VMT aliases reuse the
+original shader bytes and textures. Compiled validation compares material and
+triangle coverage for every bodygroup choice and LOD before packaging.
+
 Source 1 imposes differences that the report measures. Capsule and sphere
 tessellation targets at most 0.05 inches surface error and 1% volume error.
 Native convex-polyhedron serialization retains those prepared shapes after
