@@ -438,7 +438,9 @@ class VmatParser:
                 # The tintmask role tokens include the generic "mask", so its
                 # sibling search only runs when the vmat asked for a tint mask.
                 allow_siblings = (not ambiguous and
-                                  (role != "tintmask" or flags.get("F_TINT_MASK") == "1"))
+                                  (role != "tintmask" or flags.get("F_TINT_MASK") == "1") and
+                                  (role != "translucency" or raw is not None
+                                   or entry.translucent or entry.alphatest))
                 sibling = self._sibling_for(path, role) if allow_siblings else None
                 if sibling is not None:
                     resolved = sibling
