@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shutil
 import threading
@@ -177,6 +178,20 @@ def input_signature(options, assets: list[RagdollAsset]) -> str:
         stat = path.stat()
         digest.update(f"{path}|{stat.st_size}|{stat.st_mtime_ns}\n".encode())
     return digest.hexdigest()
+
+
+def _equivalent_options(saved: dict, options) -> bool:
+    """Compare actual filesystem locations while retaining every non-path setting exactly."""
+    from s2kit.pipelines.workflow import WorkflowOptions
+
+    previous, current = asdict(WorkflowOptions(**saved)), asdict(options)
+    paths = ("source", "project", "material_source", "vrf_executable", "compiler", "game",
+             "gmod_addons", "animation_cache")
+    for values in (previous, current):
+        for key in paths:
+            if values[key]:
+                values[key] = os.path.normcase(str(Path(values[key]).resolve()))
+    return previous == current
 
 
 def _paths(options, asset: RagdollAsset) -> tuple[Path, Path, Path]:
@@ -710,10 +725,17 @@ def run_ragdoll_workflow(options, *, inspect_only: bool = False,
                  "status": "planned"}
         if checkpoint.is_file() and not inspect_only:
             saved = json.loads(checkpoint.read_text(encoding="utf-8"))
-            if saved.get("version") != 2 or saved.get("options") != asdict(options):
+            saved_options = saved.get("options", {})
+            if saved.get("version") != 2 or not _equivalent_options(saved_options, options):
                 raise ValueError("This project uses different settings; choose a separate project folder")
-            if saved.get("signature") == signature:
+            same_inputs = saved.get("signature") == signature
+            if not same_inputs and saved_options != asdict(options):
+                from s2kit.pipelines.workflow import WorkflowOptions
+
+                same_inputs = saved.get("signature") == input_signature(WorkflowOptions(**saved_options), assets)
+            if same_inputs:
                 state = saved
+                state.update(options=asdict(options), signature=signature)
         queue = [("calibrate", "calibrate", None, [])]
         for asset in assets:
             prerequisite = []
