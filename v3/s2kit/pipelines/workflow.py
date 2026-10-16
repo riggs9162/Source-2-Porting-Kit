@@ -383,8 +383,9 @@ def write_report(project: Path, state: dict) -> Path:
         for record in state.get("tasks", {}).values():
             for name in record.get("outputs", {}):
                 path = Path(name)
-                if path.name in {"ragdoll-report.json", "playermodel-report.json", "compiled-report.json", "material-report.json"}:
-                    lines.append(f"- [{path.name}]({path.as_posix()})")
+                if path.name in {"ragdoll-report.json", "playermodel_report.json", "playermodel-report.json",
+                                 "compiled-report.json", "material-report.json"}:
+                    lines.append(f"- [{path.name}](<{path.as_posix()}>)")
         lines.extend(["", "## Validation", "",
                       "- Compiled outputs are packaged only after file-consistency checks and available physics audits.",
                       "- Source primitives, joint envelopes, shader conversion and generated physics retain their individual adaptation reports.",
