@@ -1,0 +1,24 @@
+# Source 2 Porting Kit v3 (Flet rebuild)
+#
+# Install with:  python -m pip install -r requirements.txt
+# Or let the bootstrapper do it:  python run.py --install
+#
+# Required -----------------------------------------------------------
+flet>=0.86            # UI framework (0.86 API: ft.run, @ft.control, ft.Colors)
+flet-desktop>=0.86    # native desktop window host
+flet-web>=0.86
+Pillow>=10            # image decode/encode for the texture viewer
+numpy>=1.24           # pixel + mesh maths, waveform peaks, the mesh rasteriser
+#
+# Optional -----------------------------------------------------------
+# The app starts and runs without these; the tools that need them say so.
+sourcepp>=2025.11.5   # VTF read/write
+trimesh>=4.0          # GLB/OBJ/STL/PLY/DAE loading for the model viewer
+scipy>=1.10           # convex hulls (trimesh -> scipy.spatial/qhull)
+srctools>=2.6         # Source 1 formats (VMT/KeyValues/MDL)
+#
+# External programs (not pip-installable) ----------------------------
+#   ffmpeg / ffprobe   audio decode, waveforms, conversion
+#   Source2Viewer-CLI  Source 2 asset extraction
+#   studiomdl          Source 1 model compiles
+# Point at them in Preferences > External programs, or put them on PATH.
