@@ -130,6 +130,14 @@ local function BuildModelFlexes(entity, count, weights)
         end
     end
 
+    for target, value in pairs(state.correctiveMorphWeights or {}) do
+        local index = indices[target]
+
+        if ( index and index < count ) then
+            weights[index] = value
+        end
+    end
+
     for target, value in pairs(state.skinMorphWeights or {}) do
         local index = indices[target]
 
@@ -164,7 +172,7 @@ local function SourceModelBasis(entity)
     end
 
     local model = Matrix()
-    model:SetAngles(entity:GetAngles())
+    model:SetAngles(entity:GetRenderAngles() or entity:GetAngles())
 
     return model * config.compilerBasis * config.sourceModelRotation
 end
@@ -515,6 +523,10 @@ local function ApplyPoseMorph(entity, constraint, state)
         if ( index ) then
             entity:SetFlexWeight(index, value)
         end
+
+        for _, target in ipairs((config.corrective_flex_targets or {})[name] or {}) do
+            state.correctiveMorphWeights[target] = value
+        end
     end
 end
 
@@ -729,6 +741,7 @@ local function BuildModelBones(entity)
         end
     end
 
+    state.correctiveMorphWeights = {}
     ApplyProcedurals(entity, state)
 end
 

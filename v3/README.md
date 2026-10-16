@@ -113,9 +113,14 @@ or a headless CLI.
 
 Open **Porting Workflow**, leave **GMod ragdoll addon** selected, and paste
 Source 2 Viewer VPK model URLs one per line. Choose a project folder outside
-the source installation and a lowercase output namespace. Set StudioMDL CE and
+the source installation and a lowercase output namespace. Set 32-bit StudioMDL CE and
 its compile game folder here or in Preferences, then press **Port**. These
 settings and the batch inputs are saved.
+
+Exact collision serialization uses the compiler's VPhysics library and a small
+local helper built with the Windows .NET Framework C# compiler. Enable .NET
+Framework 4.8 if that compiler is unavailable. The completed GMod addon contains
+the finalized collision data and needs neither helper nor compiler at runtime.
 
 The default produces native ragdolls. **Include original Alyx animations**,
 **Also create humanoid playermodels**, and **Install completed addon into GMod**
@@ -151,13 +156,23 @@ bones. Original morph animation uses a model-scoped GMod flex callback;
 unsupported Source 2 simulation remains documented alongside its source data.
 
 Source 1 imposes differences that the report measures. Capsule and sphere
-tessellation targets at most 0.05 inches surface error and 1% volume error
-before compilation; the compiler can simplify those convex meshes further.
-The compiled PHY audit records that change, body masses and constraint values.
+tessellation targets at most 0.05 inches surface error and 1% volume error.
+Native convex-polyhedron serialization retains those prepared shapes after
+compilation, avoiding the compiler's coarse convex rebuilding. The decoded PHY
+audit checks individual shape separation, surface bounds, volume, body masses
+and constraint values. Analytic tessellation and required thickness repairs
+remain separately documented.
+Spheres and capsules can use widened temporary compiler inputs; finalization
+restores their original dimensions and records both meshes in the audit.
 Coupled swing cones become independent-axis envelopes, motors become calibrated
 friction where possible, and weighted attachments receive an explicit binding
 adaptation. The Alyx metrocop choreo model has no authored PHYS; its labelled
 generated fallback uses its 18 AO capsules and a humanoid joint preset.
+
+Source 1 skinning supports three bone influences per vertex. The port retains
+the strongest three and renormalizes them; reports measure affected vertices,
+discarded weights and normalization changes separately for primary and authored
+LOD meshes. The extracted sources retain every original influence.
 
 Only successful compiled models with complete materials enter the addon.
 Binary audits check skeleton binds, bodygroups, skins, material resources,

@@ -152,6 +152,15 @@ def input_signature(options, assets: list[RagdollAsset]) -> str:
                 for dependency in (source.parent / (source.stem + "_fidelity")).rglob("*"):
                     if dependency.is_file():
                         files.add(dependency)
+                if fidelity.get("morphs"):
+                    from s2kit.pipelines.morph_atlas import morph_atlas_path
+
+                    resolved = dict(fidelity, _sidecar_directory=str(source.parent))
+                    for morph in fidelity["morphs"]:
+                        if morph.get("m_pTextureAtlas"):
+                            dependency = morph_atlas_path(resolved, morph)
+                            if dependency.is_file():
+                                files.add(dependency)
             if asset.material_root and Path(asset.material_root).is_dir():
                 files.update(path for path in Path(asset.material_root).rglob("*") if path.is_file())
     if options.material_source:
@@ -673,10 +682,10 @@ def _stage_signature(kind: str) -> str:
     names = {
         "extract": ["vrf", "model_fidelity", "model_metadata", "native_lods"],
         "native": ["ragdoll_port", "ragdoll_physics", "ragdoll_appearance", "model_fidelity",
-                   "gltf_accessors", "ragdoll_flex", "ragdoll_runtime", "ragdoll_correctives",
+                   "gltf_accessors", "morph_atlas", "ragdoll_flex", "ragdoll_runtime", "ragdoll_correctives",
                    "ragdoll_attachments", "ragdoll_animations", "morph_animation", "model_metadata", "smd_animation_export",
                    "gltf_animation", "glb_skin", "native_port", "skeleton_retarget"],
-        "player": ["ragdoll_playermodel", "player_animations", "ragdoll_appearance", "procedural_bones",
+        "player": ["ragdoll_playermodel", "player_animations", "ragdoll_appearance", "morph_atlas", "procedural_bones",
                    "ragdoll_physics", "ragdoll_flex", "ragdoll_runtime", "ragdoll_correctives",
                    "ragdoll_animations", "morph_animation", "model_metadata", "smd_animation_export",
                    "gltf_animation", "glb_skin", "native_port", "skeleton_retarget"],

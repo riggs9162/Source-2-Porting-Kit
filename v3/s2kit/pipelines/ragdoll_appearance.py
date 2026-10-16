@@ -7,6 +7,7 @@ import json
 import math
 import re
 import struct
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -29,6 +30,7 @@ class AppearanceResult:
     report: dict = field(default_factory=dict)
     addon_drivers: dict = field(default_factory=dict)
     flex_sources: list[tuple[Path, Path]] = field(default_factory=list)
+    weight_sources: dict[tuple, set[int]] = field(default_factory=dict)
 
 
 def _quoted(value: str) -> str:
@@ -41,6 +43,19 @@ def _quoted(value: str) -> str:
 def _filename(value: str) -> str:
     """Use portable source filenames without changing displayed source names."""
     return re.sub(r"[^A-Za-z0-9_-]", "_", value).strip("_") or "body"
+
+
+def target_material_token(value: str) -> str:
+    """Escape authored material identities that Source 1 otherwise treats as missing geometry."""
+    token = resource_token(value)
+    return "__s2kit_reserved/" + token if token.casefold() == "debug/debugempty" else token
+
+
+def _map_primitive_materials(primitives: list[dict]) -> None:
+    """Retain the original resource identity alongside its compiler-safe material token."""
+    for primitive in primitives:
+        source = primitive.setdefault("source_material", primitive["material"])
+        primitive["material"] = target_material_token(source)
 
 
 def _mesh_name(value: str) -> str:
@@ -116,6 +131,8 @@ def extract_primitives(gltf: dict, buffer: bytes, skin, *, bone_name_map=None) -
                 material=resource_token(material_reference), targets=targets,
                 gltf_mesh_index=mesh_index, primitive_index=primitive_index,
                 node_index=node_index, mesh_name=_mesh_name(mesh.get("name") or node.get("name", "")),
+                weight_stream=("gltf", node["skin"], *(attributes.get(name, -1) for name in
+                    ("POSITION", "JOINTS_0", "WEIGHTS_0", "JOINTS_1", "WEIGHTS_1"))),
             ))
     if not primitives:
         raise ValueError("The model has no skinned render primitives")
@@ -144,7 +161,8 @@ def _authored_mesh_lookup(fidelity: dict, primitives: list[dict]) -> dict[int, l
     return lookup
 
 
-def _read_dmx_primitives(path: Path, target_skin, source_coord, rename: dict) -> list[dict]:
+def _read_dmx_primitives(path: Path, target_skin, source_coord, rename: dict, *,
+                         atlas_morphs=None, morph_report=None) -> list[dict]:
     """Read authored lower-LOD DMX streams into the source glTF's coordinate space."""
     from s2kit.vendor import valve_datamodel
 
@@ -158,11 +176,26 @@ def _read_dmx_primitives(path: Path, target_skin, source_coord, rename: dict) ->
     mapped = {index: target_lookup[rename.get(element.name, element.name)]
               for index, element in enumerate(source_bones)
               if rename.get(element.name, element.name) in target_lookup}
-    return [primitive for mesh in meshes
-            for primitive in _read_dmx_mesh(mesh, mapped, source_bones, source_coord, path)]
+    slices = [(0, 0)] * len(meshes)
+    if atlas_morphs is not None:
+        from s2kit.pipelines.morph_atlas import morph_buffer_slices
+
+        targets, mdat, atlas_path = atlas_morphs
+        count = len(next(iter(next(iter(targets.values())).values())))
+        slices = morph_buffer_slices(meshes, mdat, count)
+        if morph_report is not None:
+            morph_report.update(atlas=str(atlas_path), native_source=str(path),
+                                target_names=list(targets), buffer_slices=slices,
+                                source="Retained MRPH and lossless RGBA8 atlas")
+    return [primitive for mesh, (offset, count) in zip(meshes, slices)
+            for primitive in _read_dmx_mesh(mesh, mapped, source_bones, source_coord, path,
+                atlas_targets=None if atlas_morphs is None else {
+                    name: {channel: values[offset:offset + count, :3] for channel, values in channels.items()}
+                    for name, channels in atlas_morphs[0].items()})]
 
 
-def _read_dmx_mesh(mesh, mapped: dict, source_bones, source_coord, path: Path) -> list[dict]:
+def _read_dmx_mesh(mesh, mapped: dict, source_bones, source_coord, path: Path, *,
+                   atlas_targets=None) -> list[dict]:
     """Decode one vertex-buffer mesh within a reconstructed Source 2 DMX model."""
     state = mesh["currentState"]
     position_key = "position$0" if "position$0" in state else "positions"
@@ -195,6 +228,12 @@ def _read_dmx_mesh(mesh, mapped: dict, source_bones, source_coord, path: Path) -
                 values[selection] = changes
                 channels[target] = values
         source_targets[delta.name] = channels
+    for name, channels in (atlas_targets or {}).items():
+        for channel, values in channels.items():
+            length = len(positions) if channel == "POSITION" else len(normals)
+            if len(values) != length:
+                raise ValueError("Morph atlas vertex count differs from native DMX channel")
+            source_targets.setdefault(name, {}).setdefault(channel, np.asarray(values, dtype=np.float64))
     output = []
     for face_set in mesh["faceSets"]:
         faces = []
@@ -234,7 +273,8 @@ def _read_dmx_mesh(mesh, mapped: dict, source_bones, source_coord, path: Path) -
         output.append(dict(vertices=vertices, normals=normal_values, uv=uv[uindex].copy(),
                            vj=mapped_joints[pindex].copy(), vw=weights[pindex].copy(),
                            indices=np.arange(len(faces)), material=resource_token(face_set["material"]["mtlName"]),
-                           targets=targets, source_dmx=str(path)))
+                           targets=targets, source_dmx=str(path), weight_vertex_indices=pindex,
+                           weight_stream=("dmx", str(path), str(mesh.id), str(state.id))))
     return output
 
 
@@ -293,8 +333,133 @@ def _geometry_vectors(values: np.ndarray, coord, *, direction: bool = False) -> 
     return result
 
 
+def _restore_base_morph_channels(fidelity: dict, lookup: dict, coord) -> list[dict]:
+    """Restore omitted base normal deltas only after atlas positions independently match exported morphs."""
+    from s2kit.pipelines.morph_atlas import load_mesh_morphs, morph_buffer_layout
+
+    reports = []
+    for mesh in fidelity["meshes"]:
+        if mesh["index"] not in lookup:
+            continue
+        atlas_morphs = load_mesh_morphs(fidelity, mesh)
+        if atlas_morphs is None:
+            continue
+        targets, mdat, path = atlas_morphs
+        streams = {}
+        for primitive in lookup[mesh["index"]]:
+            streams.setdefault(primitive["weight_stream"], []).append(primitive)
+        entries = morph_buffer_layout(mdat)
+        if len(streams) != len(entries):
+            raise ValueError("Base glTF morph buffers differ from original MDAT draw calls")
+        maximum_error = 0.0
+        recovered = set()
+        for primitives, entry in zip(streams.values(), entries):
+            count, offset = len(primitives[0]["vertices"]), entry["offset"]
+            if count != entry["extent"] or sorted(primitive["material"] for primitive in primitives) != sorted(entry["materials"]):
+                raise ValueError("Base glTF morph vertex extent or material membership differs from MDAT")
+            for primitive in primitives:
+                for name, channels in targets.items():
+                    if any(offset + count > len(values) for values in channels.values()):
+                        raise ValueError("Base glTF morph vertices exceed their authored atlas grid")
+                    existing = primitive["targets"].get(name, {})
+                    for channel, values in channels.items():
+                        decoded = values[offset:offset + count, :3].astype(np.float64)
+                        if channel in existing:
+                            actual = _geometry_vectors(existing[channel], coord, direction=channel == "NORMAL")
+                            error = float(np.max(np.abs(actual - decoded), initial=0))
+                            maximum_error = max(maximum_error, error)
+                            if error > 1e-5:
+                                raise ValueError(f"Base morph atlas does not match glTF {name} {channel}: {error:.9g}")
+                            continue
+                        if coord.swap_axes:
+                            decoded = decoded @ SOURCE2_BASIS[:3, :3]
+                        if channel == "POSITION":
+                            decoded /= coord.scale
+                        primitive["targets"].setdefault(name, {})[channel] = decoded
+                        recovered.add(channel)
+        reports.append(dict(mesh=mesh["index"], atlas=str(path), target_names=list(targets),
+                            recovered_channels=sorted(recovered), position_comparison_maximum=maximum_error,
+                            buffer_slices=[(entry["offset"], entry["extent"]) for entry in entries]))
+    return reports
+
+
+def source1_skin_links(links: Iterable[tuple[int, float]]) -> list[tuple[int, float]]:
+    """Keep the strongest three merged influences, with authored slot order breaking ties."""
+    merged = {}
+    for joint, weight in links:
+        joint, weight = int(joint), float(weight)
+        if not math.isfinite(weight) or weight < 0:
+            raise ValueError("A source vertex contains an invalid bone weight")
+        if weight:
+            merged[joint] = merged.get(joint, 0.0) + weight
+    selected = sorted(merged.items(), key=lambda item: -item[1])[:3]
+    total = sum(weight for _, weight in selected)
+    if not selected or total <= 0:
+        raise ValueError("A bodygroup mesh has an unweighted vertex")
+    return [(joint, weight / total) for joint, weight in selected]
+
+
+def _record_skin_weights(primitives: list[dict], result: AppearanceResult) -> None:
+    """Measure target influence loss once per authored vertex stream without modifying it."""
+    report = result.report.setdefault("skin_weights", dict(status="preserved", target_max_influences=3,
+        vertex_count=0, affected_vertices=0, source_max_influences=0,
+        discarded_weight_sum=0.0, max_discarded_weight=0.0, mean_discarded_weight=0.0,
+        max_normalization_difference=0.0, normalization_difference_sum=0.0,
+        mean_normalization_difference=0.0, source_weight_sum_max_deviation=0.0,
+        tie_policy="First authored influence slot", source_weights_retained_in_extraction=True,
+        geometry_sources="Base GLB plus authored lower-LOD DMX meshes",
+        normalization_metric="Maximum surviving influence increase from its original normalized weight",
+        by_geometry_source={},
+        vertex_scope="Unique referenced vertices per source geometry and skin-weight stream"))
+    for primitive in primitives:
+        key = primitive.get("weight_stream", ("primitive", id(primitive)))
+        seen = result.weight_sources.setdefault(key, set())
+        source_indices = primitive.get("weight_vertex_indices")
+        for index in np.unique(primitive["indices"]):
+            source_index = int(source_indices[index]) if source_indices is not None else int(index)
+            if source_index in seen:
+                continue
+            seen.add(source_index)
+            joints, weights = primitive["vj"][index], primitive["vw"][index]
+            merged = {}
+            for joint, weight in zip(joints, weights):
+                if weight > 0:
+                    merged[int(joint)] = merged.get(int(joint), 0.0) + float(weight)
+            total = sum(merged.values())
+            reduced = source1_skin_links(merged.items())
+            source_kind = "authored_lod_dmx" if key[0] == "dmx" else "base_glb"
+            source = report["by_geometry_source"].setdefault(source_kind, dict(vertex_count=0,
+                affected_vertices=0, max_discarded_weight=0.0, discarded_weight_sum=0.0,
+                mean_discarded_weight=0.0, max_normalization_difference=0.0))
+            source["vertex_count"] += 1
+            report["vertex_count"] += 1
+            report["source_max_influences"] = max(report["source_max_influences"], len(merged))
+            report["source_weight_sum_max_deviation"] = max(report["source_weight_sum_max_deviation"], abs(total - 1))
+            if len(merged) <= 3:
+                continue
+            discarded = max(0.0, 1.0 - sum(merged[joint] for joint, _ in reduced) / total)
+            normalization = max(abs(weight - merged[joint] / total) for joint, weight in reduced)
+            report["affected_vertices"] += 1
+            source["affected_vertices"] += 1
+            source["discarded_weight_sum"] += discarded
+            source["max_discarded_weight"] = max(source["max_discarded_weight"], discarded)
+            source["max_normalization_difference"] = max(source["max_normalization_difference"], normalization)
+            source["mean_discarded_weight"] = source["discarded_weight_sum"] / source["affected_vertices"]
+            report["discarded_weight_sum"] += discarded
+            report["max_discarded_weight"] = max(report["max_discarded_weight"], discarded)
+            report["normalization_difference_sum"] += normalization
+            report["max_normalization_difference"] = max(report["max_normalization_difference"], normalization)
+    affected = report["affected_vertices"]
+    if affected:
+        report["status"] = "adapted"
+        report["adaptation"] = "Source 1 supports three bone influences; strongest three retained and renormalized"
+        report["mean_discarded_weight"] = report["discarded_weight_sum"] / affected
+        report["mean_normalization_difference"] = report["normalization_difference_sum"] / affected
+        report["mean_population"] = "Affected vertices"
+
+
 def write_reference(path: Path, skin, primitives: list[dict], coord) -> None:
-    """Write exact selected meshes using the model's complete source skeleton."""
+    """Write selected meshes on the complete source skeleton with target-compatible links."""
     ok, error = SmdAnimationExporter.write_animation(skin, [derive_bind_pose_local(skin)], path, coord)
     if not ok:
         raise ValueError(error)
@@ -306,10 +471,7 @@ def write_reference(path: Path, skin, primitives: list[dict], coord) -> None:
             for face in primitive["indices"].reshape(-1, 3):
                 output.write(primitive["material"] + "\n")
                 for index in face:
-                    links = [(int(joint), float(weight)) for joint, weight in
-                             zip(primitive["vj"][index], primitive["vw"][index]) if weight > 0]
-                    if not links:
-                        raise ValueError("A bodygroup mesh has an unweighted vertex")
+                    links = source1_skin_links(zip(primitive["vj"][index], primitive["vw"][index]))
                     uv = primitive["uv"][index]
                     output.write(smd_vertex_line([*vertices[index], *normals[index], uv[0], 1.0 - uv[1]], links))
         output.write("end\n")
@@ -590,6 +752,7 @@ def source_twist_drivers(gltf: dict, buffer: bytes, target_skin, target_coord,
 def _write_choice_source(stem: str, output: Path, selected: list[dict], skin, coord,
                           writer, rig: dict, result: AppearanceResult, morph_transform) -> str:
     """Write one compiled submodel with its paired flex-DMX representation when needed."""
+    _record_skin_weights(selected, result)
     destination = output / (stem + ".smd")
     writer(destination, skin, selected, coord)
     result.files.append(destination)
@@ -598,8 +761,9 @@ def _write_choice_source(stem: str, output: Path, selected: list[dict], skin, co
     from s2kit.pipelines.ragdoll_flex import write_flex_dmx
 
     dmx = destination.with_suffix(".dmx")
-    write_flex_dmx(dmx, destination, selected, coord, rig, morph_transform=morph_transform,
-                   define_controls=not result.flex_sources)
+    compacted = write_flex_dmx(dmx, destination, selected, coord, rig, morph_transform=morph_transform,
+                               define_controls=not result.flex_sources)
+    result.report.setdefault("flex_geometry", []).append(dict(source=dmx.name, **compacted))
     result.files.append(dmx)
     result.flex_sources.append((dmx, destination))
     return dmx.name
@@ -649,7 +813,15 @@ def _write_authored_lods(gltf, skin, coord, fidelity, lookup, source_specs, outp
                 if not relative:
                     raise ValueError(f"Authored lower-LOD source is missing for {mesh_by_index[index]['name']}; preserve model LOD sources first")
                 path = sidecar_directory / relative
-                prims = _read_dmx_primitives(path, skin, source_coord, rename)
+                from s2kit.pipelines.morph_atlas import load_mesh_morphs
+
+                atlas_morphs = load_mesh_morphs(fidelity, mesh_by_index[index])
+                morph_report = {}
+                prims = _read_dmx_primitives(path, skin, source_coord, rename,
+                    atlas_morphs=atlas_morphs, morph_report=morph_report)
+                if morph_report:
+                    result.report.setdefault("lod_morphs", []).append(dict(mesh=index, **morph_report))
+                _map_primitive_materials(prims)
                 if primitive_transform is not None:
                     transformed = primitive_transform(prims)
                     if transformed is not None:
@@ -663,7 +835,7 @@ def _write_authored_lods(gltf, skin, coord, fidelity, lookup, source_specs, outp
             replacements.append(dict(base=source["source"], replacement=destination,
                                      source_meshes=selected_indices))
             for primitive in selected:
-                result.report["material_map"][primitive["material"]] = primitive["material"]
+                result.report["material_map"][primitive.get("source_material", primitive["material"])] = primitive["material"]
         qc.append("}")
         result.report["lods"].append(dict(level=level, source_threshold=distance,
                                           target_distance=distance, replacements=replacements,
@@ -681,10 +853,15 @@ def write_appearance(gltf: dict, buffer: bytes, skin, coord, out_dir: Path, *,
     output.mkdir(parents=True, exist_ok=True)
     rename = bone_name_map or {}
     primitives = extract_primitives(gltf, buffer, skin, bone_name_map=rename)
+    from s2kit.pipelines.native_port import coordinate_mode
+
+    base_morphs = _restore_base_morph_channels(
+        fidelity, _authored_mesh_lookup(fidelity, primitives), coordinate_mode(gltf))
     if primitive_transform is not None:
         transformed = primitive_transform(primitives)
         if transformed is not None:
             primitives = transformed
+    _map_primitive_materials(primitives)
     lookup = _authored_mesh_lookup(fidelity, primitives)
     automatic, groups = authored_bodygroups(fidelity)
     result = AppearanceResult()
@@ -692,6 +869,7 @@ def write_appearance(gltf: dict, buffer: bytes, skin, coord, out_dir: Path, *,
                          source_meshes=len(lookup), material_map={}, skins=[], lods=[],
                          unsupported=[], flexes={}, modelname=modelname,
                          warnings=list(fidelity.get("warnings", [])))
+    result.report["base_morphs"] = base_morphs
     writer = reference_writer or write_reference
     rig, unsupported = flex_rig(fidelity)
     result.report["unsupported"].extend(unsupported)
@@ -727,21 +905,22 @@ def write_appearance(gltf: dict, buffer: bytes, skin, coord, out_dir: Path, *,
             source = next(item for item in source_specs if item["group"] == group["name"] and item["choice"] == choice["value"])
             result.qc_lines.append(f'    studio {_quoted(source["source"])}' if source["source"] else "    blank")
         result.qc_lines.append("}")
-    materials = {primitive["material"] for primitive in primitives}
+    materials = {primitive["source_material"] for primitive in primitives}
     skins = fidelity.get("skins", [])
     for family in skins:
         tokens = [resource_token(material) for material in family["m_materials"]]
         materials.update(tokens)
-        result.report["skins"].append(dict(name=family["m_name"], materials=tokens))
+        result.report["skins"].append(dict(name=family["m_name"], materials=tokens,
+                                           target_materials=[target_material_token(token) for token in tokens]))
     if len(skins) > 1:
         sizes = {len(family["m_materials"]) for family in skins}
         if len(sizes) != 1:
             raise ValueError("Source material families have incompatible slot counts")
         result.qc_lines.extend(['$texturegroup "skinfamilies"', "{"])
         for family in result.report["skins"]:
-            result.qc_lines.append("    { " + " ".join(_quoted(token) for token in family["materials"]) + " }")
+            result.qc_lines.append("    { " + " ".join(_quoted(token) for token in family["target_materials"]) + " }")
         result.qc_lines.append("}")
-    result.report["material_map"] = {material: material for material in sorted(materials)}
+    result.report["material_map"] = {material: target_material_token(material) for material in sorted(materials)}
     result.qc_lines.extend(_write_authored_lods(
         gltf, skin, coord, fidelity, lookup, source_specs, output, writer, rig, result,
         rename, primitive_transform, morph_transform, cancel,
@@ -764,12 +943,24 @@ def write_appearance(gltf: dict, buffer: bytes, skin, coord, out_dir: Path, *,
 
     prepared = prepare_corrective_drivers(result.addon_drivers)
     result.addon_drivers.update(prepared)
+    corrective_controllers = {name for constraint in prepared["runtime_constraints"]
+                              if constraint["kind"] == "pose_morph" for name in constraint["outputs"]}
+    corrective_targets = {}
+    for target, operations in rig["rules"].items():
+        if (len(operations) == 1 and operations[0]["opcode"] == "FETCH1"
+                and operations[0]["controller"] in corrective_controllers):
+            corrective_targets.setdefault(operations[0]["controller"], []).append(target)
+    result.addon_drivers["corrective_flex_targets"] = corrective_targets
     procedural_qc, procedural_report = _procedural_qc(fidelity, rename, set(skin.joint_names))
     translated = {record["source_index"] for record in twists}
     translated.update(record["source_index"] for record in prepared["runtime_constraints"])
     translated.update(record["source_index"] for record in prepared["inert_runtime_constraints"])
     procedural_report["runtime_twists"] = twists
     procedural_report["runtime_constraint_summary"] = prepared["runtime_constraint_summary"]
+    procedural_report["morph_output_precedence"] = dict(
+        policy="Source bone constraints override decoded animation controller values",
+        direct_targets=corrective_targets,
+        combined_animated_controllers=sorted(corrective_controllers - corrective_targets.keys()))
     procedural_report["unsupported_constraints"] = [record for record in procedural_report["unsupported_constraints"]
                                                      if record["index"] not in translated]
     for record in procedural_report["unsupported_constraints"]:
@@ -780,6 +971,19 @@ def write_appearance(gltf: dict, buffer: bytes, skin, coord, out_dir: Path, *,
     result.qc_lines.extend(procedural_qc)
     result.report["procedural"] = procedural_report
     result.report["sources"] = source_specs
+    if len(set(result.report["material_map"].values())) != len(result.report["material_map"]):
+        raise ValueError("Compiler-safe material aliases collide with an authored source resource")
+    result.report["material_adaptations"] = [dict(source=source, target=target,
+        reason="Source 1 discards geometry with this reserved token; original texture and slot preserved")
+        for source, target in result.report["material_map"].items() if source != target]
+    for adaptation in result.report["material_adaptations"]:
+        result.report["warnings"].append(f"Authored material {adaptation['source']} uses safe target alias "
+                                         f"{adaptation['target']} to preserve its geometry and textures.")
+    if result.report.get("skin_weights", {}).get("affected_vertices"):
+        weights = result.report["skin_weights"]
+        result.report["warnings"].append(f"Source 1 retained the strongest three bone influences on "
+            f"{weights['affected_vertices']} vertices; maximum discarded source weight "
+            f"{weights['max_discarded_weight']:.6%}, mean {weights['mean_discarded_weight']:.6%}.")
     report = output / "appearance_report.json"
     report.write_text(json.dumps(result.report, indent=2) + "\n", encoding="utf-8")
     result.files.append(report)

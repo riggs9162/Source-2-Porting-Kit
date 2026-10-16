@@ -192,6 +192,8 @@ def _transform(document, name: str, position=None, orientation=None):
 
 def _set_skeleton(document, model, mesh_dag, bones: list[dict], corners: list[dict], vertex_data) -> None:
     """Write Source 1 joint lists and indexed weights from the current SMD bind."""
+    from s2kit.pipelines.ragdoll_appearance import source1_skin_links
+
     elements = []
     transforms = []
     for bone in bones:
@@ -215,11 +217,14 @@ def _set_skeleton(document, model, mesh_dag, bones: list[dict], corners: list[di
     bind = document.add_element("bind", "DmeTransformList")
     bind["transforms"] = dmx.make_array(transforms, dmx.Element)
     model["baseStates"] = dmx.make_array([bind], dmx.Element)
-    count = max(len(corner["links"]) for corner in corners)
+    source_indices = (list(vertex_data["s2kitSourceCornerIndices"])
+                      if "s2kitSourceCornerIndices" in vertex_data else range(len(corners)))
+    if any(index < 0 or index >= len(corners) for index in source_indices):
+        raise ValueError("Indexed flex mesh references an absent reference-SMD corner")
+    limited = [source1_skin_links(corners[index]["links"]) for index in source_indices]
+    count = max(len(links) for links in limited)
     weights, indices = [], []
-    for corner in corners:
-        total = sum(weight for _, weight in corner["links"])
-        links = [(joint, weight / total) for joint, weight in corner["links"]]
+    for links in limited:
         links += [(0, 0.0)] * (count - len(links))
         indices.extend(joint for joint, _ in links)
         weights.extend(weight for _, weight in links)
@@ -235,8 +240,64 @@ def _delta_stream(document, target, name: str, values: np.ndarray) -> None:
     target[name + "Indices"] = dmx.make_array(indices.tolist(), int)
 
 
+def _compact_geometry(mesh, vertex_data) -> dict:
+    """Weld only vertices whose geometry, skin links and every morph channel are identical."""
+    if "s2kitSourceCornerIndices" in vertex_data:
+        return dict(source_corners=vertex_data["s2kitSourceCornerCount"],
+                    vertices=len(vertex_data["positions"]), indexed=True)
+    count = len(vertex_data["positions"])
+    fields = [("positions", dmx.Vector3), ("normals", dmx.Vector3), ("textureCoordinates", dmx.Vector2)]
+    streams = {}
+    key_fields = []
+    for name, _ in fields:
+        if list(vertex_data[name + "Indices"]) != list(range(count)):
+            raise ValueError("Flex geometry compaction requires generated reference-corner streams")
+        streams[name] = np.asarray(vertex_data[name], dtype=np.float32)
+        key_fields.append(streams[name])
+    joint_count = int(vertex_data["jointCount"])
+    joints = np.asarray(vertex_data["jointIndices"], dtype=np.int32).reshape(count, joint_count)
+    weights = np.asarray(vertex_data["jointWeights"], dtype=np.float32).reshape(count, joint_count)
+    key_fields.extend([joints.astype(np.float32), weights])
+    delta_streams = []
+    for delta in mesh["deltaStates"]:
+        channels = {}
+        for channel in ("positions", "normals"):
+            indices = np.asarray(delta[channel + "Indices"], dtype=np.int64)
+            values = np.asarray(delta[channel], dtype=np.float32).reshape(-1, 3)
+            if len(indices) != len(values) or (len(indices) and (indices.min() < 0 or indices.max() >= count)):
+                raise ValueError("Flex delta references an absent source corner")
+            if len(indices):
+                dense = np.zeros((count, 3), dtype=np.float32)
+                dense[indices] = values
+                channels[channel] = dense
+                key_fields.append(dense)
+        delta_streams.append((delta, channels))
+    key = np.ascontiguousarray(np.column_stack(key_fields))
+    records = key.view(np.dtype((np.void, key.dtype.itemsize * key.shape[1]))).reshape(-1)
+    _, first, inverse = np.unique(records, return_index=True, return_inverse=True)
+    order = np.argsort(first)
+    first = first[order]
+    remap = np.empty(len(order), dtype=np.int64)
+    remap[order] = np.arange(len(order))
+    inverse = remap[inverse]
+    for name, element_type in fields:
+        vertex_data[name] = dmx.make_array(streams[name][first].tolist(), element_type)
+        vertex_data[name + "Indices"] = dmx.make_array(list(range(len(first))), int)
+    vertex_data["jointWeights"] = dmx.make_array(weights[first].reshape(-1).tolist(), float)
+    vertex_data["jointIndices"] = dmx.make_array(joints[first].reshape(-1).tolist(), int)
+    for face_set in mesh["faceSets"]:
+        face_set["faces"] = dmx.make_array([int(inverse[index]) if index >= 0 else index
+                                            for index in face_set["faces"]], int)
+    for delta, channels in delta_streams:
+        for channel, values in channels.items():
+            _delta_stream(None, delta, channel, values[first])
+    vertex_data["s2kitSourceCornerIndices"] = dmx.make_array(first.tolist(), int)
+    vertex_data["s2kitSourceCornerCount"] = count
+    return dict(source_corners=count, vertices=len(first), indexed=True)
+
+
 def write_flex_dmx(path: Path, reference: Path, primitives: list[dict], coord, rig: dict,
-                    *, morph_transform=None, define_controls: bool = True) -> None:
+                    *, morph_transform=None, define_controls: bool = True) -> dict:
     """Write shared morph descriptions without Source 2-only DMX expression elements.
 
     Only the first source defines temporary direct controllers. Every subsequent
@@ -331,7 +392,9 @@ def write_flex_dmx(path: Path, reference: Path, primitives: list[dict], coord, r
     combination["dominators"] = dmx.make_array([], dmx.Element)
     combination["targets"] = dmx.make_array([mesh], dmx.Element)
     root["combinationOperator"] = combination
+    compacted = _compact_geometry(mesh, vertex_data)
     document.write(str(path), "binary", 5)
+    return compacted
 
 
 def sync_flex_skeleton(path: Path, reference: Path) -> None:
@@ -341,7 +404,9 @@ def sync_flex_skeleton(path: Path, reference: Path) -> None:
     model = document.root["model"]
     dag = next(element for element in document.elements if element.type == "DmeDag")
     vertex_data = dag["shape"]["currentState"]
-    if len(vertex_data["positions"]) != len(corners):
+    source_count = (int(vertex_data["s2kitSourceCornerCount"])
+                    if "s2kitSourceCornerCount" in vertex_data else len(vertex_data["positions"]))
+    if source_count != len(corners):
         raise ValueError("Remapped SMD changed flex-DMX corner count")
     _set_skeleton(document, model, dag, bones, corners, vertex_data)
     document.write(str(path), "binary", 5)
