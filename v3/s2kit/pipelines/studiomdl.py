@@ -21,6 +21,7 @@ redundant.
 
 from __future__ import annotations
 
+import re
 import struct
 import threading
 from dataclasses import dataclass, field
@@ -117,7 +118,7 @@ def _checksum_of(path: Path, offset: int) -> Optional[int]:
         return None
 
 
-def check_compiled_model(mdl_path: Any) -> CompiledModel:
+def check_compiled_model(mdl_path: Any, *, require_geometry: bool = True) -> CompiledModel:
     """Read the checksum out of a model's `.mdl`, `.vvd`, `.vtx` and `.phy`.
 
     A `.vtx` flavour that was never written is not reported - only dx90 is
@@ -134,7 +135,7 @@ def check_compiled_model(mdl_path: Any) -> CompiledModel:
     vvd = mdl_path.with_suffix(".vvd")
     if vvd.is_file():
         model.siblings[vvd] = _checksum_of(vvd, _CHECKSUM_OFFSET["vvd"])
-    else:
+    elif require_geometry:
         model.missing.append(".vvd")
 
     # Collision is optional, so a missing .phy is not a defect - but one that
@@ -149,7 +150,7 @@ def check_compiled_model(mdl_path: Any) -> CompiledModel:
         if vtx.is_file():
             found_vtx = True
             model.siblings[vtx] = _checksum_of(vtx, _CHECKSUM_OFFSET["vtx"])
-    if not found_vtx:
+    if not found_vtx and require_geometry:
         model.missing.append(".dx90.vtx")
     return model
 
@@ -257,7 +258,9 @@ def compile_qc(qc_path: Path, studiomdl: Path, game: Path,
         # contents, and the mismatch only surfaces later, in a map compile.
         target = model_path_for(qc_path, resolved)
         if target is not None and target.is_file():
-            model = check_compiled_model(target)
+            has_geometry = bool(re.search(r"(?mi)^\s*\$(?:body|bodygroup|model)\b",
+                                          qc_path.read_text(encoding="utf-8")))
+            model = check_compiled_model(target, require_geometry=has_geometry)
             for problem in model.problems():
                 log(problem, "ERROR")
             if not model.ok:
