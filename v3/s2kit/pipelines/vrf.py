@@ -285,6 +285,8 @@ def build_vrf_command(
     vpk_filepath: Optional[Union[str, List[str]]] = None,
     extra_filters: Optional[List[str]] = None,
     mode: str = "models",
+    include_animations: bool = True,
+    compose_additive: bool = False,
 ) -> List[str]:
     """Compose the Source2Viewer-CLI argv. Pure function — easy to unit-test.
 
@@ -295,6 +297,10 @@ def build_vrf_command(
 
     `extra_filters` is a list of additional path prefixes to merge into `-f`
     (e.g. parent dirs of references discovered via a `-b RERL` pre-pass).
+
+    Bind-only export keeps VRF's animation export switch enabled to retain its
+    skin skeleton, but selects a reserved nonmatching clip name. No animation
+    samples are exported or decoded by the animation writer in this mode.
 
     `mode` selects what gets iterated as primary targets:
       * "models" — .vmdl_c to GLTF/GLB plus their vmats + textures (the
@@ -322,9 +328,14 @@ def build_vrf_command(
         # cleaned up by `purge_stray_images_next_to_gltf` post-extraction.
         args += [
             "--gltf_export_format", gltf_format,
-            "--gltf_export_animations",
             "--gltf_export_materials",
+            "--gltf_export_extras",
         ]
+        args.append("--gltf_export_animations")
+        if not include_animations:
+            args.extend(["--gltf_animation_list", "__s2kit_bind_only__"])
+        if compose_additive:
+            args.append("--gltf_compose_additive")
         entities = "vmdl_c,vmat_c,vtex_c"
     else:
         # VMAT-only port: iterate materials + their textures. No .vmdl_c, so no
@@ -657,6 +668,8 @@ def dump_model_metadata(
     cancel: Optional[threading.Event] = None,
     *,
     data_dump: Optional[str] = None,
+    include_animations: bool = True,
+    block_dumps: Optional[dict[str, dict[str, str]]] = None,
 ) -> Dict[str, object]:
     """Read DATA/MDAT/ANIM/ASEQ authoring fields into compact model sidecars."""
     from s2kit.pipelines.model_metadata import parse_model_metadata
@@ -664,17 +677,19 @@ def dump_model_metadata(
     on_log("Reading authored hitboxes, attachments and animation metadata...")
     fallback = str(input_path.name) if input_path.suffix.lower() == ".vmdl_c" else ""
     dumps: Dict[str, Dict[str, str]] = {}
-    for block in ("DATA", "MDAT", "ANIM", "ASEQ"):
+    for block in (("DATA", "MDAT", "ANIM", "ASEQ") if include_animations else ("DATA", "MDAT")):
         text = data_dump if block == "DATA" and data_dump is not None else _run_block_dump(
             vrf_exe, input_path, vpk_filepath, "vmdl_c", block, on_log, cancel)
         dumps[block] = _model_dump_sections(text or "", fallback)
         if block == "DATA" and len(dumps[block]) == 1:
             fallback = next(iter(dumps[block]))
+    if block_dumps is not None:
+        block_dumps.update(dumps)
     paths = dict.fromkeys(path for blocks in dumps.values() for path in blocks)
     result = {}
     for path in paths:
         try:
-            metadata = parse_model_metadata(*(dumps[block].get(path, "")
+            metadata = parse_model_metadata(*(dumps.get(block, {}).get(path, "")
                                               for block in ("DATA", "MDAT", "ANIM", "ASEQ")))
         except (ValueError, KeyError, TypeError, IndexError) as exc:
             on_log(f"{path}: authored metadata could not be read: {exc}")
@@ -896,7 +911,7 @@ def hoist_inner_materials_to_top(staging_dir: Path, on_log: LogFn = print) -> in
     if not models_root.is_dir():
         return 0
     materials_top = staging_dir / "materials"
-    targets = [p for p in models_root.rglob("materials") if p.is_dir()]
+    targets = [p for name in ("materials", "material") for p in models_root.rglob(name) if p.is_dir()]
     moved_total = 0
     for src in targets:
         # rel_parent is the model's path relative to staging, e.g.
@@ -1344,6 +1359,8 @@ def run_vrf_export(
     vpk_filepath: Optional[Union[str, List[str]]] = None,
     on_log: LogFn = print,
     cancel: Optional[threading.Event] = None,
+    include_animations: bool = True,
+    compose_additive: bool = False,
 ) -> int:
     """
     Run a full export: GLTF + materials/ tree, then optionally clean up stray
@@ -1478,6 +1495,8 @@ def run_vrf_export(
         vpk_filepath=vpk_filepaths,
         extra_filters=extra_filters,
         mode=mode,
+        include_animations=include_animations,
+        compose_additive=compose_additive,
     )
     # A huge filter list can still push one command line past the Windows
     # 32k limit (WinError 206 at Popen). Split the -f tokens across several
@@ -1529,15 +1548,13 @@ def run_vrf_export(
         mg = _parse_material_groups_per_file(data_dump or "")
         if mg:
             write_skin_sidecars(staging_dir, mg, on_log)
+        metadata_dumps = {}
         metadata = dump_model_metadata(vrf_exe, input_path, model_filter,
-                                       on_log, cancel, data_dump=data_dump)
+                                       on_log, cancel, data_dump=data_dump,
+                                       include_animations=include_animations,
+                                       block_dumps=metadata_dumps)
         if metadata:
             write_metadata_sidecars(staging_dir, metadata, on_log)
-        from s2kit.pipelines.native_lods import export_native_lod_sidecars
-
-        export_native_lod_sidecars(
-            vrf_exe, input_path, staging_dir,
-            _model_dump_sections(data_dump or ""), on_log, cancel)
         # Physics ground truth for ragdolls/jointed props: the PHYS block has
         # the real per-bone shapes and joint limits that the merged
         # `_physics.glb` loses. Saved as `<stem>_phys.txt` beside the glTF.
@@ -1550,6 +1567,30 @@ def run_vrf_export(
         )
         if pb:
             write_phys_sidecars(staging_dir, pb, on_log)
+        from s2kit.pipelines.model_fidelity import preserve_model_lods, write_fidelity_sidecar
+
+        fidelity_dumps = {"DATA": _model_dump_sections(data_dump or ""), "PHYS": pb,
+                          "MDAT": metadata_dumps.get("MDAT", {})}
+        for block in ("CTRL", "MRPH"):
+            dump = _run_block_dump(vrf_exe, input_path, model_filter,
+                                   "vmdl_c", block, on_log, cancel)
+            fidelity_dumps[block] = _model_dump_sections(dump or "")
+        for resource in fidelity_dumps["DATA"]:
+            model = staging_dir / Path(resource).with_suffix(".glb")
+            if not model.is_file():
+                model = model.with_suffix(".gltf")
+            if not model.is_file():
+                continue
+            try:
+                blocks = {block: sections.get(resource, "")
+                          for block, sections in fidelity_dumps.items()}
+                write_fidelity_sidecar(model, blocks, resource=resource,
+                                      animation_export=dict(included=include_animations,
+                                                            additive_composed=compose_additive))
+                preserve_model_lods(vrf_exe, input_path, resource, model,
+                                    on_log=on_log, cancel=cancel)
+            except (ValueError, TypeError, KeyError) as exc:
+                on_log(f"WARNING: {resource}: model fidelity sidecar failed: {exc}")
 
     # Detect Source 2 addon-package layouts (models/<pkg>/{models,materials}/)
     # now, while staging still reflects the VPK structure — the hoist below is
