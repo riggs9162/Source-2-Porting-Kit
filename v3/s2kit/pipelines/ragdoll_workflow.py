@@ -713,9 +713,9 @@ def _stage_signature(kind: str) -> str:
                    "ragdoll_animations", "morph_animation", "model_metadata", "smd_animation_export",
                    "gltf_animation", "glb_skin", "native_port", "skeleton_retarget"],
         "materials": ["materials", "vmat", "vmt", "pbr_maps", "textures"],
-        "compile": ["studiomdl", "phy_audit", "phy_geometry", "ragdoll_flex", "compiled_model_audit",
+        "compile": ["studiomdl", "phy_audit", "phy_geometry", "ragdoll_flex", "compiled_model_audit", "compiled_render_coverage",
                     "compiled_morph_geometry", "compiled_lod_vertices", "ragdoll_animation_audit", "procedural_native"],
-        "compile_pm": ["studiomdl", "phy_audit", "phy_geometry", "ragdoll_flex", "compiled_model_audit",
+        "compile_pm": ["studiomdl", "phy_audit", "phy_geometry", "ragdoll_flex", "compiled_model_audit", "compiled_render_coverage",
                        "compiled_morph_geometry", "compiled_lod_vertices", "ragdoll_animation_audit", "player_animations", "procedural_native"],
         "calibrate": ["phy_audit"],
     }.get(kind, [])

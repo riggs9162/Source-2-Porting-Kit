@@ -133,7 +133,7 @@ def read_compiled_model(path: Path) -> dict:
     if declared_length != len(source.data):
         raise ModelAuditError(f"MDL length {declared_length} differs from file size {len(source.data)}")
     result = dict(version=version, checksum=checksum, bones=[], bodygroups=[], materials=[],
-                  material_paths=[], skins=[], flex_descriptors=[], flex_controllers=[], flex_rules=[],
+                  material_paths=[], skins=[], skin_indices=[], flex_descriptors=[], flex_controllers=[], flex_rules=[],
                   attachments=[], hitboxes=[], meshes=[])
     count, index = source.unpack("ii", 156)
     for offset in source.table(count, index, 216):
@@ -168,6 +168,7 @@ def read_compiled_model(path: Path) -> dict:
         row = source.unpack(f"{slots}h", offset)
         if any(value < 0 or value >= len(result["materials"]) for value in row):
             raise ModelAuditError("Compiled skin family references an absent texture")
+        result["skin_indices"].append(list(row))
         result["skins"].append([result["materials"][value] for value in row])
     count, index = source.unpack("ii", 232)
     for part_offset in source.table(count, index, 16):
@@ -376,16 +377,27 @@ def _audit_materials(compiled: dict, appearance: dict, payload, mdl: Path, error
                    for source, target in appearance.get("material_map", {}).items()}
         original = [aliases.get(str(token).casefold(), str(token).casefold())
                     for token in authored[0].get("materials", [])]
+        internal_slots = {str(item["compiler_material"]).casefold(): item
+                          for item in appearance.get("material_slot_skins", [])}
+        for base, item in internal_slots.items():
+            if base not in {token.casefold() for token in compiled["skins"][0]}:
+                errors.append(f"Missing internal material carrier skin slot {base}")
+            if len(item["skin_materials"]) != len(compiled["skins"]):
+                errors.append(f"Internal material carrier skin family count differs: {base}")
         for family_index, source in enumerate(authored[:len(compiled["skins"])]):
             replacements = dict(zip(original, [aliases.get(str(token).casefold(), str(token).casefold())
                                                for token in source.get("materials", [])]))
             for slot, base in enumerate(compiled["skins"][0]):
                 target = compiled["skins"][family_index][slot].casefold()
-                wanted = replacements.get(base.casefold(), base.casefold())
+                internal = internal_slots.get(base.casefold())
+                wanted = (str(internal["skin_materials"][family_index]).casefold()
+                          if internal and family_index < len(internal["skin_materials"])
+                          else replacements.get(base.casefold(), base.casefold()))
                 if target != wanted:
                     errors.append(f"Skin {family_index} slot {slot}: {target} differs from source {wanted}")
     return dict(materials=compiled["materials"], search_paths=compiled["material_paths"], material_root=str(root),
-                family_count=len(compiled["skins"]), skin_bindings=compiled["skins"], vmts=references,
+                family_count=len(compiled["skins"]), skin_bindings=compiled["skins"],
+                skin_texture_indices=compiled.get("skin_indices", []), vmts=references,
                 referenced_vtfs=sorted(checked_textures))
 
 
@@ -515,6 +527,10 @@ def audit_compiled_model(mdl: Path, qc: Path, report: dict | None = None, materi
         if vvd_checksum != compiled["checksum"] or vvd_lods != vtx["lod_count"]:
             errors.append("MDL/VVD checksums or VVD/VTX LOD counts differ")
         result["vertices_per_lod"] = list(vvd.unpack("8i", 16))[:vvd_lods]
+        from s2kit.pipelines.compiled_render_coverage import audit_render_coverage
+
+        result["render_coverage"] = audit_render_coverage(mdl, qc, appearance, compiled)
+        errors.extend(result["render_coverage"]["errors"])
     except (OSError, ModelAuditError, ValueError, IndexError, KeyError, struct.error) as exc:
         errors.append(f"Compiled model audit failed: {exc}")
     result["ok"] = not errors

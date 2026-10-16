@@ -12,6 +12,7 @@ from scipy.spatial import cKDTree
 
 from s2kit.pipelines.compiled_lod_vertices import read_compiled_vertices, duplicate_lod_vertices
 from s2kit.pipelines.compiled_model_audit import _tokens, read_compiled_model
+from s2kit.pipelines.compiled_render_coverage import read_lod_material_replacement_ids, resolve_lod_material
 from s2kit.pipelines.model_fidelity import resource_token
 from s2kit.pipelines.porting import check_cancelled
 from s2kit.vendor import valve_datamodel as dmx
@@ -229,6 +230,7 @@ def _resolve_vertices(source: dict, vertices: np.ndarray, ids: list[int], cancel
 def _provenance(compiled, qc: Path, appearance: dict, cancel=None) -> tuple[list[dict], dict]:
     """Resolve every actually rendered LOD vertex against its exact bodygroup and material source."""
     metadata = read_compiled_model(compiled.mdl_path)
+    material_replacements = read_lod_material_replacement_ids(compiled.vtx_bytes, metadata["materials"])
     bone_names = {bone["name"]: index for index, bone in enumerate(metadata["bones"])}
     choices = _source_choices(qc, appearance)
     plans = []
@@ -266,7 +268,11 @@ def _provenance(compiled, qc: Path, appearance: dict, cancel=None) -> tuple[list
                                                       mesh.lod_triangles[lod], lod)
             except MorphGeometryError as error:
                 raise MorphGeometryError(f"{path.name}, {material}, mesh {mesh.key}, LOD {lod}: {error}") from error
-            detail.update(part=mesh.part, choice=mesh.choice, mesh=mesh.mesh, lod=lod, material=material)
+            bindings = [resolve_lod_material(metadata, material_replacements, lod, skin, mesh.material_slot)
+                        for skin in range(len(metadata["skins"]))]
+            detail.update(part=mesh.part, choice=mesh.choice, mesh=mesh.mesh, lod=lod, material=material,
+                          compiler_material=material, runtime_materials=[binding["runtime_material"] for binding in bindings],
+                          material_bindings=bindings)
             delta_precision = _delta_precision(source["changes"][selected], source["effective"][selected])
             detail["source_to_encoded_precision"] = delta_precision
             for metric, value in delta_precision.items():
