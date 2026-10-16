@@ -162,6 +162,13 @@ native and addon evaluators. Partial blends, multi-target constraints, RBF
 correctives and helpers whose original animation moves their origins retain
 the source-aware addon evaluator.
 
+Playermodel motion keeps the source bind frames for the torso, neck, head and
+clavicles. Arms, hands and legs use canonical GMod motion directions at their native
+joint offsets, preserving standard weapon grips and movement without forcing the
+source neck and shoulders into donor bind angles. Reports identify each bone's
+transfer mode and measure reference-pose adaptations. The published blend, activity,
+gesture and IK graph stays intact.
+
 Compiled morph validation checks the rendered vertices of every material and
 LOD against the retained source deformations. When the compiler shares vertices
 that need different morph deltas, finalization separates their storage while

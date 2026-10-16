@@ -18,6 +18,7 @@ from scipy.spatial.transform import Rotation
 
 from s2kit.pipelines.gltf_animation import GltfSkin
 from s2kit.pipelines.porting import check_cancelled
+from s2kit.pipelines.skeleton_retarget import skin_world_matrices
 
 
 SOURCE_REVISION = "9a588af0cb1a2d53de35496ba1737305a877e50c"
@@ -52,6 +53,7 @@ class PlayerAnimationResult:
     animations: int = 0
     frames: int = 0
     profile: str = "male"
+    retargeting: dict = field(default_factory=dict)
 
 
 def _qc_content(line: str) -> str:
@@ -285,11 +287,20 @@ def write_animation_smd(path: Path, skin: GltfSkin, frames: np.ndarray,
         output.write("end\n")
 
 
+def player_bone_motion_mode(name: str) -> str:
+    """Keep source torso posture and canonical limb directions in the model-owned player graph."""
+    name = name.casefold()
+    posture = {"valvebiped.bip01_pelvis", "valvebiped.bip01_neck1", "valvebiped.bip01_head1",
+               "valvebiped.bip01_l_clavicle", "valvebiped.bip01_r_clavicle"}
+    return "bind_relative" if name in posture or name.startswith("valvebiped.bip01_spine") else "canonical"
+
+
 def retarget_animation(animation: SmdAnimation, bind: SmdAnimation,
                        target: GltfSkin) -> np.ndarray:
-    """Apply canonical donor rotations while retaining source-sized joint offsets."""
+    """Preserve source torso posture, canonical limb motion and native joint offsets."""
     donor_rotation, donor_position = animation_worlds(animation)
-    _, bind_position = animation_worlds(bind)
+    bind_rotation, bind_position = animation_worlds(bind)
+    target_worlds = skin_world_matrices(target)
     source_names = {name.lower(): index for index, name in enumerate(animation.names)}
     bind_names = {name.lower(): index for index, name in enumerate(bind.names)}
     frames = np.zeros((len(animation.frames), len(target.joints), 6), dtype=np.float64)
@@ -302,6 +313,8 @@ def retarget_animation(animation: SmdAnimation, bind: SmdAnimation,
         local_bind = Rotation.from_quat(joint.rest_rotation).as_matrix()
         if source is not None and rest is not None:
             world = donor_rotation[:, source]
+            if player_bone_motion_mode(joint.name) == "bind_relative":
+                world = world @ bind_rotation[0, rest].T @ target_worlds[index][:3, :3]
         elif parent is not None:
             world = world_rotations[parent] @ local_bind
         else:
@@ -317,6 +330,47 @@ def retarget_animation(animation: SmdAnimation, bind: SmdAnimation,
     return frames
 
 
+def _reference_motion_audit(bind: SmdAnimation, target: GltfSkin) -> dict:
+    """Verify source torso reference identity and disclose canonical limb reference adaptations."""
+    frames = retarget_animation(bind, bind, target)
+    parents = [joint.parent_joint_idx if joint.parent_joint_idx is not None else -1
+               for joint in target.joints]
+    rotations, positions = animation_worlds(SmdAnimation(target.joint_names, parents, frames, bind.times))
+    target_worlds = np.asarray(skin_world_matrices(target))
+    reference_names = {name.lower(): index for index, name in enumerate(bind.names)}
+    bone_modes = []
+    adaptations = []
+    posture = []
+    position_errors = np.linalg.norm(positions[0] - target_worlds[:, :3, 3], axis=-1)
+    angular_errors = np.degrees(Rotation.from_matrix(
+        rotations[0] @ np.swapaxes(target_worlds[:, :3, :3], -1, -2)).magnitude())
+    for index, joint in enumerate(target.joints):
+        reference = reference_names.get(joint.name.lower())
+        mode = player_bone_motion_mode(joint.name) if reference is not None else "parent_bind"
+        bone_modes.append(dict(bone=joint.name, mode=mode))
+        if mode == "bind_relative":
+            posture.append(index)
+        if position_errors[index] > 1e-5 or angular_errors[index] > 1e-5:
+            adaptations.append(dict(bone=joint.name, mode=mode,
+                                    position_delta_in=float(position_errors[index]),
+                                    rotation_delta_degrees=float(angular_errors[index])))
+    report = dict(
+        method="Bind-relative source torso, neck, head and clavicles with canonical GMod limbs",
+        native_joint_offsets="unchanged", donor_root_motion="preserved", upstream_graph="unchanged",
+        maximum_posture_reference_position_error_in=float(position_errors[posture].max()) if posture else 0.0,
+        maximum_posture_reference_rotation_error_degrees=float(angular_errors[posture].max()) if posture else 0.0,
+        maximum_reference_position_adaptation_in=float(position_errors.max()),
+        maximum_reference_rotation_adaptation_degrees=float(angular_errors.max()),
+        maximum_reference_local_translation_error_in=float(np.max(np.abs(
+            frames[:, :, :3] - np.asarray([joint.rest_translation for joint in target.joints])))),
+        bone_modes=bone_modes, reference_adaptations=adaptations)
+    if (report["maximum_posture_reference_position_error_in"] > 1e-5
+            or report["maximum_posture_reference_rotation_error_degrees"] > 1e-5
+            or report["maximum_reference_local_translation_error_in"] > 1e-8):
+        raise ValueError("Player motion does not preserve the source torso reference and native joint offsets")
+    return report
+
+
 def write_player_animation_library(source_root: Path, out_dir: Path, skin: GltfSkin,
                                    *, modelname: str, bind_lines: list[str],
                                    ik_lines: list[str], profile: str = "male",
@@ -330,6 +384,7 @@ def write_player_animation_library(source_root: Path, out_dir: Path, skin: GltfS
     out_dir.mkdir(parents=True, exist_ok=True)
     result = PlayerAnimationResult(out_dir / "player_animations.qc", profile=profile)
     bind = source_bind(source_root, profile)
+    result.retargeting = _reference_motion_audit(bind, skin)
     sources = sorted(source_root.rglob("*.smd"))
     for index, path in enumerate(sources):
         check_cancelled(cancel)
@@ -376,7 +431,8 @@ def write_player_animation_library(source_root: Path, out_dir: Path, skin: GltfS
     provenance = out_dir / "animation_provenance.json"
     provenance.write_text(json.dumps(dict(revision=SOURCE_REVISION, source=SOURCE_URL,
                                          credits=SOURCE_CREDITS, profile=profile,
-                                         animations=result.animations, frames=result.frames),
+                                         animations=result.animations, frames=result.frames,
+                                         retargeting=result.retargeting),
                                     indent=2), encoding="utf-8")
     result.files.append(provenance)
     log(f"Retargeted {result.animations} animation sources, {result.frames} frames", "SUCCESS")
