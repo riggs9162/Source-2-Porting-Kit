@@ -293,6 +293,7 @@ def rebuild_compiled_phy_geometry(phy_path: Path, physics_result, compiler_path:
         finally:
             pending.unlink(missing_ok=True)
     result = dict(status="preserved", method="native_exact_convex_polyhedra", provenance=provenance,
+                  compiler_bootstrap_geometry_restorations=getattr(physics_result, "geometry_restorations", []),
                   body_count=len(reports), bodies=reports, checksum_preserved=True, header_preserved=True,
                   keyvalues_preserved=True, original_phy_sha256=hashlib.sha256(original).hexdigest(),
                   finalized_phy_sha256=hashlib.sha256(replacement).hexdigest(),

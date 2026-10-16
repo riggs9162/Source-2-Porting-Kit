@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import math
 import re
@@ -48,10 +49,101 @@ def load_audit_manifest(path: Path):
               for index, item in enumerate(data['skeleton'])]
     shapes = [(item['part'], trimesh.Trimesh(vertices=item['vertices'], process=False), item['report'])
               for item in data['shapes']]
-    return SimpleNamespace(skin=GltfSkin(joints, data['root_joint_idx'], 0),
-                           helper_by_part={int(key): value for key, value in data['helper_by_part'].items()},
-                           body_reports=data['bodies'], joint_reports=data['joints'],
-                           shapes=shapes, report=data['report'])
+    result = SimpleNamespace(skin=GltfSkin(joints, data['root_joint_idx'], 0),
+                             helper_by_part={int(key): value for key, value in data['helper_by_part'].items()},
+                             body_reports=data['bodies'], joint_reports=data['joints'],
+                             shapes=shapes, report=data['report'])
+    _restore_authored_analytic_shapes(result)
+    return result
+
+
+def _fit_shape_bind(source: np.ndarray, target: np.ndarray) -> np.ndarray:
+    """Recover a rigid source-to-model bind from deterministic compiler-bootstrap vertex correspondences."""
+    if source.shape != target.shape:
+        raise PhyAuditError('Cannot restore original analytic collision: compiler-bootstrap vertex counts changed')
+    source_center, target_center = source.mean(axis=0), target.mean(axis=0)
+    first, _, second = np.linalg.svd((source - source_center).T @ (target - target_center))
+    rotation = second.T @ first.T
+    if np.linalg.det(rotation) < 0:
+        second[-1] *= -1
+        rotation = second.T @ first.T
+    bind = np.eye(4)
+    bind[:3, :3] = rotation
+    bind[:3, 3] = target_center - rotation @ source_center
+    error = np.linalg.norm(source @ rotation.T + bind[:3, 3] - target, axis=1).max()
+    if not np.isfinite(bind).all() or error > 1e-5:
+        raise PhyAuditError(f'Cannot restore original analytic collision: bootstrap bind fit differs by {error:.9g} in')
+    return bind
+
+
+def _restore_authored_analytic_shapes(result) -> None:
+    """Remove compiler-only analytic inflation from final collision while retaining its bootstrap inputs separately.
+
+    Existing manifests keep their thickened meshes as durable compiler input. Deterministic
+    bootstrap correspondences recover the exact source-to-model shape bind for both native
+    and renamed playermodel rigs without changing rendering or animation transforms.
+    """
+    from s2kit.pipelines.ragdoll_physics import _prepare_shape, _primitive_mesh
+    from s2kit.pipelines.physics import _thinnest_direction
+
+    result.compiler_bootstrap_shapes = []
+    result.geometry_restorations = []
+    if not any(report.get('thickened') and report.get('kind') in ('sphere', 'capsule')
+               for _, _, report in result.shapes):
+        return
+    result.compiler_bootstrap_body_reports = copy.deepcopy(result.body_reports)
+    bodies = {body['part']: body for body in result.body_reports}
+    ordinals, shapes = {}, []
+    for part, mesh, report in result.shapes:
+        kind = report.get('kind')
+        key = (part, kind)
+        ordinal = ordinals.get(key, 0)
+        ordinals[key] = ordinal + 1
+        if not report.get('thickened') or kind not in ('sphere', 'capsule'):
+            shapes.append((part, mesh, report))
+            continue
+        body = bodies[part]
+        field = 'm_spheres' if kind == 'sphere' else 'm_capsules'
+        source = body.get('source_part', {}).get('m_rnShape', {}).get(field, [])
+        if ordinal >= len(source):
+            raise PhyAuditError(f'Cannot restore original analytic collision for part {part}: retained source shape is absent')
+        authored, analytic = _primitive_mesh(kind, source[ordinal])
+        bootstrap, _ = _prepare_shape(kind, source[ordinal])
+        bind = _fit_shape_bind(bootstrap.vertices, mesh.vertices)
+        bind_error = float(np.linalg.norm(bootstrap.vertices @ bind[:3, :3].T + bind[:3, 3] - mesh.vertices, axis=1).max())
+        restored = trimesh.Trimesh(vertices=authored.vertices @ bind[:3, :3].T + bind[:3, 3],
+                                   faces=authored.faces, process=False)
+        result.compiler_bootstrap_shapes.append((part, mesh.copy(), copy.deepcopy(report)))
+        restoration = dict(part=part, source_bone=body['source_bone'], kind=kind, shape_ordinal=ordinal,
+                           source_radius_in=analytic['source_radius_in'],
+                           analytic_source_volume_in3=analytic['source_volume_in3'],
+                           compiler_bootstrap_volume_in3=report['export_volume_in3'],
+                           restored_tessellated_volume_in3=float(authored.volume),
+                           compiler_bootstrap_vertices=len(mesh.vertices), restored_vertices=len(authored.vertices),
+                           restored_source_to_model_bind=bind.tolist(), bootstrap_bind_fit_maximum_error_in=bind_error,
+                           compiler_bootstrap_bounds_model_in=np.stack((mesh.vertices.min(axis=0), mesh.vertices.max(axis=0))).tolist(),
+                           restored_bounds_model_in=restored.bounds.tolist(),
+                           removed_thickness_bounds_growth_in=report.get('thickness_bounds_growth_in', 0))
+        result.geometry_restorations.append(restoration)
+        current = copy.deepcopy(report)
+        current.update(analytic, export_volume_in3=float(authored.volume), source_mesh_volume_in3=float(authored.volume),
+                       thickened=False, thickness_bounds_growth_in=0.0,
+                       minimum_width_in=_thinnest_direction(authored)[1],
+                       export_vertices=len(authored.vertices), export_triangles=len(authored.faces),
+                       bounds_model_in=restored.bounds.tolist(), compiler_bootstrap_restoration=restoration)
+        shapes.append((part, restored, current))
+    result.shapes = shapes
+    for body in result.body_reports:
+        body['export_volume_in3'] = sum(report['export_volume_in3'] for part, _, report in shapes if part == body['part'])
+    result.report['bodies'] = result.body_reports
+    result.report['shapes'] = [report for _, _, report in shapes]
+    result.report['compiler_bootstrap_geometry_restorations'] = result.geometry_restorations
+    warnings = [warning for warning in result.report.get('warnings', [])
+                if not warning.startswith('Thin authored collision pieces are individually thickened')]
+    if any(report.get('thickened') for _, _, report in shapes):
+        warnings.append('Remaining compiler-thickened non-analytic shapes are retained as reported adaptations.')
+    warnings.append('Compiler-bootstrap analytic thickness repairs are removed from final native collision; original source radii are restored.')
+    result.report['warnings'] = warnings
 
 
 def _blocks(text: str) -> list[tuple[str, dict]]:
