@@ -437,6 +437,8 @@ def _audit_metadata(compiled: dict, expected: dict, report: dict, errors: list[s
     generated_hitboxes = isinstance(source_hitboxes, dict) and source_hitboxes.get("status") == "generated"
     return dict(attachments=len(compiled["attachments"]), expected_attachments=len(expected["attachments"]),
                 hitboxes=len(compiled["hitboxes"]), expected_hitboxes=len(expected["hitboxes"]),
+                source_hitbox_count=source_hitboxes.get("source_count", source_hitboxes.get("count"))
+                if isinstance(source_hitboxes, dict) else None,
                 generated_hitboxes=len(compiled["hitboxes"]) if generated_hitboxes else 0,
                 hitbox_validation=dict(checked=len(compiled["hitboxes"]), invalid_bone_indices=invalid_hitbox_bones,
                                        nonfinite_bounds=nonfinite_hitboxes, inverted_extents=inverted_hitboxes),
