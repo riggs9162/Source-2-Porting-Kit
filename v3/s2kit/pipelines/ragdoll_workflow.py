@@ -561,7 +561,8 @@ def _package_staged(options, assets, records, log, cancel, staging: Path) -> lis
             copied[key] = digest
             written.append(target)
         if pm_ok:
-            display = Path(asset.relative).stem.replace("_", " ").title()
+            model_display = Path(asset.relative).stem.replace("_", " ").title()
+            display = f"{model_display} [{options.namespace}]"
             modelname = f"models/{options.namespace}/{asset.relative}_pm.mdl"
             registrations.append(f'player_manager.AddValidModel({json.dumps(display)}, {json.dumps(modelname)})')
             registrations.append(f'list.Set("PlayerOptionsModel", {json.dumps(display)}, {json.dumps(modelname)})')
