@@ -20,6 +20,7 @@ from s2kit.pipelines.physics import (
     CUBIC_INCH_IN_CUBIC_METRES, THICKEN_TARGET_IN, _hull_of_points,
     _thinnest_direction, convex_piece_budget, thicken_thin_pieces,
 )
+from s2kit.pipelines.ragdoll_contacts import derive_ragdoll_contacts, remap_contact_report
 from s2kit.pipelines.skeleton_retarget import _m2q, _q2m
 from s2kit.pipelines.smd_animation_export import CoordinateMode, SmdAnimationExporter
 
@@ -490,7 +491,13 @@ def _combined_skin(skin, source_worlds, part_sources, bind, incoming, root, orde
 
 
 def _joint_report(joint: dict, bind, helpers, bodies) -> dict:
-    """Express source limits about exact helper pivots and retain motor adaptation evidence."""
+    """Express helper limits and convert inch-based maximum torque to Nm per child kg.
+
+    The installed GMod solver applies maximum torque equal to PHY friction times child
+    mass. Independent installed-engine probes confirmed that mass-scaled unit contract.
+    Source maximum torque therefore converts by 0.0254 squared before
+    division by target child mass; the zero-velocity motor control law remains adapted.
+    """
     parent, child = int(joint['m_nBody1']), int(joint['m_nBody2'])
     first, second = bind[parent] @ _frame(joint['m_Frame1']), bind[child] @ _frame(joint['m_Frame2'])
     difference = first[:3, :3].T @ second[:3, :3]
@@ -529,6 +536,9 @@ def _joint_report(joint: dict, bind, helpers, bodies) -> dict:
             'source_angular_motor_enabled': angular_motor,
             'source_angular_target_velocity': joint.get('m_vAngularTargetVelocity', [0, 0, 0]),
             'source_max_torque': torque,
+            'target_friction_units': 'Nm_per_child_kg',
+            'target_maximum_torque_nm': friction * bodies[child]['target_mass_kg'],
+            'source_maximum_torque_nm': torque * 0.0254 ** 2,
             'angular_motor_adaptation': 'zero_velocity_torque_surrogate_inch2_to_metre2_per_child_mass',
             'source_linear_motor_enabled': bool(joint.get('m_bEnableLinearMotor')),
             'source_max_force': joint.get('m_flMaxForce', 0),
@@ -638,10 +648,14 @@ def prepare_ragdoll_physics(
                        'source_part': copy.deepcopy(part), 'shape_count': len(body_shapes)})
     helpers = {part: combined.joints[index].name for part, index in helper_map.items()}
     joints = [_joint_report(joint, bind, helpers, bodies) for joint in document.get('m_joints', [])]
-    disabled = {tuple(sorted((int(joint['m_nBody1']), int(joint['m_nBody2']))))
-                for joint in document.get('m_joints', []) if not joint.get('m_bEnableCollision', False)}
-    pairs = [[helpers[first], helpers[second]] for first in range(len(parts))
-             for second in range(first + 1, len(parts)) if (first, second) not in disabled]
+    try:
+        contacts = derive_ragdoll_contacts(bodies, document.get('m_joints', []))
+    except ValueError as error:
+        raise RagdollPhysicsError(str(error)) from error
+    pairs = contacts.pairs
+    if contacts.report['status'] == 'adapted':
+        warnings.append('Source 1 humanoid self-contact is adapted to a tested semantic support-pair policy; '
+                        'all authored joint collision flags are preserved, and excluded inferred pairs are recorded.')
     if generated:
         warnings.append('No source PHYS collision exists: generated humanoid physics uses authored AO proxies and adapted anatomical limits.')
     if any(item['source_type'] == 4 for item in joints):
@@ -675,7 +689,8 @@ def prepare_ragdoll_physics(
               'root_bone': helpers[root], 'source_root_part': root,
               'shape_count': len(shapes), 'source_joint_count': len(joints),
               'bodies': bodies, 'joints': joints, 'shapes': [report for _, _, report in shapes],
-              'collision_pairs': pairs, 'source_collision_attributes': document.get('m_collisionAttributes', []),
+              'collision_pairs': pairs, 'contact_policy': contacts.report,
+              'source_collision_attributes': document.get('m_collisionAttributes', []),
               'unsupported_collision_attribute_filters': any(
                   item.get(key) for item in document.get('m_collisionAttributes', [])
                   for key in ('m_InteractAs', 'm_InteractWith', 'm_InteractExclude')),
@@ -768,6 +783,8 @@ def adapt_physics_to_playermodel(
                   collision_pairs=[[name_map[first], name_map[second]]
                                    for first, second in native_result.report['collision_pairs']],
                   warnings=warnings)
+    if 'contact_policy' in report:
+        report['contact_policy'] = remap_contact_report(report['contact_policy'], name_map)
     return RagdollPhysicsResult(
         target_skin, {}, report['root_bone'], native_result.source_document, report, warnings,
         mapped, native_result.original_skin, native_result.original_coord, {},

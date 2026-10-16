@@ -704,12 +704,12 @@ def _stage_signature(kind: str) -> str:
     """Invalidate affected cached stages when their production converter changes."""
     names = {
         "extract": ["vrf", "model_fidelity", "model_metadata", "native_lods"],
-        "native": ["ragdoll_port", "ragdoll_physics", "ragdoll_appearance", "model_fidelity",
+        "native": ["ragdoll_port", "ragdoll_physics", "ragdoll_contacts", "ragdoll_appearance", "model_fidelity",
                    "gltf_accessors", "morph_atlas", "ragdoll_flex", "ragdoll_runtime", "ragdoll_correctives", "procedural_native",
                    "ragdoll_attachments", "ragdoll_animations", "morph_animation", "model_metadata", "smd_animation_export",
                    "gltf_animation", "glb_skin", "native_port", "skeleton_retarget"],
         "player": ["ragdoll_playermodel", "player_animations", "ragdoll_appearance", "morph_atlas", "procedural_bones",
-                   "ragdoll_physics", "ragdoll_flex", "ragdoll_runtime", "ragdoll_correctives", "procedural_native",
+                   "ragdoll_physics", "ragdoll_contacts", "ragdoll_flex", "ragdoll_runtime", "ragdoll_correctives", "procedural_native",
                    "ragdoll_animations", "morph_animation", "model_metadata", "smd_animation_export",
                    "gltf_animation", "glb_skin", "native_port", "skeleton_retarget"],
         "materials": ["materials", "vmat", "vmt", "pbr_maps", "textures"],

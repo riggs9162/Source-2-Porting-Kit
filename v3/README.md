@@ -182,6 +182,13 @@ friction where possible, and weighted attachments receive an explicit binding
 adaptation. The Alyx metrocop choreo model has no authored PHYS; its labelled
 generated fallback uses its 18 AO capsules and a humanoid joint preset.
 
+Joint collision flags are preserved. Alyx PHYS does not supply a complete body-pair
+table; the converter previously inferred contact between every non-neighbor body.
+Recognized humanoids instead use a tested Source 1 support-contact policy to avoid
+internal pinching and violent solver motion. Reports list every retained and excluded
+inferred pair separately from authored flags. Unclassified rigs keep the original
+inference. World contact and collisions with other entities remain unchanged.
+
 Source 1 skinning supports three bone influences per vertex. The port retains
 the strongest three and renormalizes them; reports measure affected vertices,
 discarded weights and normalization changes separately for primary and authored
