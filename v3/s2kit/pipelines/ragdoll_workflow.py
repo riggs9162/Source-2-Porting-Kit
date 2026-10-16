@@ -753,6 +753,14 @@ def _stage_signature(kind: str) -> str:
     return digest.hexdigest()
 
 
+def _dependency_signature(records: dict, dependencies: list[str]) -> str:
+    """Bind cached stages to durable prerequisite results across cancellation and resume."""
+    values = {key: {field: records[key].get(field) for field in
+                    ("status", "converter_signature", "outputs")}
+              for key in dependencies}
+    return hashlib.sha256(json.dumps(values, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
 def run_ragdoll_workflow(options, *, inspect_only: bool = False,
                          log: Callable = lambda *_args: None,
                          progress: Callable = lambda *_args: None,
@@ -816,8 +824,13 @@ def run_ragdoll_workflow(options, *, inspect_only: bool = False,
                 check_cancelled(cancel)
                 record = state["tasks"][key]
                 code_signature = _stage_signature(kind)
+                cache_dependencies = ([name for name in state["tasks"] if name not in {"package", "install"}]
+                                      if kind == "package" else deps)
+                dependency_signature = _dependency_signature(state["tasks"], cache_dependencies)
                 reusable = record["status"] == "success" and bool(record["outputs"])
                 reusable = reusable and record.get("converter_signature") == code_signature
+                reusable = reusable and (not cache_dependencies or
+                    record.get("dependency_signature") == dependency_signature)
                 reusable = reusable and all(Path(p).is_file() and file_digest(Path(p)) == digest
                                             for p, digest in record["outputs"].items())
                 if kind == "package" and any(item.get("rerun") for name, item in state["tasks"].items()
@@ -863,6 +876,7 @@ def run_ragdoll_workflow(options, *, inspect_only: bool = False,
                     if not outputs or any(not Path(p).is_file() for p in outputs):
                         raise ValueError("Stage did not produce its expected files")
                     record.update(status="success", converter_signature=code_signature,
+                                  dependency_signature=dependency_signature,
                                   outputs={str(Path(p).resolve()): file_digest(Path(p))
                                                              for p in outputs})
                 except Exception as exc:
