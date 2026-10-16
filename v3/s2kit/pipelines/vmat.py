@@ -37,11 +37,11 @@ from s2kit.pipelines.materials import MaterialSource
 #: Source 2 texture keys per role, most specific first.
 KEY_ALIASES: dict[str, tuple[str, ...]] = {
     "color": ("TextureColor", "TextureDiffuse", "TextureAlbedo",
-              "TextureBaseColor", "TextureBasecolor", "TextureBase"),
-    "normal": ("TextureNormal", "TextureNormalMap"),
-    "ao": ("TextureAmbientOcclusion", "TextureAO", "TextureOcclusion"),
-    "roughness": ("TextureRoughness", "TextureRough"),
-    "metallic": ("TextureMetalness", "TextureMetallic", "TextureMetal"),
+              "TextureBaseColor", "TextureBasecolor", "TextureBase", "TextureColorA"),
+    "normal": ("TextureNormal", "TextureNormalMap", "TextureNormalA"),
+    "ao": ("TextureAmbientOcclusion", "TextureAO", "TextureOcclusion", "TextureAmbientOcclusionA"),
+    "roughness": ("TextureRoughness", "TextureRough", "TextureRoughnessA"),
+    "metallic": ("TextureMetalness", "TextureMetallic", "TextureMetal", "TextureMetalnessA"),
     "selfillum": ("TextureSelfIllumMask", "TextureSelfIllum", "TextureEmissive",
                   "TextureEmission", "TextureGlow"),
     "selfillum_flow_phase": ("TextureSelfIllumFlowPhase",),
@@ -378,7 +378,7 @@ class VmatParser:
         # F_ADDITIVE_BLEND_OVER_ALPHA, F_BLEND_MODE...). Any set flag whose name
         # implies blending counts.
         translucent = (
-            any(value == "1" and ("TRANSLUCENT" in key or "BLEND" in key)
+            any(value == "1" and ("TRANSLUCENT" in key or ("BLEND" in key and key != "F_BLEND"))
                 for key, value in flags.items())
             or any(name in shader for name in TRANSLUCENT_SHADERS))
         alphatest = flags.get("F_ALPHA_TEST") == "1"
@@ -406,6 +406,13 @@ class VmatParser:
         if shader == "vr_glass.vfx":
             glass_tint = self.parse_rgba(raw_keys.get("GlassTintColor", ""))
             entry.glass_tint = glass_tint[:3] if glass_tint else None
+        if "TextureColorA" in raw_keys:
+            if entry.roughness_constant is None:
+                entry.roughness_constant = scalar("g_flRoughnessA")
+            if entry.metallic_constant is None:
+                entry.metallic_constant = scalar("g_flMetalnessA")
+        if "TextureColorB" in raw_keys:
+            entry.warnings.append("adapted: retained the authored base material layer; secondary blend/triplanar layer and its dynamic transition are unsupported by the target shader")
 
         for role, aliases in KEY_ALIASES.items():
             raw = next((raw_keys[key] for key in aliases if key in raw_keys), None)
