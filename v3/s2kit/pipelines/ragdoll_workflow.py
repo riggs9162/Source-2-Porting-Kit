@@ -403,10 +403,23 @@ def _compile(options, asset, log, cancel, *, playermodel=False) -> list[Path]:
         if not check.ok:
             raise ValueError("; ".join(check.problems()))
         outputs = [mdl, *check.siblings]
+        morph_finalization = None
         if geometry:
+            from s2kit.pipelines.compiled_morph_geometry import repair_compiled_morph_geometry
             from s2kit.pipelines.ragdoll_flex import install_source_flex_rig
 
-            install_source_flex_rig(mdl, descriptor.get("report", {}).get("appearance", {}).get("flexes", {}))
+            appearance = descriptor.get("report", {}).get("appearance", {})
+            install_source_flex_rig(mdl, appearance.get("flexes", {}))
+            check_cancelled(cancel)
+            morph_finalization = repair_compiled_morph_geometry(
+                mdl, qc, appearance, backup_dir=destination / "compiler-backups" / qc.stem,
+                cancel=cancel, on_log=log)
+            check_cancelled(cancel)
+            if not morph_finalization["ok"]:
+                raise ValueError("Compiled morph restoration failed: " + "; ".join(morph_finalization["errors"]))
+            check = studiomdl.check_compiled_model(mdl, require_geometry=True)
+            if not check.ok:
+                raise ValueError("; ".join(check.problems()))
         if geometry and descriptor.get("report", {}).get("physics_audit_manifest"):
             from s2kit.pipelines.phy_audit import (
                 audit_compiled_phy, finalize_compiled_phy, load_audit_manifest,
@@ -433,6 +446,7 @@ def _compile(options, asset, log, cancel, *, playermodel=False) -> list[Path]:
                 log(adaptation, "WARNING")
         if geometry:
             from s2kit.pipelines.compiled_model_audit import audit_compiled_model
+            from s2kit.pipelines.compiled_morph_geometry import audit_compiled_morph_geometry
             from s2kit.pipelines.ragdoll_animation_audit import (
                 audit_source_clip_timing, audit_source_flex_programs,
             )
@@ -441,7 +455,11 @@ def _compile(options, asset, log, cancel, *, playermodel=False) -> list[Path]:
             model_audit["source_animation_timing"] = audit_source_clip_timing(mdl, descriptor.get("report", {}))
             model_audit["source_flex_programs"] = audit_source_flex_programs(
                 mdl, descriptor.get("report", {}).get("appearance", {}).get("flexes", {}))
-            for detail in (model_audit["source_animation_timing"], model_audit["source_flex_programs"]):
+            model_audit["morph_geometry_finalization"] = morph_finalization
+            model_audit["source_morph_geometry"] = audit_compiled_morph_geometry(
+                mdl, qc, descriptor.get("report", {}).get("appearance", {}), cancel=cancel)
+            for detail in (model_audit["source_animation_timing"], model_audit["source_flex_programs"],
+                           model_audit["source_morph_geometry"]):
                 model_audit["errors"].extend(detail["errors"])
             model_audit["ok"] = not model_audit["errors"]
             if not model_audit["ok"]:
@@ -691,8 +709,10 @@ def _stage_signature(kind: str) -> str:
                    "ragdoll_animations", "morph_animation", "model_metadata", "smd_animation_export",
                    "gltf_animation", "glb_skin", "native_port", "skeleton_retarget"],
         "materials": ["materials", "vmat", "vmt", "pbr_maps", "textures"],
-        "compile": ["studiomdl", "phy_audit", "phy_geometry", "ragdoll_flex", "compiled_model_audit", "ragdoll_animation_audit"],
-        "compile_pm": ["studiomdl", "phy_audit", "phy_geometry", "ragdoll_flex", "compiled_model_audit", "ragdoll_animation_audit", "player_animations"],
+        "compile": ["studiomdl", "phy_audit", "phy_geometry", "ragdoll_flex", "compiled_model_audit",
+                    "compiled_morph_geometry", "compiled_lod_vertices", "ragdoll_animation_audit"],
+        "compile_pm": ["studiomdl", "phy_audit", "phy_geometry", "ragdoll_flex", "compiled_model_audit",
+                       "compiled_morph_geometry", "compiled_lod_vertices", "ragdoll_animation_audit", "player_animations"],
         "calibrate": ["phy_audit"],
     }.get(kind, [])
     function = {"extract": _extract, "native": _convert, "player": _convert,

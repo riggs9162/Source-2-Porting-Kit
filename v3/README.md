@@ -155,6 +155,12 @@ membership, supported morph rigs, procedural corrections and genuine jiggle
 bones. Original morph animation uses a model-scoped GMod flex callback;
 unsupported Source 2 simulation remains documented alongside its source data.
 
+Compiled morph validation checks the rendered vertices of every material and
+LOD against the retained source deformations. When the compiler shares vertices
+that need different morph deltas, finalization separates their storage while
+keeping vertex attributes and triangle topology unchanged. Reports measure the
+extra vertex-buffer space, compiler welding and Source 1 morph precision.
+
 Source 1 imposes differences that the report measures. Capsule and sphere
 tessellation targets at most 0.05 inches surface error and 1% volume error.
 Native convex-polyhedron serialization retains those prepared shapes after
