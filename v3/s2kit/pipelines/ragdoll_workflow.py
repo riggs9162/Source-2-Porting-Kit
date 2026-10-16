@@ -402,16 +402,24 @@ def _compile(options, asset, log, cancel, *, playermodel=False) -> list[Path]:
             from s2kit.pipelines.phy_audit import (
                 audit_compiled_phy, finalize_compiled_phy, load_audit_manifest,
             )
+            from s2kit.pipelines.phy_geometry import rebuild_compiled_phy_geometry
 
             prepared = load_audit_manifest(Path(descriptor["report"]["physics_audit_manifest"]))
             phy = mdl.with_suffix(".phy")
             if not phy.is_file():
                 raise ValueError(f"Compiled ragdoll has no physics file: {mdl}")
+            geometry_finalization = rebuild_compiled_phy_geometry(
+                phy, prepared, Path(options.compiler),
+                Path(options.project) / "calibration" / "convex_serializer",
+                on_log=log, cancel=cancel)
             finalization = finalize_compiled_phy(phy, prepared)
-            audit = audit_compiled_phy(phy, prepared)
+            audit = audit_compiled_phy(
+                phy, prepared, maximum_bounds_error_in=1e-4,
+                maximum_volume_error=1e-5, allow_geometry_adaptation=False)
             if not audit["ok"]:
                 raise ValueError("Compiled physics audit failed: " + "; ".join(audit["errors"]))
-            physics_audits.append({"model": str(mdl), "mass_finalization": finalization, **audit})
+            physics_audits.append({"model": str(mdl), "geometry_finalization": geometry_finalization,
+                                   "mass_finalization": finalization, **audit})
             for adaptation in audit["adaptations"]:
                 log(adaptation, "WARNING")
         if geometry:
@@ -673,8 +681,8 @@ def _stage_signature(kind: str) -> str:
                    "ragdoll_animations", "morph_animation", "model_metadata", "smd_animation_export",
                    "gltf_animation", "glb_skin", "native_port", "skeleton_retarget"],
         "materials": ["materials", "vmat", "vmt", "pbr_maps", "textures"],
-        "compile": ["studiomdl", "phy_audit", "ragdoll_flex", "compiled_model_audit", "ragdoll_animation_audit"],
-        "compile_pm": ["studiomdl", "phy_audit", "ragdoll_flex", "compiled_model_audit", "ragdoll_animation_audit", "player_animations"],
+        "compile": ["studiomdl", "phy_audit", "phy_geometry", "ragdoll_flex", "compiled_model_audit", "ragdoll_animation_audit"],
+        "compile_pm": ["studiomdl", "phy_audit", "phy_geometry", "ragdoll_flex", "compiled_model_audit", "ragdoll_animation_audit", "player_animations"],
         "calibrate": ["phy_audit"],
     }.get(kind, [])
     function = {"extract": _extract, "native": _convert, "player": _convert,
@@ -705,6 +713,9 @@ def _stage_signature(kind: str) -> str:
                 code = loader.get_code(qualified)
                 if code is not None:
                     digest.update(marshal.dumps(code))
+    if kind in {"compile", "compile_pm"}:
+        native_source = Path(__file__).resolve().parent.parent / "native" / "convex_serializer.cs"
+        digest.update(native_source.read_bytes() if native_source.is_file() else b"missing convex serializer")
     return digest.hexdigest()
 
 

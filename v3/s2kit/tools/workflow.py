@@ -69,8 +69,12 @@ class PortingWorkflow(ToolPage):
     HELP = """### One-click ragdoll addons
 
 Choose **GMod ragdoll addon**, paste Source 2 Viewer model URLs one per line,
-and choose a separate project folder and output namespace. Set the compiler
+and choose a separate project folder and output namespace. Set 32-bit StudioMDL CE
 and its game folder here or in Preferences, then click **Port**.
+
+Exact collision output uses the compiler's VPhysics library and a local helper
+built with the Windows .NET Framework C# compiler. Enable .NET Framework 4.8 if
+it is unavailable. The GMod addon has no helper or compiler runtime dependency.
 
 The project contains editable model sources, original extraction data, detailed
 conversion reports, and a ready-to-install **addon** folder. Original animations,
