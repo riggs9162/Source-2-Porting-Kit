@@ -122,6 +122,11 @@ def adapt_native_metadata(metadata: ModelMetadata, *, source_frames: dict | None
         attachments=dict(status="adapted" if attachment_adaptations else "preserved", count=len(attachments),
                          adaptations=attachment_adaptations),
         hitboxes=dict(status="adapted" if hitbox_adaptations else "preserved", count=len(hitboxes),
-                      adaptations=hitbox_adaptations),
+                      source_count=len(metadata.hitboxes), adaptations=hitbox_adaptations),
     )
+    if not metadata.hitboxes:
+        report["hitboxes"].update(
+            status="generated", count=None,
+            reason="No authored source hitboxes; Source 1 generates generic boxes from the native mesh",
+        )
     return result, report

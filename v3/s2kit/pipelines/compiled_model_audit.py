@@ -389,9 +389,25 @@ def _audit_metadata(compiled: dict, expected: dict, report: dict, errors: list[s
     """Verify attachment transforms, hitbox bounds and actual STUDIO_PROC_JIGGLE records."""
     bones = compiled["bones"]
     for key in ("attachments", "hitboxes"):
-        source_count = report.get(key, {}).get("count")
+        source = report.get(key, {})
+        source_count = (source.get("count") if isinstance(source, dict) else
+                        sum(item.get("status") != "unsupported" for item in source)
+                        if isinstance(source, list) else None)
         if source_count is not None and len(compiled[key]) != source_count:
             errors.append(f"Compiled {key} count {len(compiled[key])} differs from source {source_count}")
+    invalid_hitbox_bones, nonfinite_hitboxes, inverted_hitboxes = [], [], []
+    for index, actual in enumerate(compiled["hitboxes"]):
+        label = f"{index} ({actual['set']})"
+        if not 0 <= actual["bone"] < len(bones):
+            invalid_hitbox_bones.append(index)
+            errors.append(f"Compiled hitbox {label} references invalid bone {actual['bone']}")
+        minimum, maximum = np.asarray(actual["minimum"]), np.asarray(actual["maximum"])
+        if not np.isfinite(minimum).all() or not np.isfinite(maximum).all():
+            nonfinite_hitboxes.append(index)
+            errors.append(f"Compiled hitbox {label} has non-finite bounds")
+        elif np.any(minimum > maximum):
+            inverted_hitboxes.append(index)
+            errors.append(f"Compiled hitbox {label} has inverted extents")
     attachments = {item["name"].casefold(): item for item in compiled["attachments"]}
     for item in expected["attachments"]:
         actual = attachments.get(item["name"].casefold())
@@ -417,8 +433,13 @@ def _audit_metadata(compiled: dict, expected: dict, report: dict, errors: list[s
     for name in wanted:
         if name.casefold() not in jiggles:
             errors.append(f"Jiggle bone {name} lacks a compiled type-5 procedural record")
+    source_hitboxes = report.get("hitboxes", {})
+    generated_hitboxes = isinstance(source_hitboxes, dict) and source_hitboxes.get("status") == "generated"
     return dict(attachments=len(compiled["attachments"]), expected_attachments=len(expected["attachments"]),
                 hitboxes=len(compiled["hitboxes"]), expected_hitboxes=len(expected["hitboxes"]),
+                generated_hitboxes=len(compiled["hitboxes"]) if generated_hitboxes else 0,
+                hitbox_validation=dict(checked=len(compiled["hitboxes"]), invalid_bone_indices=invalid_hitbox_bones,
+                                       nonfinite_bounds=nonfinite_hitboxes, inverted_extents=inverted_hitboxes),
                 jiggle_bones=[dict(name=bone["name"], flags=bone["jiggle_flags"]) for bone in jiggles.values()])
 
 
