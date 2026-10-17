@@ -328,7 +328,7 @@ def _material_sources(options, asset) -> Path:
 
 def _materials(options, asset, log, cancel) -> list[Path]:
     """Convert full resource-relative material paths into an isolated addon."""
-    from s2kit.pipelines import materials, vmat
+    from s2kit.pipelines import materials, semantic_materials, vmat
     from s2kit.pipelines.model_fidelity import resource_token
 
     root = _material_sources(options, asset)
@@ -363,9 +363,25 @@ def _materials(options, asset, log, cancel) -> list[Path]:
         raise ValueError(f"No referenced VMAT materials were found under {root}")
     written = []
     audits = []
+    compiled_materials = asset.compiled_input and not options.material_source
+    source_stamp = input_signature(options, [asset]) if compiled_materials else ""
+    implementation_stamp = _stage_signature("materials") if compiled_materials else ""
     for relative, path in selected:
         check_cancelled(cancel)
-        entry = vmat.VmatParser(texture_root=root).parse(path, root=root)
+        if compiled_materials:
+            from s2kit.pipelines import vrf
+
+            entry, provenance, sources = semantic_materials.resolve_material(
+                resource=relative + ".vmat", raw_vmat=path, raw_root=root,
+                source=Path(asset.source), project=Path(options.project),
+                vrf_executable=vrf.resolve_vrf_executable(options.vrf_executable or None),
+                source_signature=source_stamp, implementation_signature=implementation_stamp,
+                log=lambda message: log(message, "INFO"), cancel=cancel)
+            written.extend(sources)
+        else:
+            entry = vmat.VmatParser(texture_root=root).parse(path, root=root)
+            provenance = semantic_materials.material_provenance(entry)
+            provenance["mode"] = "explicit_material_source" if options.material_source else "exported_vmat"
         if not entry.buildable:
             raise ValueError(f"No resolved base color for {path}")
         target_resource = resource_path(required.get(relative, relative))
@@ -379,7 +395,8 @@ def _materials(options, asset, log, cancel) -> list[Path]:
         written.extend(result.written)
         audits.append({"source": relative, "target": target_resource.as_posix(),
                        "status": "adapted", "notes": [*entry.warnings, *result.notes],
-                       "shader": entry.shader, "target_shader": settings.shader})
+                       "shader": entry.shader, "target_shader": settings.shader,
+                       "source_provenance": provenance})
     original_vmts = {
         payload / "materials" / "models" / options.namespace / (entry["target"] + ".vmt")
         for entry in audits
@@ -750,7 +767,7 @@ def _stage_signature(kind: str) -> str:
                    "ragdoll_physics", "ragdoll_contacts", "ragdoll_flex", "ragdoll_runtime", "ragdoll_correctives", "procedural_native",
                    "ragdoll_animations", "morph_animation", "model_metadata", "smd_animation_export",
                    "gltf_animation", "glb_skin", "native_port", "skeleton_retarget"],
-        "materials": ["materials", "vmat", "vmt", "pbr_maps", "textures"],
+        "materials": ["materials", "semantic_materials", "soundscape", "vmat", "vmt", "pbr_maps", "textures"],
         "compile": ["studiomdl", "phy_audit", "phy_geometry", "ragdoll_flex", "compiled_model_audit", "compiled_render_coverage", "compiled_materials",
                     "compiled_morph_geometry", "compiled_lod_vertices", "ragdoll_animation_audit", "procedural_native"],
         "compile_pm": ["studiomdl", "phy_audit", "phy_geometry", "ragdoll_flex", "compiled_model_audit", "compiled_render_coverage", "compiled_materials",

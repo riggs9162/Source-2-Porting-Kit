@@ -138,6 +138,7 @@ The project contains:
 | `addon/` | Validated model, material and Lua runtime files ready for GMod |
 | `modelsrc/` | Editable SMD, DMX and QC sources, animation library and feature audits |
 | `extracted/` | Exported glTF, textures and original authoring metadata |
+| `semantic-materials/` | Hash-verified per-VMAT texture contexts for compiled inputs |
 | `port-report.md`, `port-report.json` | Per-model outcomes and links to detailed audits |
 | `workflow-queue.json` | Versioned checkpoints and output hashes for resume |
 | `addon-manifest.json` | Exact packaged file list and SHA-256 hashes |
@@ -179,6 +180,15 @@ Lower LODs with different materials use stable compiler slots and explicit
 per-LOD, per-skin QC material replacements. Generated VMT aliases reuse the
 original shader bytes and textures. Compiled validation compares material and
 triangle coverage for every bodygroup choice and LOD before packaging.
+
+Compiled-input materials are decompiled individually into isolated project caches.
+Distinct compiled textures can share an authored PNG name, so materials use their
+own shader-aware channel exports rather than shared extraction aliases. The material
+report records original compiled texture references, exact semantic map paths and
+hashes, and validated channel selections for omitted builtin defaults. Cache reuse
+requires a complete verified file inventory; cancellation cannot certify a partial
+export. Explicit material-source overrides and exported-folder inputs retain their
+direct input semantics. Packaging still rejects conflicting shared payload bytes.
 
 Source 1 imposes differences that the report measures. Capsule and sphere
 tessellation targets at most 0.05 inches surface error and 1% volume error.
