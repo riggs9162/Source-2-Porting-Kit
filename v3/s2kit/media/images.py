@@ -176,6 +176,25 @@ def _has_alpha(image: Any) -> bool:
 # Preview rendering
 # ----------------------------------------------------------------------
 
+def export_texture(path: Any, *, max_size: int = 0, channel: str = "rgba") -> tuple[bytes, TextureInfo]:
+    """Encode a texture without preview backgrounds or upscaling, preserving RGBA channels."""
+    Image = _pillow()
+    image, info = load(path)
+    if max_size > 0 and max(image.size) > max_size:
+        scale = max_size / max(image.size)
+        target = (max(1, int(image.width * scale)), max(1, int(image.height * scale)))
+        image = Image.merge("RGBA", tuple(plane.resize(target, Image.NEAREST) for plane in image.split()))
+    if channel in ("r", "g", "b", "a"):
+        image = image.getchannel(channel.upper()).convert("RGB")
+    elif channel == "luminance":
+        image = image.convert("L").convert("RGB")
+    elif channel == "rgb":
+        image = image.convert("RGB")
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue(), info
+
+
 def render_preview(path: Any, *, max_size: int = 1024, channel: str = "rgba",
                    background: str = "checker", mip: int = 0, frame: int = 0,
                    face: int = 0, smooth: bool = False,

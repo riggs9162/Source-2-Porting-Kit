@@ -140,12 +140,10 @@ the texture viewer without leaving the app.
             ctx.status(f"{index}/{len(sources)}  {source.name}")
 
             try:
-                png, info = images.render_preview(
+                png, info = images.export_texture(
                     source,
-                    max_size=clamp or 1 << 15,
+                    max_size=clamp,
                     channel=channel,
-                    background="dark",
-                    smooth=False,
                 )
             except Exception as exc:
                 failed += 1
