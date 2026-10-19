@@ -778,6 +778,13 @@ def _stage_signature(kind: str) -> str:
                 "materials": _materials, "compile": _compile, "compile_pm": _compile,
                 "package": _package, "install": _install, "calibrate": _compiler_game}[kind]
     digest = hashlib.sha256(_implementation_bytes(function))
+    from s2kit.core import asset_defaults
+
+    defaults_source = Path(__file__).resolve().parent.parent / "core" / "asset_defaults.py"
+    defaults_bytes = (defaults_source.read_bytes() if defaults_source.is_file() else
+                      json.dumps({name: value for name, value in vars(asset_defaults).items()
+                                  if name.isupper()}, sort_keys=True).encode())
+    digest.update(defaults_bytes)
     helpers = [_paths, _write_json, resource_path, _implementation_bytes]
     helpers.extend({
         "native": [_render_source], "player": [_render_source],
@@ -874,11 +881,14 @@ def run_ragdoll_workflow(options, *, inspect_only: bool = False,
             write_report(project, state)
             return state
         state["status"] = "running"
+        converter_signatures = {}
         try:
             for index, (key, kind, asset, deps) in enumerate(queue):
                 check_cancelled(cancel)
                 record = state["tasks"][key]
-                code_signature = _stage_signature(kind)
+                if kind not in converter_signatures:
+                    converter_signatures[kind] = _stage_signature(kind)
+                code_signature = converter_signatures[kind]
                 cache_dependencies = ([name for name in state["tasks"] if name not in {"package", "install"}]
                                       if kind == "package" else deps)
                 dependency_signature = _dependency_signature(state["tasks"], cache_dependencies)

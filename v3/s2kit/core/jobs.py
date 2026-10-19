@@ -27,7 +27,7 @@ import threading
 import time
 import traceback
 import uuid
-from concurrent.futures import as_completed as _as_completed
+from concurrent.futures import FIRST_COMPLETED, wait
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional, Sequence
@@ -39,6 +39,7 @@ LEVEL_ORDER = {name: index for index, name in enumerate(LEVELS)}
 
 STATUS_RUNNING = "running"
 STATUS_SUCCESS = "success"
+STATUS_PARTIAL = "partial"
 STATUS_FAILED = "failed"
 STATUS_CANCELLED = "cancelled"
 
@@ -291,28 +292,34 @@ class JobContext:
 
         with ThreadPoolExecutor(max_workers=count) as pool:
             futures = {}
-            for index, item in enumerate(entries):
+            next_index = 0
+            while futures or next_index < total:
                 if self.cancelled:
+                    for future in futures:
+                        future.cancel()
                     break
-                futures[pool.submit(worker, item)] = (index, item)
-
-            for future in _as_completed(futures):
-                index, item = futures[future]
-                done += 1
-                name = label(item)
-                try:
-                    outcome.results[index] = future.result()
-                    outcome.succeeded += 1
-                    if log_each:
-                        self.debug(f"[{done}/{total}] {name}")
-                except JobCancelled:
-                    outcome.cancelled += 1
-                except Exception as exc:
-                    outcome.failed += 1
-                    outcome.errors.append((item, exc))
-                    self.error(f"{name}: {type(exc).__name__}: {exc}")
-                self.progress(done, total)
-                self.status(f"{done}/{total}  {name}")
+                while next_index < total and len(futures) < count * 2 and not self.cancelled:
+                    item = entries[next_index]
+                    futures[pool.submit(worker, item)] = (next_index, item)
+                    next_index += 1
+                completed, _ = wait(futures, timeout=0.05, return_when=FIRST_COMPLETED)
+                for future in completed:
+                    index, item = futures.pop(future)
+                    done += 1
+                    name = label(item)
+                    try:
+                        outcome.results[index] = future.result()
+                        outcome.succeeded += 1
+                        if log_each:
+                            self.debug(f"[{done}/{total}] {name}")
+                    except JobCancelled:
+                        outcome.cancelled += 1
+                    except Exception as exc:
+                        outcome.failed += 1
+                        outcome.errors.append((item, exc))
+                        self.error(f"{name}: {type(exc).__name__}: {exc}")
+                    self.progress(done, total)
+                    self.status(f"{done}/{total}  {name}")
 
         if self.cancelled:
             raise JobCancelled()
@@ -370,14 +377,15 @@ class JobRunner:
         self._lock = threading.Lock()
 
     def start(self, tool_id: str, params: dict[str, Any],
-              prefs: dict[str, Any], function: JobFunction) -> JobHandle:
+              prefs: dict[str, Any], function: JobFunction, *,
+              queue_size: int = 0) -> JobHandle:
         """Run `function(ctx)` on a worker thread and return its handle."""
         job_id = uuid.uuid4().hex[:12]
         handle = JobHandle(
             job_id=job_id,
             tool_id=tool_id,
             params=dict(params),
-            events=queue.Queue(),
+            events=queue.Queue(maxsize=queue_size),
             cancel_event=threading.Event(),
             started_at=time.time(),
         )
@@ -387,8 +395,8 @@ class JobRunner:
         def worker() -> None:
             try:
                 function(ctx)
-                handle.status = (STATUS_CANCELLED if ctx.cancelled
-                                 else STATUS_SUCCESS)
+                handle.status = (STATUS_CANCELLED if ctx.cancelled else
+                                 STATUS_PARTIAL if ctx.counts()["ERROR"] else STATUS_SUCCESS)
             except JobCancelled:
                 handle.status = STATUS_CANCELLED
                 ctx.warn("Cancelled by user.")
