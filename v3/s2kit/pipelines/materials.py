@@ -163,6 +163,9 @@ class MaterialOptions:
     #: material carries $bumpmap, $normalmap or $phong, and lights it from a
     #: single point instead.
     emit_normal: bool = True
+    #: Bake fixed normal relief into the base colour when normal output is off.
+    bake_normal_detail: bool = False
+    normal_detail_strength: float = 0.25
     #: Green-channel handling: auto | flip | keep. Source 2 authors normals the
     #: other way up from Source 1, so the default flips - see
     #: :func:`~s2kit.pipelines.pbr_maps.should_invert_green`.
@@ -183,10 +186,11 @@ class MaterialOptions:
 
     @property
     def wants_normal(self) -> bool:
-        """Whether this build has any use for a normal map.
+        """Whether a missing normal map should fail this build.
 
         Exo PBR always does - its shader reads one. Fake PBR only does when the
-        material is shipping a `$bumpmap`.
+        material is shipping a `$bumpmap`. The optional base-colour relief bake
+        uses an authored normal when present without requiring one.
         """
         return self.mode != "fake" or self.emit_normal
 
@@ -305,9 +309,10 @@ def load_maps(source: MaterialSource, options: MaterialOptions, *,
               cancel: Optional[threading.Event] = None) -> LoadedMaps:
     """Decode every role the source declares, at one shared working resolution.
 
-    Colour is always required; the normal joins it unless the build has no use
-    for one. Everything else stays None when absent, and the bakes downstream
-    read that as "the source did not author this", not "use a default".
+    Colour is always required; normal output also requires a normal unless
+    synthesis is enabled. A normal-free build can use an optional authored
+    normal for base-colour relief, falling back to flat when absent. Other
+    missing roles stay None rather than inventing an unauthored signal.
     """
     cap = _working_cap(source, options)
     if cap:
@@ -518,6 +523,25 @@ def _build_fake(source: MaterialSource, output_dir: Path, name: str,
 
     base = normal = phong = envmask = selfillum = None
     tintable = False
+    bake_detail = False
+    if options.bake_normal_detail:
+        if options.emit_normal:
+            detail_note = "Normal detail bake skipped: Ship a normal map is on"
+        elif not compute:
+            detail_note = "Normal detail bake requires VTF texture generation"
+        elif options.normal_detail_strength <= 0.0:
+            detail_note = "Normal detail bake skipped: strength is zero"
+        elif not source.has("normal"):
+            detail_note = "Normal detail bake skipped: no source normal map"
+        elif pbr_maps.is_flat_normal(maps.normal):
+            detail_note = "Normal detail bake skipped: normal map is flat or unavailable"
+        else:
+            bake_detail = True
+            detail_note = ("Normal detail baked into base texture "
+                           f"(strength {options.normal_detail_strength:.2f})")
+        if not bake_detail:
+            result.notes.append(detail_note)
+        log(detail_note)
 
     if compute:
         # Every bake below reads the same AO, so the emissive relief is applied
@@ -546,7 +570,12 @@ def _build_fake(source: MaterialSource, output_dir: Path, name: str,
                                   if tint_mode != "off" else 0.0),
             translucency=maps.translucency,
             tintmask=maps.tintmask if tintable else None,
-            tint_amount=source.model_tint_amount)
+            tint_amount=source.model_tint_amount,
+            normal_detail=maps.normal if bake_detail else None,
+            normal_detail_strength=options.normal_detail_strength,
+            invert_normal_green=pbr_maps.should_invert_green(options.normal_green,
+                                                             source.normal),
+            selfillum=maps.selfillum)
 
         _check(cancel)
         if emit_bumpmap:

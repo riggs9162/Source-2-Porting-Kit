@@ -131,6 +131,18 @@ is worth checking: a set scraped from somewhere other than Source 2 may already
 be in Source 1's convention. Name the file `_normal_dx` and it is left alone, or
 set **Normal green channel** to *Never flip* for the whole run.
 
+#### Baking normal detail into the base texture
+
+For static props, turn **Ship a normal map** off and enable **Bake normal detail
+into base texture**. The source normal then adds fixed diffuse relief to the
+colour texture without shipping a bumpmap or Phong block. **Baked detail
+strength** defaults to a subtle 0.25; 0 makes no change. The bake honours
+**Normal green channel**, preserves alpha, and fades out under emissive pixels.
+Missing or flat normals are skipped, and **Write VTF textures** must be on.
+
+The shading cannot follow moving lights and may reveal rotated UV islands.
+The bake is off by default and only applies to Fake PBR with normal output off.
+
 #### What it cannot know
 
 Filenames say nothing about translucency, glow or entity tint, so those are set

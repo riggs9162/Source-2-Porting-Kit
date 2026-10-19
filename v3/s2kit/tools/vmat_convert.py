@@ -156,6 +156,19 @@ for anything that has to sit in baked lighting. `$envmap` is untouched either wa
 - a cubemap reflection needs no tangent normal - so a static prop can still be
 shiny.
 
+#### Baking normal detail into the base texture
+
+With **Ship a normal map** off, enable **Bake normal detail into base texture**
+to retain subtle surface relief without writing a bumpmap or Phong block.
+**Baked detail strength** defaults to 0.25; 0 leaves the base texture unchanged.
+The bake uses the source normal and the **Normal green channel** setting, keeps
+opacity and tint masks intact, and fades out under emissive pixels. Missing or
+flat normals are skipped. **Write VTF textures** must be enabled.
+
+This is fixed shading, so it cannot follow moving lights and may reveal rotated
+UV islands. It is an optional visual approximation for static props, not dynamic
+normal mapping. The default remains off.
+
 #### Nothing is invented
 
 A material with no roughness or metallic gets no Phong block and no

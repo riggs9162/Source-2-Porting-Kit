@@ -133,6 +133,19 @@ The green channel is inverted on the way in, because Source 2 authors normals
 green-up and Source 1 wants them green-down. A map whose filename says `_dx` is
 left alone; **Normal green channel** forces it either way.
 
+#### Baking normal detail for static props
+
+Turn **Ship a normal map** off and enable **Bake normal detail into base texture**
+to bake fixed diffuse relief from the source normal into the base colour.
+**Baked detail strength** defaults to a subtle 0.25; 0 makes no change. This uses
+**Normal green channel**, preserves opacity and tint masks, and fades out under
+the emissive mask. Missing or flat normals are skipped. Enable **Write VTF
+textures** to write the baked result; a VMT-only run cannot change the texture.
+
+The bake writes no bumpmap or Phong block. Its shading cannot follow moving
+lights and may reveal rotated UV islands. It is off by default and only applies
+to Fake PBR with normal output off.
+
 #### Tuning workflow
 
 Every run is stored in History with its parameters. Find a setting that looks

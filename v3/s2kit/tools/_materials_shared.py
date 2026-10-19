@@ -136,6 +136,18 @@ def fake_pbr_params(*, group: str = "Fake PBR") -> list[Param]:
                        "lightmapped lighting VRAD baked for it; every branch "
                        "before CS:GO lights a normal-mapped static prop from a "
                        "single point instead. $envmap is unaffected."),
+        BoolParam("bake_normal_detail", "Bake normal detail into base texture",
+                  default=False, group=group, depends_on=("mode", "fake"),
+                  help="Uses the source normal to bake fixed surface shading "
+                       "when Ship a normal map is off. Requires Write VTF "
+                       "textures. The shading cannot follow moving lights and "
+                       "may reveal rotated UV islands."),
+        FloatParam("normal_detail_strength", "Baked detail strength", default=0.25,
+                   min=0.0, max=1.0, step=0.05, decimals=2, group=group,
+                   depends_on=("mode", "fake"),
+                   help="Strength of the optional normal detail bake. 0 leaves "
+                        "the base texture unchanged; 0.25 gives subtle relief. "
+                        "Only applies when Ship a normal map is off."),
         ChoiceParam("normal_green", "Normal green channel", default="auto",
                     group=group, choices=NORMAL_GREEN_CHOICES,
                     depends_on=("mode", "fake"),
@@ -283,6 +295,8 @@ def build_options(params: dict[str, Any], prefs: dict[str, Any], *,
         phong_tint_mode=str(params.get("phong_tint_mode", "selective")),
         colored_metal_relief=float(params.get("colored_metal_relief", pbr_maps.COLORED_METAL_RELIEF)),
         emit_normal=bool(params.get("emit_normal", True)),
+        bake_normal_detail=bool(params.get("bake_normal_detail", False)),
+        normal_detail_strength=float(params.get("normal_detail_strength", 0.25)),
         normal_green=str(params.get("normal_green", "auto")),
         translucent=translucent,
         alphatest=alphatest,

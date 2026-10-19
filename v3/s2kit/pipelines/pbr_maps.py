@@ -178,6 +178,65 @@ def material_stats(roughness: Optional[np.ndarray],
 # Fake PBR bakes
 # ----------------------------------------------------------------------
 
+def _normal_detail_rows(normal: np.ndarray, height: int, width: int,
+                        start: int, stop: int) -> np.ndarray:
+    """Sample signed tangent normals bilinearly without gamma or alpha mixing."""
+    if normal.shape[:2] == (height, width):
+        return np.array(normal[start:stop, :, :3], dtype=np.float32) * 2.0 - 1.0
+    source_height, source_width = normal.shape[:2]
+    x = np.clip((np.arange(width, dtype=np.float32) + 0.5)
+                * (source_width / width) - 0.5, 0, source_width - 1)
+    y = np.clip((np.arange(start, stop, dtype=np.float32) + 0.5)
+                * (source_height / height) - 0.5, 0, source_height - 1)
+    x0, y0 = x.astype(np.intp), y.astype(np.intp)
+    x1, y1 = np.minimum(x0 + 1, source_width - 1), np.minimum(y0 + 1, source_height - 1)
+    fx = (x - x0).astype(np.float32)[None, :, None]
+    fy = (y - y0).astype(np.float32)[:, None, None]
+    top = normal[y0[:, None], x0[None, :], :3] * (1.0 - fx)
+    top += normal[y0[:, None], x1[None, :], :3] * fx
+    bottom = normal[y1[:, None], x0[None, :], :3] * (1.0 - fx)
+    bottom += normal[y1[:, None], x1[None, :], :3] * fx
+    top *= 1.0 - fy
+    top += bottom * fy
+    return top * 2.0 - 1.0
+
+
+def apply_normal_detail(linear: np.ndarray, normal: Optional[np.ndarray], *,
+                        strength: float = 0.25, invert_green: bool = False,
+                        selfillum: Optional[np.ndarray] = None) -> None:
+    """Multiply linear RGB in place by fixed, flat-normal-neutral relief shading.
+
+    A tangent-space key at (-1, -1, 2) and equal ambient fill give subtle detail
+    without baking specular highlights. Emissive pixels suppress the effect.
+    Row blocks bound temporary memory even when a batch contains 4K materials.
+    """
+    strength = float(np.clip(strength, 0.0, 1.0))
+    if normal is None or strength <= 0.0 or is_flat_normal(normal):
+        return
+    height, width = linear.shape[:2]
+    glow = emissive_weight(selfillum, height, width)
+    light = np.array([-1.0, -1.0, 2.0], dtype=np.float32) / np.sqrt(np.float32(6.0))
+    neutral = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+    for start in range(0, height, textures.CHUNK_ROWS):
+        stop = min(start + textures.CHUNK_ROWS, height)
+        vectors = _normal_detail_rows(normal, height, width, start, stop)
+        np.clip(vectors, -1.0, 1.0, out=vectors)
+        if invert_green:
+            vectors[:, :, 1] *= -1.0
+        lengths = np.linalg.norm(vectors, axis=2)
+        invalid = ~np.isfinite(lengths) | (lengths <= 1e-6)
+        lengths[invalid] = 1.0
+        vectors /= lengths[:, :, None]
+        flat = np.all(np.abs(vectors - neutral) < 4.0 / 255.0, axis=2)
+        vectors[invalid | flat] = neutral
+        diffuse = np.maximum(np.sum(vectors * light, axis=2), 0.0)
+        shade = (0.5 + 0.5 * diffuse) / (0.5 + 0.5 * light[2]) - 1.0
+        shade *= strength
+        if glow is not None:
+            shade *= 1.0 - glow[start:stop]
+        linear[start:stop] *= (1.0 + shade[:, :, None])
+
+
 def bake_basetexture(color: np.ndarray,
                      ao: Optional[np.ndarray],
                      metallic: Optional[np.ndarray], *,
@@ -187,7 +246,11 @@ def bake_basetexture(color: np.ndarray,
                      colored_metal_relief: float = COLORED_METAL_RELIEF,
                      translucency: Optional[np.ndarray] = None,
                      tintmask: Optional[np.ndarray] = None,
-                     tint_amount: Optional[float] = None) -> np.ndarray:
+                     tint_amount: Optional[float] = None,
+                     normal_detail: Optional[np.ndarray] = None,
+                     normal_detail_strength: float = 0.25,
+                     invert_normal_green: bool = False,
+                     selfillum: Optional[np.ndarray] = None) -> np.ndarray:
     """Bake the `_color` basetexture: RGB with AO and metal darkening, plus alpha.
 
     RGB is AO-multiplied and darkened where the surface is metallic, because
@@ -211,6 +274,9 @@ def bake_basetexture(color: np.ndarray,
     pixels, so coloured metals - gold, copper, brass - keep more of their albedo.
     1.0 means fully saturated metals receive no suppression at all; grayscale
     metals always take the full factor so steel stays energy-conservative.
+
+    `normal_detail` optionally bakes fixed diffuse relief into linear RGB.
+    Alpha is untouched, and the self-illumination mask suppresses the relief.
     """
     rgb = np.clip(color[:, :, :3], 0.0, 1.0)
     height, width = rgb.shape[:2]
@@ -236,6 +302,8 @@ def bake_basetexture(color: np.ndarray,
     linear *= (1.0 - suppression[:, :, np.newaxis]
                * metal_values[:, :, np.newaxis])
 
+    apply_normal_detail(linear, normal_detail, strength=normal_detail_strength,
+                        invert_green=invert_normal_green, selfillum=selfillum)
     srgb = textures.linear_to_srgb(linear, out=linear)
     np.clip(srgb, 0.0, 1.0, out=srgb)
 
