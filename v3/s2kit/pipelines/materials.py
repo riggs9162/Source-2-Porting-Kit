@@ -26,6 +26,8 @@ a response the source material never asked for, and costs disk to do it.
 
 from __future__ import annotations
 
+from s2kit.core.asset_defaults import GLOW_MODES
+
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -40,11 +42,6 @@ LogFn = Callable[[str], None]
 #: Output keys that accept an individual resolution cap.
 OUTPUT_KEYS: tuple[str, ...] = ("color", "normal", "phong", "envmask", "selfillum")
 
-GLOW_MODES: tuple[tuple[str, str], ...] = (
-    ("selfillum", "$selfillum (classic, breaks with tint/translucency)"),
-    ("emissiveblend", "Emissive Blend (recommended)"),
-    ("emissiveblend_basecolor", "Emissive Blend from the base colour"),
-)
 
 
 class MaterialCancelled(RuntimeError):

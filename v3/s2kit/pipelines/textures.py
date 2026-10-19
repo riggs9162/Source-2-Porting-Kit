@@ -20,6 +20,8 @@ Two things in here are load-bearing and easy to undo by accident:
 
 from __future__ import annotations
 
+from s2kit.core.asset_defaults import IMAGE_EXTENSIONS
+
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional, Sequence
@@ -32,7 +34,6 @@ import numpy as np
 CHUNK_ROWS = 256
 
 #: Extensions the material scanners consider to be source textures.
-IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".tga", ".bmp", ".tif", ".tiff")
 
 
 class TextureError(RuntimeError):

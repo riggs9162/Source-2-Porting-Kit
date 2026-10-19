@@ -24,7 +24,10 @@ from s2kit.pipelines.vmat import KEY_ALIASES, VmatEntry, VmatParser
 def _digest(path: Path) -> str:
     """Hash complete cache content without retaining large images in memory."""
     with path.open("rb") as stream:
-        return hashlib.file_digest(stream, "sha256").hexdigest()
+        digest = hashlib.sha256()
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+        return digest.hexdigest()
 
 
 def _resource(value: str) -> PurePosixPath:

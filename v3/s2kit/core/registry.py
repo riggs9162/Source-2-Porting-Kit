@@ -43,6 +43,7 @@ class ToolSpec:
     badge: str = ""
     experimental: bool = False
     order: int = 100
+    definition: Any = None
 
     def matches(self, query: str) -> bool:
         needle = query.strip().lower()
@@ -70,21 +71,23 @@ def tool(*, id: str, title: str, category: str = "Utility",
          icon: str = "BUILD", description: str = "",
          keywords: Sequence[str] = (), badge: str = "",
          experimental: bool = False, order: int = 100) -> Callable[[type], type]:
-    """Class decorator that registers a :class:`~s2kit.ui.tool_page.ToolPage`.
+    """Register a shared declaration and its lazy page adapter.
 
     Example::
 
         @tool(id="vtf-inspect", title="VTF Inspector", category="Inspect",
               icon="IMAGE_SEARCH", description="Read VTF headers and mips.")
-        class VtfInspector(ToolPage):
+        class VtfInspector(ToolDefinition):
             ...
     """
 
     def decorator(cls: type) -> type:
         spec = ToolSpec(
-            id=id, title=title, category=category, factory=cls, icon=icon,
+            id=id, title=title, category=category,
+            factory=getattr(cls, "create_page", cls), icon=icon,
             description=description, keywords=tuple(keywords), badge=badge,
             experimental=experimental, order=order,
+            definition=cls if hasattr(cls, "EXECUTOR") else None,
         )
         register(spec)
         # The page needs to know its own identity when it saves params.

@@ -28,6 +28,8 @@ one stealing the other's normal map.
 
 from __future__ import annotations
 
+from s2kit.core.asset_defaults import MISSING_METAL_MODES
+
 import os
 import re
 from dataclasses import dataclass, field
@@ -75,13 +77,6 @@ NOISE_TOKENS: frozenset[str] = frozenset({
 WEAK_TOKENS: frozenset[str] = frozenset({"base", "d", "n", "r", "m"})
 
 #: How a missing metallic map can be synthesised - see `MISSING_METAL_MODES`.
-MISSING_METAL_MODES: tuple[tuple[str, str], ...] = (
-    ("off", "Leave it missing (no envmap, no metal darkening)"),
-    ("full", "Fully metallic"),
-    ("albedo_r", "The albedo's red channel"),
-    ("albedo_g", "The albedo's green channel"),
-    ("albedo_b", "The albedo's blue channel"),
-)
 
 
 @dataclass

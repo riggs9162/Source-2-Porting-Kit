@@ -14,6 +14,8 @@ material it is about to write before it writes it.
 
 from __future__ import annotations
 
+from s2kit.core.asset_defaults import BRANCH_LABELS
+
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional, Sequence
@@ -46,14 +48,6 @@ BRANCH_CAPABILITIES: dict[str, dict[str, bool]] = {
     },
 }
 
-BRANCH_LABELS: tuple[tuple[str, str], ...] = (
-    ("gmod", "Garry's Mod"),
-    ("l4d2", "Left 4 Dead 2"),
-    ("tf2", "Team Fortress 2"),
-    ("source2013_mp", "Source 2013 multiplayer"),
-    ("source2013_sp", "Source 2013 singleplayer"),
-    ("hl2", "Half-Life 2 (no modern parameters)"),
-)
 
 #: Parameters grouped into the comment sections a generated VMT is written in.
 SECTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (

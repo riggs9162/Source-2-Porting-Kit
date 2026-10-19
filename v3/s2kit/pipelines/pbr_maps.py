@@ -30,6 +30,8 @@ Everything takes and returns numpy arrays; nothing touches disk.
 
 from __future__ import annotations
 
+from s2kit.core.asset_defaults import COLORED_METAL_RELIEF, METAL_DIFFUSE_SUPPRESSION
+
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -40,11 +42,6 @@ from s2kit.pipelines import textures
 #: Floor used when dividing by linearised albedo luminance, so dark pixels do
 #: not blow the compensated mask up. Matches the dielectric F0 baseline.
 TINT_DIVIDE_FLOOR = 0.04
-
-#: Residual diffuse light compensates for stock Source 1 cubemap limitations.
-METAL_DIFFUSE_SUPPRESSION = 0.92
-#: Colored metals retain their hue through specular tint rather than diffuse relief.
-COLORED_METAL_RELIEF = 0.0
 
 #: Filename tokens that state a normal map's green-channel convention outright.
 #: An artist who bothered to label it knows better than any default.

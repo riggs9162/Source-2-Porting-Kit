@@ -124,12 +124,14 @@ class PathParam(Param):
         raw = self.coerce(value)
         if not raw:
             return None
-        if self.must_exist and self.mode != "save_file":
-            for path in self.paths(raw):
-                if not path.exists():
-                    return f"Path does not exist: {path}"
+        for path in self.paths(raw):
+            if self.must_exist and self.mode != "save_file" and not path.exists():
+                return f"Path does not exist: {path}"
+            if path.exists():
                 if self.mode == "directory" and not path.is_dir():
                     return f"Not a folder: {path}"
+                if self.mode in {"open_file", "open_files", "save_file"} and not path.is_file():
+                    return f"Not a file: {path}"
         return None
 
 

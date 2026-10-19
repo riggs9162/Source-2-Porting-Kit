@@ -19,6 +19,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -84,7 +85,14 @@ class Settings:
             tmp = self.path.with_suffix(".json.tmp")
             with open(tmp, "w", encoding="utf-8") as handle:
                 json.dump(self._values, handle, indent=2, sort_keys=True)
-            tmp.replace(self.path)
+            for attempt in range(50):
+                try:
+                    tmp.replace(self.path)
+                    break
+                except PermissionError:
+                    if attempt == 49:
+                        raise
+                    time.sleep(0.01)
         except OSError as exc:
             logger.error("Could not save settings: %s", exc)
 
