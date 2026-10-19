@@ -23,6 +23,7 @@ from typing import Optional
 from s2kit.core.jobs import JobContext
 from s2kit.core.params import options
 from s2kit.pipelines import materials, vmat
+from s2kit.pipelines.brush_materials import source1_surfaceprop
 from s2kit.tools import _materials_shared as shared
 from s2kit.definitions.vmat_convert import VmatConverter as _VmatConverterDefinition
 
@@ -46,7 +47,12 @@ class VmatConverter(_VmatConverterDefinition):
 
         texture_root = (Path(str(params["texture_root"]))
                         if params["texture_root"] else None)
-        entries = vmat.parse_all(found, root=root, texture_root=texture_root)
+        entries = vmat.parse_all(found, root=root, texture_root=texture_root,
+                                 blend_layers=str(params.get("blend_layers", "base")))
+        identities = [(entry.rel_dir.as_posix().casefold(), entry.name.casefold())
+                      for entry in entries]
+        if len(set(identities)) != len(identities):
+            raise ValueError("Layer output names collide with another input material")
 
         needle = str(params["name_filter"] or "").strip().lower()
         if needle:
@@ -88,6 +94,11 @@ class VmatConverter(_VmatConverterDefinition):
                 translucent=translucent, alphatest=alphatest,
                 tintable=entry.tintable and bool(params["port_tint"])
                          and options_mode == "fake")
+            if options.shader == "LightmappedGeneric":
+                options.surfaceprop = options.surfaceprop or source1_surfaceprop(entry.surfaceprop)
+                options.decal = entry.decal
+                if not entry.has("normal"):
+                    options.emit_normal = False
 
             folder = output_root
             if prefix_path:

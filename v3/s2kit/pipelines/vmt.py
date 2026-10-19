@@ -304,6 +304,25 @@ def _fresnel_ranges(avg_metallic: float, avg_roughness: float) -> str:
     return _vec3([facing, midpoint, 1.0])
 
 
+def brush_selfillum_params(glow_path: str, base_color_path: str, *,
+                          mode: str = "selfillum",
+                          tint: Sequence[float] = (1.0, 1.0, 1.0),
+                          brightness: float = 1.0) -> dict[str, str]:
+    """Use LightmappedGeneric's unlit additive detail pass for separate brush emission.
+
+    This shader does not expose VertexLitGeneric's separate self-illumination
+    mask or emissive-flow pass. Detail blend mode 5 preserves independent RGB
+    emission without consuming the base texture's opacity alpha.
+    """
+    return {
+        "$detail": glow_path,
+        "$detailblendmode": "5",
+        "$detailblendfactor": "1",
+        "$detailscale": "1",
+        "$detailtint": _vec3([max(0.0, float(channel) * brightness) for channel in tint]),
+    }
+
+
 def selfillum_params(glow_path: str, base_color_path: str, *,
                      mode: str = "selfillum",
                      tint: Sequence[float] = (1.0, 1.0, 1.0),

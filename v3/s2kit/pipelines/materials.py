@@ -91,6 +91,7 @@ class MaterialSource:
     heightmap: Pixels = None
 
     color_constant: Optional[tuple[float, float, float, float]] = None
+    normal_constant: Optional[tuple[float, float, float, float]] = None
     ao_constant: Optional[tuple[float, float, float, float]] = None
     translucency_constant: Optional[tuple[float, float, float, float]] = None
     selfillum_constant: Optional[tuple[float, float, float, float]] = None
@@ -111,6 +112,7 @@ class MaterialSource:
     glass_fresnel_exponent: Optional[float] = None
     #: Source 2 g_flModelTintAmount - scales the tint mask before baking.
     model_tint_amount: Optional[float] = None
+    color_tint: Optional[tuple[float, float, float]] = None
 
     def has(self, role: str) -> bool:
         """Whether this role has any signal at all - a path or a constant."""
@@ -170,6 +172,7 @@ class MaterialOptions:
     translucent: bool = False
     alphatest: bool = False
     tintable: bool = False
+    decal: bool = False
     glow_mode: str = "emissiveblend"
 
     # -- Exo PBR ---------------------------------------------------------
@@ -310,6 +313,9 @@ def load_maps(source: MaterialSource, options: MaterialOptions, *,
     synthesis is enabled. A normal-free build can use an optional authored
     normal for base-colour relief, falling back to flat when absent. Other
     missing roles stay None rather than inventing an unauthored signal.
+    Brush builds retain the colour map's dimensions and aspect ratio; other
+    shaders use the largest input resolution. Uniform brush colours can still
+    follow the resolution of their authored detail maps.
     """
     cap = _working_cap(source, options)
     if cap:
@@ -359,6 +365,9 @@ def load_maps(source: MaterialSource, options: MaterialOptions, *,
     color = rgba("color")
     if color is None:
         raise MaterialError("No colour map (a material cannot be built without one)")
+    if source.color_tint is not None:
+        color = color.copy()
+        color[:, :, :3] *= np.asarray(source.color_tint, dtype=np.float32)
 
     normal = rgba("normal")
     if normal is None:
@@ -392,15 +401,12 @@ def load_maps(source: MaterialSource, options: MaterialOptions, *,
         else:
             tintmask = scalar("tintmask")
 
-    # Work at the largest input's resolution so a high-res colour map is not
-    # thrown away because the roughness beside it was authored at 512. `cap` is
-    # already the tightest of the tool and per-output limits, so applying it here
-    # is the same bound the decode used - it only bites on synthesised uniforms,
-    # which arrive at 4x4 and get scaled up.
     present = [color, normal, ao, roughness, metallic, translucency,
                selfillum, tintmask, heightmap]
     height = max(item.shape[0] for item in present if item is not None)
     width = max(item.shape[1] for item in present if item is not None)
+    if options.shader == "LightmappedGeneric" and source.color is not None:
+        height, width = color.shape[:2]
     if cap > 0 and max(height, width) > cap:
         scale = cap / float(max(height, width))
         height = max(1, int(round(height * scale)))
@@ -700,6 +706,8 @@ def _fake_extra_params(source: MaterialSource, options: MaterialOptions,
                        has_selfillum: bool) -> dict[str, str]:
     """Transparency and glow parameters, which sit outside the standard blocks."""
     extra: dict[str, str] = {}
+    if options.decal:
+        extra["$decal"] = "1"
     if options.translucent:
         extra["$translucent"] = "1"
     elif options.alphatest:
@@ -714,7 +722,9 @@ def _fake_extra_params(source: MaterialSource, options: MaterialOptions,
                       if source.selfillum_brightness is not None else 1.0)
         brightness *= (source.selfillum_overall_scale
                        if source.selfillum_overall_scale is not None else 1.0)
-        extra.update(vmt.selfillum_params(
+        glow_params = (vmt.brush_selfillum_params if options.shader == "LightmappedGeneric"
+                       else vmt.selfillum_params)
+        extra.update(glow_params(
             f"{material_path}/{name}_selfillum",
             f"{material_path}/{name}_color",
             mode=options.glow_mode,
@@ -732,7 +742,8 @@ def _fake_extra_params(source: MaterialSource, options: MaterialOptions,
 
 def _has_selfillum_flow(source: MaterialSource, options: MaterialOptions) -> bool:
     """Whether the native emissive pass can sample the authored phase waveform."""
-    return (options.glow_mode.startswith("emissiveblend")
+    return (options.shader != "LightmappedGeneric"
+            and options.glow_mode.startswith("emissiveblend")
             and source.has("selfillum_flow_phase")
             and source.has("selfillum_flow_waveform"))
 
@@ -775,7 +786,8 @@ def _build_selfillum_flow(source: MaterialSource, output_dir: Path, name: str,
     _encode(_apply_output_cap(textures.to_uint8(flow), "selfillum", options, log),
             output_dir / f"{name}_flow.vtf", result, options, log,
             image_format="RGBA8888")
-    _encode(textures.to_uint8(waveform), output_dir / f"{name}_waveform.vtf",
+    _encode(_apply_output_cap(textures.to_uint8(waveform), "selfillum", options, log),
+            output_dir / f"{name}_waveform.vtf",
             result, options, log, image_format="RGBA8888")
 
 

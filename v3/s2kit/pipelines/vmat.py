@@ -37,7 +37,8 @@ from s2kit.pipelines.materials import MaterialSource
 #: Source 2 texture keys per role, most specific first.
 KEY_ALIASES: dict[str, tuple[str, ...]] = {
     "color": ("TextureColor", "TextureDiffuse", "TextureAlbedo",
-              "TextureBaseColor", "TextureBasecolor", "TextureBase", "TextureColorA"),
+              "TextureBaseColor", "TextureBasecolor", "TextureBase", "TextureColorA",
+              "GlassDustColor"),
     "normal": ("TextureNormal", "TextureNormalMap", "TextureNormalA"),
     "ao": ("TextureAmbientOcclusion", "TextureAO", "TextureOcclusion", "TextureAmbientOcclusionA"),
     "roughness": ("TextureRoughness", "TextureRough", "TextureRoughnessA"),
@@ -46,7 +47,8 @@ KEY_ALIASES: dict[str, tuple[str, ...]] = {
                   "TextureEmission", "TextureGlow"),
     "selfillum_flow_phase": ("TextureSelfIllumFlowPhase",),
     "selfillum_flow_waveform": ("TextureSelfIllumFlowWaveform",),
-    "translucency": ("TextureTranslucency", "TextureOpacity", "TextureAlpha"),
+    "translucency": ("TextureTranslucency", "TextureOpacity", "TextureAlpha",
+                     "GlassDustTranslucency"),
     "tintmask": ("TextureTintMask",),
     "heightmap": ("TextureHeight", "TextureDisplacement"),
 }
@@ -81,12 +83,12 @@ ROLE_TOKENS: dict[str, tuple[str, ...]] = {
 
 #: Roles stored as RGBA literals. Roughness and metallic literals use their
 #: dedicated scalar fields, taking the first component of the uniform texture.
-CONSTANT_ROLES = ("color", "ao", "selfillum", "translucency")
+CONSTANT_ROLES = ("color", "normal", "ao", "selfillum", "translucency")
 
 #: Shaders that render transparent even without an explicit blend flag.
-TRANSLUCENT_SHADERS = ("vr_glass.vfx", "vr_unlit.vfx", "vr_monitor.vfx")
+TRANSLUCENT_SHADERS = ("vr_glass.vfx", "vr_glass_markable.vfx", "vr_unlit.vfx", "vr_monitor.vfx")
 
-_KEY_RE = re.compile(r'"(?P<key>Texture[A-Za-z0-9_]+|GlassTintColor)"\s+"(?P<value>[^"]+)"')
+_KEY_RE = re.compile(r'"(?P<key>Texture[A-Za-z0-9_]+|Glass[A-Za-z0-9_]+)"\s+"(?P<value>[^"]+)"')
 _SHADER_RE = re.compile(r'"shader"\s+"(?P<value>[^"]+)"', re.IGNORECASE)
 _FLAG_RE = re.compile(r'"(?P<key>F_[A-Z_]+)"\s+"(?P<value>[01])"')
 _SCALAR_RE = re.compile(r'"(?P<key>g_fl[A-Za-z0-9_]+)"\s+"(?P<value>-?[0-9.]+)"')
@@ -127,6 +129,10 @@ class VmatEntry:
 
     tintable: bool = False
     model_tint_amount: Optional[float] = None
+    color_tint: Optional[tuple[float, float, float]] = None
+    surfaceprop: str = ""
+    decal: bool = False
+    layer: str = ""
 
     def has(self, role: str) -> bool:
         return role in self.resolved or role in self.constants
@@ -173,6 +179,7 @@ class VmatEntry:
             tintmask=self.resolved.get("tintmask") if tint else None,
             heightmap=self.resolved.get("heightmap"),
             color_constant=self.constants.get("color"),
+            normal_constant=self.constants.get("normal"),
             ao_constant=self.constants.get("ao"),
             translucency_constant=self.constants.get("translucency"),
             selfillum_constant=(self.constants.get("selfillum") if glow else None),
@@ -190,6 +197,7 @@ class VmatEntry:
             glass_max_opacity=self.glass_max_opacity,
             glass_fresnel_exponent=self.glass_fresnel_exponent,
             model_tint_amount=self.model_tint_amount,
+            color_tint=self.color_tint,
         )
 
 
@@ -353,6 +361,32 @@ class VmatParser:
         """Parse one vmat file into a :class:`VmatEntry`."""
         path = Path(vmat_path)
         text = path.read_text(encoding="utf-8", errors="ignore")
+        return self._parse_text(path, text, root)
+
+    def parse_layers(self, vmat_path: Any, root: Optional[Path] = None) -> list[VmatEntry]:
+        """Resolve each explicitly authored blend layer without borrowing sibling maps."""
+        from s2kit.pipelines.vmat_layers import layer_documents
+
+        path = Path(vmat_path)
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        documents = layer_documents(text)
+        if not documents:
+            return [self._parse_text(path, text, root)]
+        entries = []
+        for index, (layer, document) in enumerate(documents):
+            entry = self._parse_text(path, document, root, allow_siblings=False)
+            entry.layer = layer
+            if index:
+                entry.name += f"_layer_{layer.lower()}"
+            entry.warnings.append(
+                "adapted: exported authored layer " + layer
+                + " independently; dynamic blending and triplanar mapping are not reproduced")
+            entries.append(entry)
+        return entries
+
+    def _parse_text(self, path: Path, text: str, root: Optional[Path], *,
+                    allow_siblings: bool = True) -> VmatEntry:
+        """Parse an original material or one normalized independent layer."""
 
         raw_keys: dict[str, str] = {}
         for key, value in _KEY_RE.findall(text):
@@ -374,11 +408,9 @@ class VmatParser:
         shader_match = _SHADER_RE.search(text)
         shader = shader_match.group("value").lower() if shader_match else ""
 
-        # Source 2 has many blend flags (F_TRANSLUCENT, F_ADDITIVE_BLEND,
-        # F_ADDITIVE_BLEND_OVER_ALPHA, F_BLEND_MODE...). Any set flag whose name
-        # implies blending counts.
         translucent = (
-            any(value == "1" and ("TRANSLUCENT" in key or ("BLEND" in key and key != "F_BLEND"))
+            any(value == "1" and key in {"F_TRANSLUCENT", "F_ADDITIVE_BLEND",
+                "F_ADDITIVE_BLEND_OVER_ALPHA", "F_ALPHA_BLEND", "F_BLEND_MODE"}
                 for key, value in flags.items())
             or any(name in shader for name in TRANSLUCENT_SHADERS))
         alphatest = flags.get("F_ALPHA_TEST") == "1"
@@ -402,8 +434,12 @@ class VmatParser:
             glass_max_opacity=scalar("g_flGlassFresnelMaxOpacity"),
             glass_fresnel_exponent=scalar("g_flGlassFresnelExponent"),
             model_tint_amount=scalar("g_flModelTintAmount"),
+            color_tint=vec3("g_vColorTint"),
+            surfaceprop=next(iter(re.findall(
+                r'"PhysicsSurfaceProperties"\s+"([^"]+)"', text)), ""),
+            decal="decal" in shader or "overlay" in shader,
         )
-        if shader == "vr_glass.vfx":
+        if shader in {"vr_glass.vfx", "vr_glass_markable.vfx"}:
             glass_tint = self.parse_rgba(raw_keys.get("GlassTintColor", ""))
             entry.glass_tint = glass_tint[:3] if glass_tint else None
         if "TextureColorA" in raw_keys:
@@ -437,11 +473,11 @@ class VmatParser:
             else:
                 # The tintmask role tokens include the generic "mask", so its
                 # sibling search only runs when the vmat asked for a tint mask.
-                allow_siblings = (not ambiguous and
+                use_siblings = (allow_siblings and not ambiguous and
                                   (role != "tintmask" or flags.get("F_TINT_MASK") == "1") and
                                   (role != "translucency" or raw is not None
                                    or entry.translucent or entry.alphatest))
-                sibling = self._sibling_for(path, role) if allow_siblings else None
+                sibling = self._sibling_for(path, role) if use_siblings else None
                 if sibling is not None:
                     resolved = sibling
                     entry.sources[role] = "sibling"
@@ -507,13 +543,17 @@ def find_vmats(root: Any, recursive: bool = True) -> list[Path]:
 
 
 def parse_all(paths: Iterable[Any], *, root: Optional[Path] = None,
-              texture_root: Optional[Path] = None) -> list[VmatEntry]:
+              texture_root: Optional[Path] = None,
+              blend_layers: str = "base") -> list[VmatEntry]:
     """Parse a batch of vmats, skipping the unreadable ones."""
     parser = VmatParser(texture_root)
     entries: list[VmatEntry] = []
     for path in paths:
         try:
-            entries.append(parser.parse(path, root))
+            if blend_layers == "all":
+                entries.extend(parser.parse_layers(path, root))
+            else:
+                entries.append(parser.parse(path, root))
         except OSError:
             continue
     return entries

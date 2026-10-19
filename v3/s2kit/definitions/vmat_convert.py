@@ -42,6 +42,12 @@ class VmatConverter(ToolDefinition):
                   help="Case-insensitive substring filter. Empty converts all."),
         ChoiceParam("requires", "Only convert materials with",
                     default="color", group="Input", choices=REQUIREMENT_CHOICES),
+        ChoiceParam("blend_layers", "Blend material layers", default="base",
+                    group="Input", choices=options(
+                        ("base", "Base layer only"),
+                        ("all", "All layers as separate materials")),
+                    help="Keeps the original name for layer A and appends "
+                         "_layer_b, _layer_c, etc. Dynamic blending is not exported."),
 
         PathParam("output_root", "Output folder", mode="directory",
                   required=True, must_exist=False, group="Destination"),
@@ -84,6 +90,18 @@ Point it at the `materialsrc/` folder VRF Batch Export produced and it writes a
 Source 1 material for every `.vmat` inside.
 
 #### What comes across
+
+**Blend material layers > All** exports each authored surface independently.
+The original material name identifies the base layer; extra layers use
+`_layer_b`, `_layer_c`, etc. Each keeps its own maps, constants and colour tint.
+Source 2 dynamic transitions and triplanar mapping remain adaptations.
+
+With **LightmappedGeneric**, materials without authored normals omit the
+bumpmap, source surface properties are translated to stock Source 1 names,
+and projected decals retain decal intent. Separate emission uses the shader's
+unlit additive detail pass, preserving opacity; animated emissive flow is
+represented by its static emission texture. Markable glass retains front-face
+dust and opacity, while runtime cracking and separate backface dust are omitted.
 
 | Source 2 | Source 1 |
 | --- | --- |
