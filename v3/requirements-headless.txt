@@ -1,0 +1,7 @@
+# Shared nonvisual tools; no Flet runtime required.
+Pillow>=10
+numpy>=1.24
+sourcepp>=2025.11.5
+trimesh>=4.0
+scipy>=1.10
+srctools>=2.6

@@ -10,7 +10,14 @@ python v3/run.py --desktop  # launch the desktop app directly
 python v3/run.py --web      # launch in the default browser, loopback only
 python v3/run.py --check    # environment report, no window
 python v3/run.py --self-test  # headless integration test
+python v3/cli.py list --json # nonvisual tools, no Flet dependency
+python v3/mcp_server.py     # local stdio MCP server (Python 3.11+)
 ```
+
+The [agent access guide](AGENT_ACCESS.md) covers dependency setup, CLI requests,
+MCP client configuration, cancellation, persisted results and workflow resume.
+All 19 nonvisual tools share their backend with the UI; Hotspot Editor remains
+interactive.
 
 Browser mode runs the same tools on this PC at `127.0.0.1`; keep the Python
 launcher running while using it. Browser security hides full filesystem paths,
@@ -45,24 +52,37 @@ window and cancellation is always responsive.
 
 ## Writing a tool
 
-One file in [s2kit/tools/](s2kit/tools/); it is picked up automatically.
+Declare a tool in [s2kit/definitions/](s2kit/definitions/) and put its executor
+in [s2kit/tools/](s2kit/tools/). Discovery loads declarations automatically;
+executors and UI pages load only when needed. Schemas must not import Flet or
+conversion libraries.
 
 ```python
-from s2kit.core.jobs import JobContext
 from s2kit.core.params import BoolParam, PathParam
 from s2kit.core.registry import tool
-from s2kit.ui.tool_page import ToolPage
+from s2kit.core.tool_definition import ToolDefinition
 
 
 @tool(id="my-tool", title="My Tool", category="Utility", icon="BUILD",
       description="What it does, in one line.")
-class MyTool(ToolPage):
+class MyTool(ToolDefinition):
+    EXECUTOR = "s2kit.tools.my_tool:MyTool"
     PARAMS = [
         PathParam("input", "Input folder", mode="directory", required=True),
         BoolParam("dry_run", "Dry run", default=True, group="Safety"),
     ]
     PREFERENCES = [BoolParam("verbose", "Verbose logging", default=False)]
     HELP = "### My Tool\n\nMarkdown shown on the Help tab."
+```
+
+The matching executor imports that declaration and adds the implementation:
+
+```python
+from s2kit.core.jobs import JobContext
+from s2kit.definitions.my_tool import MyTool as Definition
+
+
+class MyTool(Definition):
 
     def run_job(self, ctx: JobContext) -> None:
         ctx.info(f"Working on {ctx.params['input']}")
@@ -91,14 +111,15 @@ v3/
     bootstrap.py         dependency probing/installing, logging, excepthooks
     app.py               Flet entry point, window state, self-test
     core/                framework-free: settings, preferences, params, jobs,
-                         history, registry, paths, process
+                         history, registry, paths, process, agent access
+    definitions/         lightweight shared schemas and lazy tool registration
     media/               framework-free decode/render: images (incl. VTF),
                          audio (waveforms), meshes (software rasteriser)
     pipelines/           framework-free asset work: VRF export, glTF->SMD/QC,
                          the SMD writers, glTF animation readers, audio ops,
                          texture I/O, PBR baking, VMT/VMAT, material building
     ui/                  shell, tool page, preferences page, widgets, viewers
-    tools/               one module per tool - drop a file in, it appears
+    tools/               framework-free nonvisual executors; interactive hotspot page
   config/                settings.json, per-tool history (generated)
   logs/                  rotating app log + one file per run (generated)
 ```
