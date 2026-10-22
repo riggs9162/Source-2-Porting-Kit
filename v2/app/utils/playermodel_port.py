@@ -23,7 +23,8 @@ import numpy as np
 
 from ..core import ragdoll_presets
 from ..core.bone_maps import SOURCE2_TO_VALVEBIPED
-from ..tools.gltf_animation import GltfJoint, GltfSkin, parse_skin
+from ..tools.gltf_animation import (GltfJoint, GltfSkin,
+                                    derive_bind_pose_local, parse_skin)
 from ..tools.smd_animation_export import (CoordinateMode, SmdAnimationExporter,
                                           derive_definebone_lines,
                                           _quat_to_pyr_degrees)
@@ -48,6 +49,8 @@ from ..core.bone_maps import valvebiped_name
 from ..tools.ragdoll_physics import (conformed_s2_constraint_rows,
                                      hulls_from_point_clouds, load_phys_dump,
                                      phys_part_point_clouds)
+from .jiggle_bones import (jigglebone_lines, reorient_for_jiggle,
+                           select_chains)
 from .mdl_bones import read_mdl_bones
 from .ragdoll_port import build_ragdoll_collision, discover_sidecars
 from .studiomdl_run import compile_qc
@@ -217,6 +220,8 @@ def port_playermodel(
     valvebiped_only: bool = False,
     keep_helpers: bool = False,
     own_proportions: bool = False,
+    jiggle_bones: str = "",
+    jiggle_preset: str = "gear",
     ragdoll_collision: bool = True,
     total_mass: float = ragdoll_presets.DEFAULT_TOTAL_MASS,
     studiomdl: Optional[Path] = None,
@@ -342,6 +347,20 @@ def port_playermodel(
             lambda n: n if n in present else valvebiped_name(n),
             res.anat_rotations, on_log=lambda m: log(m, "INFO"))
 
+    # Jiggle chains -----------------------------------------------------------
+    # Done after the conform so it acts on the final bind, and before anything
+    # is written so the ref SMDs, the bindpose and the $definebones all agree.
+    jiggle_names: List[str] = []
+    if jiggle_bones:
+        pats = [s for s in re.split(r"[,;\s]+", jiggle_bones) if s]
+        targets = select_chains(skin, pats)
+        if not targets:
+            log(f"no bones matched the jiggle patterns {pats}", "WARNING")
+        else:
+            jiggle_names = reorient_for_jiggle(
+                skin, targets, on_log=lambda m: log(m, "INFO"))
+            res.bind_frame = derive_bind_pose_local(skin)
+
     # SMDs -------------------------------------------------------------------
     name_base = glb_path.stem
     smd_of_set: List[Tuple[str, str, int]] = []
@@ -465,6 +484,12 @@ def port_playermodel(
                "ValveBiped.Bip01_R_Hand"):
         if bm in have:
             L.append(f'$bonemerge "{bm}"')
+    if jiggle_names:
+        L.extend(jigglebone_lines(jiggle_names, jiggle_preset))
+        L.append("")
+        log(f"jigglebones: {len(jiggle_names)} bone(s), '{jiggle_preset}' "
+            f"preset", "INFO")
+
     L.append("")
     L.append(f'$includemodel "{res.donor_basename}"')
     L.append("")
