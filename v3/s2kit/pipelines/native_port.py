@@ -14,12 +14,13 @@ import trimesh
 from s2kit.pipelines.glb_skin import collect_skinned_prims, read_glb
 from s2kit.pipelines.gltf_animation import (
     SOURCE2_BASIS, SOURCE2_BASIS_QUAT, SOURCE_UNITS_PER_METRE, SPACE_METRES,
-    derive_bind_pose_local, parse_clips, parse_skin, position_space, sample_clip,
+    derive_bind_pose_local, parse_clips, parse_skin, position_space,
 )
 from s2kit.pipelines.gltf_smd import (
     ConversionOptions, ModelSetScanner, convert_model_set,
 )
 from s2kit.pipelines.porting import check_cancelled
+from s2kit.pipelines.ragdoll_animations import sample_authored_clip
 from s2kit.pipelines.smd_animation_export import (
     CoordinateMode, SmdAnimationExporter, SmdSkeletalExporter,
     derive_definebone_lines,
@@ -377,9 +378,7 @@ def port_native_model(
         authored = metadata.animations.get(clip.name)
         if authored is None:
             raise ValueError(f"Missing authored metadata for sequence {clip.name}")
-        frames, count = sample_clip(clip, skin, authored.fps)
-        if count != authored.frames:
-            raise ValueError(f"Frame count mismatch for {clip.name}: {count} versus {authored.frames}")
+        frames, count, sampling = sample_authored_clip(clip, skin, authored)
         path = out_dir / _filename(clip.name, index)
         ok, error = SmdAnimationExporter.write_animation(skin, frames, path, coord)
         if not ok:
@@ -395,6 +394,7 @@ def port_native_model(
                      " ".join([*flags, *translated_events]) + " }")
         sequence_audit.append(dict(name=clip.name, frames=count, fps=authored.fps,
                                    loop=authored.loop, delta=authored.delta,
+                                   sampling=sampling,
                                    translated_events=len(translated_events)))
         log(f"Sequence {index + 1}/{len(clips)}: {clip.name}, {count} frames at {authored.fps:g} fps")
     if dynamic_prop and not clips:
