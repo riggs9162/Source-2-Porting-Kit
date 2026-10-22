@@ -490,7 +490,7 @@ def sequence_qc_options(animation: AnimationMetadata, *, include_delta: bool = T
         options.append(f'weightlist {_quoted(animation.weightlist)}')
     options.extend((f'fadein {animation.fade_in:g}', f'fadeout {animation.fade_out:g}'))
     for name, weight in animation.activities[:1]:
-        if not re.fullmatch(r'ACT_[A-Za-z0-9_ ]+', name):
+        if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_ ]*', name):
             raise MetadataError(f'Unsafe activity identifier: {name!r}')
         options.append(f'activity {_quoted(name)} {weight}')
     return options
