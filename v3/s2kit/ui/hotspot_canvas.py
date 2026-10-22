@@ -96,6 +96,12 @@ class HotspotCanvas(ft.Container):
         self.expand = True
         self._sheet = RectSheet()
         self._texture: Optional[Path] = None
+        #: The texture's PNG bytes, handed to the image widget as data. A file
+        #: path only resolves in the desktop client; served to a browser it is
+        #: a URL on the kit's own web server, which 404s.
+        self._texture_data: Optional[bytes] = None
+        #: Which file contents `_texture_data` holds; see _texture_key.
+        self._texture_id: Optional[tuple] = None
         self._zoom = 1.0
         self._pan = (24.0, 24.0)
         self._selection: set[int] = set()
@@ -116,7 +122,7 @@ class HotspotCanvas(ft.Container):
         # The texture is a sibling widget, not a canvas shape; see
         # _place_texture. `_image_dirty` keeps it out of the update when a
         # frame did not move it.
-        self._image_src: Optional[str] = None
+        self._image_src: Optional[tuple] = None
         self._image_dirty = False
 
         # Everything drawn is pooled by a stable key and mutated in place. See
@@ -160,14 +166,21 @@ class HotspotCanvas(ft.Container):
                       if 0 <= index < len(self._sheet.rects))
 
     def load(self, sheet: RectSheet, texture: Optional[Path] = None) -> None:
-        """Replace the sheet, and optionally the texture behind it."""
+        """Replace the sheet, and optionally the texture behind it.
+
+        The texture is read once here; reloading the same unchanged file keeps
+        the bytes already on the client rather than sending them again.
+        """
         self._sheet = sheet
         if texture is not None:
             self._texture = Path(texture)
+            texture_id = self._texture_key()
+            if texture_id != self._texture_id:
+                self._texture_data = self._texture.read_bytes()
+                self._texture_id = texture_id
         self._selection.clear()
         # Pooled shapes are keyed by rect index, which now means something else.
         self._pool.clear()
-        self._image_src = None
         self._grid_cache = None
         self._static_key = None
         self.fit()
@@ -688,7 +701,17 @@ class HotspotCanvas(ft.Container):
         return self._pooled(key, lambda: cv.Text(x=0, y=0, value=""),
                             x=x, y=y, value=value, style=style)
 
-    def _place_texture(self, src: Optional[str], x: float = 0.0, y: float = 0.0,
+    def _texture_key(self) -> Optional[tuple]:
+        """Identifies the texture file's current contents, without reading it."""
+        if self._texture is None:
+            return None
+        try:
+            stat = self._texture.stat()
+        except OSError:
+            return None
+        return (str(self._texture), stat.st_mtime_ns, stat.st_size)
+
+    def _place_texture(self, src: Optional[tuple], x: float = 0.0, y: float = 0.0,
                        width: float = 0.0, height: float = 0.0) -> None:
         """Move the texture widget under the current view transform.
 
@@ -702,7 +725,7 @@ class HotspotCanvas(ft.Container):
                 self._image_dirty = True
             return
         if self._image_src != src:
-            image.src = src
+            image.src = self._texture_data
             self._image_src = src
             self._image_dirty = True
         if not image.visible:
@@ -716,9 +739,9 @@ class HotspotCanvas(ft.Container):
 
     def _render(self) -> None:
         width, height = self._sheet.size
-        if self._texture is not None and width and height:
+        if self._texture_data is not None and width and height:
             x, y = self.to_screen(0, 0)
-            self._place_texture(str(self._texture), x, y,
+            self._place_texture(self._texture_id, x, y,
                                 width * self._zoom, height * self._zoom)
         else:
             self._place_texture(None)
