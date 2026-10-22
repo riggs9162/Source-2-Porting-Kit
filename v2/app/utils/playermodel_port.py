@@ -46,7 +46,6 @@ from ..tools.ragdoll_physics import (conformed_s2_constraint_rows,
                                      hulls_from_point_clouds, load_phys_dump,
                                      phys_part_point_clouds)
 from .mdl_bones import read_mdl_bones
-from .procedural_bones import write_vrd
 from .ragdoll_port import build_ragdoll_collision, discover_sidecars
 from .studiomdl_run import compile_qc
 
@@ -333,16 +332,22 @@ def port_playermodel(
             L.append(f'$ikautoplaylock "{chain}" 1 0.1')
     L.append("")
 
-    # Procedural helper bones. The kept twist bones are plain children here —
-    # Source 2 drove them with constraints that the glTF export bakes away, so
-    # without these rules they follow their parent rigidly and contribute no
-    # twist at all (keeping them measured identical to dropping them).
-    helpers = write_vrd(out_dir / f"{name_base}_pm.vrd", sorted(have))
-    if helpers:
-        L.append(f'$proceduralbones "{name_base}_pm.vrd"')
-        L.append("")
-        log(f"procedural helpers driven: {len(helpers)} "
-            f"({', '.join(h.split('_', 1)[-1] for h in helpers[:4])}...)")
+    # $proceduralbones is NOT emitted. Twist helpers stay inert children.
+    #
+    # Driving them was tried and reverted: it broke the model in game twice,
+    # and even after fixing BOTH real format bugs found along the way - the
+    # triggers must be centred on the control bone's rest orientation, and the
+    # rest trigger must carry the helper's own bind local rotation rather than
+    # identity - dropping $proceduralbones was still what made the model come
+    # out right. What was never validated is the rule CONTENT: the 0.5/1.0 roll
+    # fractions, the +-110 deg sample spacing and the assumption that a helper
+    # twists about its local X are all invented here, not measured from the
+    # source rig (Source 2 keeps that in the .vmdl and the glTF export bakes it
+    # away). Do not re-enable without a way to check the DRIVEN pose; verifying
+    # the rest pose passes while the driven pose is still wrong.
+    #
+    # build_vrd() is kept, with both format findings encoded and tested, for
+    # whoever picks this up with real constraint data.
 
     # -- player fit-out ------------------------------------------------------
     # Emitted so the model behaves as a playermodel rather than a bare mesh:
