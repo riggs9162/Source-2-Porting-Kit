@@ -144,6 +144,31 @@ SOURCE2_TO_VALVEBIPED: Dict[str, str] = {
 }
 
 
+# The canonical ValveBiped skeleton - the 53 bone names GMod's animation set
+# and every ValveBiped-aware addon (JMod, WiltOS, ...) actually look for.
+# Source: https://gmodwiki.com/ValveBiped_Bones
+#
+# A Source 2 bone is only given a ValveBiped name when that name is IN this
+# set. Names outside it - Ulna, Wrist, Bicep, Shoulder, Trapezius, Pectoral,
+# Neck2, Thigh_TWIST, Finger1m - exist on some Valve models but are not part of
+# the contract, and inventing them makes a rig look ValveBiped-compliant to
+# addons that then fail to find what they expect. Those bones keep their own
+# identity under the z_ prefix instead.
+VALVEBIPED_BONES: frozenset = frozenset(
+    ["ValveBiped.Bip01_Pelvis", "ValveBiped.Bip01_Spine",
+     "ValveBiped.Bip01_Spine1", "ValveBiped.Bip01_Spine2",
+     "ValveBiped.Bip01_Spine4", "ValveBiped.Bip01_Neck1",
+     "ValveBiped.Bip01_Head1"]
+    + [f"ValveBiped.Bip01_{s}_{b}" for s in ("L", "R")
+       for b in ("Clavicle", "UpperArm", "Forearm", "Hand",
+                 "Thigh", "Calf", "Foot", "Toe0")]
+    + [n for s in ("L", "R") for d in range(5)
+       for n in (f"ValveBiped.Bip01_{s}_Finger{d}",
+                 f"ValveBiped.Bip01_{s}_Finger{d}1",
+                 f"ValveBiped.Bip01_{s}_Finger{d}2")]
+)
+
+
 def valvebiped_name(source2_name: str) -> str:
     """Return the ValveBiped name for a Source 2 bone, or the input unchanged
     when there is no mapping (cloth/custom/already-Source-1 bones)."""

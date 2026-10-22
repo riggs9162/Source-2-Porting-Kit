@@ -116,10 +116,23 @@ class RagdollPmPorterTool(BaseTool):
             "ValveBiped-only skeleton (prune + fold unmapped bones)")
         self.prune_check.setChecked(True)
         self.prune_check.setToolTip(
-            "Keep only bones that map into the donor; weights fold onto the\n"
-            "nearest kept ancestor (stock-style rigid face/extras). Required\n"
-            "to stay under 128 compiled bones on dense Source 2 rigs.")
+            "Keep only bones that map into the donor. Dropped bones vanish\n"
+            "from the written SMDs and their weights fold onto the nearest\n"
+            "kept ancestor. Use it when a dense Source 2 rig pushes past\n"
+            "GMod's 256-bone limit.")
         pform.addRow("", self.prune_check)
+        self.helpers_check = QCheckBox(
+            "...but keep weight-bearing helper bones")
+        self.helpers_check.setChecked(False)
+        self.helpers_check.setToolTip(
+            "Spare donor-less bones that actually deform the mesh - arm/leg\n"
+            "twists, scapulae, pectorals - from the prune above. Keeps the\n"
+            "twist deformation the source rig was built around, at the cost\n"
+            "of a slightly worse hand (hand-edge p90 0.276 kept vs 0.201\n"
+            "dropped). Off means the rig really is ValveBiped-only.")
+        self.helpers_check.setEnabled(self.prune_check.isChecked())
+        self.prune_check.toggled.connect(self.helpers_check.setEnabled)
+        pform.addRow("", self.helpers_check)
         self.pm_collision_check = QCheckBox(
             "Generate ragdoll collision ($collisionjoints)")
         self.pm_collision_check.setChecked(True)
@@ -241,6 +254,7 @@ class RagdollPmPorterTool(BaseTool):
             'surfaceprop': self.surface_combo.currentText().strip(),
             'total_mass': self.mass_spin.value(),
             'prune': self.prune_check.isChecked(),
+            'keep_helpers': self.helpers_check.isChecked(),
             'pm_ragdoll_collision': self.pm_collision_check.isChecked(),
             'skeleton_naming':
                 _SKELETON_NAMING[self.skeleton_combo.currentIndex()],
@@ -290,6 +304,7 @@ class RagdollPmPorterTool(BaseTool):
         self.mass_spin.setValue(float(
             r.get('total_mass', ragdoll_presets.DEFAULT_TOTAL_MASS)))
         self.prune_check.setChecked(bool(r.get('prune', True)))
+        self.helpers_check.setChecked(bool(r.get('keep_helpers', False)))
         self.pm_collision_check.setChecked(
             bool(r.get('pm_ragdoll_collision', True)))
         naming = r.get('skeleton_naming', 'native')
@@ -346,6 +361,7 @@ class RagdollPmPorterTool(BaseTool):
             kwargs.update(
                 donor_mdl=Path(donor),
                 valvebiped_only=self.prune_check.isChecked(),
+                keep_helpers=self.helpers_check.isChecked(),
                 ragdoll_collision=self.pm_collision_check.isChecked(),
             )
         else:

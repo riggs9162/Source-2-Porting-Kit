@@ -14,6 +14,7 @@ Qt-free: reachable from the GUI tool, CLIs and tests alike.
 
 from __future__ import annotations
 
+import re
 import math
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -41,6 +42,8 @@ _WEIGHT_RELAX_PASSES = 3
 # Total skin weight a donor-less bone must carry to be kept as a helper. Well
 # above rounding noise, well below anything that actually shapes the mesh.
 _HELPER_MIN_WEIGHT = 1.0
+# Palm bones. Never kept as helpers — see the note in _prune_to_mapped.
+_METACARPAL_RE = re.compile(r"(_meta_|_metacarpal|Finger\dm$)", re.I)
 from ..core.bone_maps import valvebiped_name
 from ..tools.ragdoll_physics import (conformed_s2_constraint_rows,
                                      hulls_from_point_clouds, load_phys_dump,
@@ -72,20 +75,47 @@ def _bone_worlds(skin: GltfSkin) -> Dict[int, np.ndarray]:
 
 def _prune_to_mapped(skin: GltfSkin, donor_names: set,
                      meshes: List[dict], log: LogFn,
-                     keep_helpers: bool = True) -> GltfSkin:
+                     keep_helpers: bool = False) -> GltfSkin:
     """ValveBiped-only prune: keep joints whose map target exists in the
     donor; fold every pruned joint's weights onto its nearest kept ancestor
     through the JOINT tree (the single fold rule). Mesh vj arrays are
-    remapped in place (duplicate targets per vertex merge their weights)."""
+    remapped in place (duplicate targets per vertex merge their weights).
+
+    ``keep_helpers`` spares donor-less bones that carry real skin weight. It
+    defaults OFF so that "drop non-ValveBiped bones" means exactly that: the
+    written SMDs list only kept bones and the dropped ones' weight lands on
+    the parent. Kept helpers are still the better-deforming rig (see below),
+    so the option remains - it is just no longer silently on."""
     keep = [i for i, j in enumerate(skin.joints)
             if SOURCE2_TO_VALVEBIPED.get(j.name) in donor_names]
     if keep_helpers:
         # Bones the donor lacks but that actually drive geometry — twists,
-        # scapulae, pectorals, finger metacarpals. Folding their weight onto a
-        # parent collapses the deformation they exist to provide (on the
-        # metrocop the arm/leg twists alone dominate ~6000 verts). Pure rig
-        # scaffolding (IK targets, root motion, *_end tips) carries no weight
-        # and is still dropped.
+        # scapulae, pectorals. Folding their weight onto a parent collapses the
+        # deformation they exist to provide (on the metrocop the arm/leg twists
+        # alone dominate ~6000 verts). Pure rig scaffolding (IK targets, root
+        # motion, *_end tips) carries no weight and is still dropped.
+        #
+        # METACARPALS are excluded on purpose. ValveBiped has no palm bone — it
+        # hangs Finger1..4 straight off Hand — so donor reparenting orphans a
+        # kept metacarpal: it rides the hand at its SOURCE offset while the
+        # fingers move onto the donor's, and drags the knuckle flesh between
+        # them. Dropping them folds that flesh onto Hand, which is exactly where
+        # ValveBiped puts the palm. Measured on three characters, hand-edge p90
+        # 0.355->0.193, 0.439->0.205, 0.402->0.174 and the whole-body p90
+        # improves too. A hand-made port of one of these characters
+        # (bioVespa303's) ships a 55-bone pure-ValveBiped rig with no
+        # metacarpals at all, for the same reason.
+        # MOST of that gap was a bug, not the metacarpals. Dropping them also
+        # makes each finger root a direct child of Hand in the SOURCE graph, so
+        # the donor's reparenting becomes a no-op — which is what accidentally
+        # kept this path clear of the `old_world` fault fixed in
+        # valvebiped_conform (the prune path measures BIT-IDENTICAL before and
+        # after that fix; the keep-helpers path improved 3x). Re-measured after
+        # it, hand-edge p90 keep vs prune is 0.276 vs 0.201 (metrocop) and 0.283
+        # vs 0.203 (hazmat) — still a real edge to pruning, now 1.4x rather than
+        # 4.2x, and paid for with the twist/scapula deformation the helpers
+        # carry. Which is why this branch is worth keeping as an option even
+        # though it is no longer the default.
         weight = np.zeros(len(skin.joints))
         for em in meshes:
             vj, vw = em["vj"], em["vw"]
@@ -95,7 +125,8 @@ def _prune_to_mapped(skin: GltfSkin, donor_names: set,
                     if w > 0.0:
                         weight[int(vj[k][s])] += w
         extra = [i for i in range(len(skin.joints))
-                 if i not in keep and weight[i] >= _HELPER_MIN_WEIGHT]
+                 if i not in keep and weight[i] >= _HELPER_MIN_WEIGHT
+                 and not _METACARPAL_RE.search(skin.joints[i].name)]
         if extra:
             keep = sorted(set(keep) | set(extra))
             log(f"keeping {len(extra)} weight-bearing helper bone(s) the "
@@ -183,7 +214,9 @@ def port_playermodel(
     modelname: str,
     cdmaterials: str,
     surfaceprop: str = "flesh",
-    valvebiped_only: bool = True,
+    valvebiped_only: bool = False,
+    keep_helpers: bool = False,
+    own_proportions: bool = False,
     ragdoll_collision: bool = True,
     total_mass: float = ragdoll_presets.DEFAULT_TOTAL_MASS,
     studiomdl: Optional[Path] = None,
@@ -207,7 +240,15 @@ def port_playermodel(
     mesh_sets, all_arrays = collect_skinned_prims(gltf, buf, log)
 
     if valvebiped_only:
-        skin = _prune_to_mapped(skin, donor_names, all_arrays, log)
+        skin = _prune_to_mapped(skin, donor_names, all_arrays, log,
+                                keep_helpers=keep_helpers)
+    else:
+        # Keeping every bone must not silently cost the weight relaxation the
+        # prune happens to run at the end of its fold.
+        relax_skin_weights(all_arrays, len(skin.joints),
+                           passes=_WEIGHT_RELAX_PASSES)
+        log(f"keeping all {len(skin.joints)} source bones "
+            f"(weights relaxed x{_WEIGHT_RELAX_PASSES})", "INFO")
 
     # Real Source 2 collision, if the model ships a PHYS sidecar. The authored
     # Rubikon shapes live in the ORIGINAL bind space, so they cannot simply be
@@ -242,14 +283,49 @@ def port_playermodel(
                 phys_clouds, phys_arrays, phys_obj = [], [], None
 
     total_bones = len(skin.joints) + 2      # + Anim_Attachment helpers
-    if total_bones > 128:
-        log(f"{total_bones} compiled bones (>128): expect trouble in GMod's "
-            "own studiomdl and older tools — enable the ValveBiped-only "
-            "prune or trim the source rig", "WARNING")
+    if total_bones > 256:
+        log(f"{total_bones} compiled bones: GMod's limit is 256 - "
+            "turn on the ValveBiped-only prune or trim the source "
+            "rig", "WARNING")
 
     res = conform_to_donor(skin, None, None, None, donor_mdl,
+                           own_proportions=own_proportions,
                            on_log=lambda m: log(m, "INFO"),
                            extra_meshes=all_arrays + phys_arrays)
+    # The compiled bind has to stay ON the donor's, per rule 1: the runtime
+    # discards a shared bone's own bind and rebuilds it from the anim library's.
+    # Drift here is invisible to every rest-pose check - it only shows once a
+    # donor clip plays - so measure it explicitly rather than trust the flags.
+    # Gated on MAX, not on p50. The p50 gate this replaces was blind to exactly
+    # the failure it exists to catch: one bone 39.331u out of 55 logged as
+    # "p50 0.000u" at INFO with the explanatory clause suppressed, and that one
+    # bone was the pelvis - the root of the whole skeleton. A single bone past
+    # 0.1u is already a broken model, because the runtime rebuilds it from the
+    # donor and everything below it inherits the error.
+    donor_pos = {b.name: np.asarray(b.pos, dtype=np.float64) for b in donor_bones}
+    drift = [(float(np.linalg.norm(np.asarray(j.rest_translation,
+                                              dtype=np.float64)
+                                   - donor_pos[j.name])), j.name)
+             for j in skin.joints if j.name in donor_pos]
+    if drift and max(d for d, _n in drift) > 0.1:
+        worst, worst_bone = max(drift)
+        past = sum(1 for d, _n in drift if d > 0.1)
+        log(f"bind drift from {donor_mdl.name}: max {worst:.3f}u on "
+            f"'{worst_bone}', {past}/{len(drift)} shared bone(s) past 0.1u "
+            "- donor animations rebuild these bones from their own bind, so "
+            "this misposes the mesh in game", "WARNING")
+    # ...and the drift check alone cannot see a PARENTAGE fault: a bone whose
+    # world bind is donor-exact still has the wrong LOCAL if its parent is not
+    # the donor's, which is what the drift above measures. The donor's root bone
+    # is the one case where that is not implied, so assert it directly.
+    donor_root = next((b.name for b in donor_bones if b.parent < 0), None)
+    for j in skin.joints:
+        if j.name == donor_root and j.parent_joint_idx is not None:
+            log(f"'{donor_root}' is the donor's ROOT but compiled under "
+                f"'{skin.joints[j.parent_joint_idx].name}' - every donor "
+                "sequence will compose its model-space pelvis through that "
+                "chain and displace the whole skeleton", "WARNING")
+
     # phys_arrays were transformed in place alongside the render mesh, so the
     # collision points are now in the same donor bind space as the verts.
     phys_hulls = hulls_from_point_clouds(
@@ -293,6 +369,16 @@ def port_playermodel(
             f"the source, or drop bodygroups, to get under 32.", "ERROR")
 
     coord = CoordinateMode(scale=1.0, swap_axes=False)
+    # THREE distinct poses are needed when own_proportions is on, and getting
+    # any two of them confused breaks it:
+    #   $definebone      -> the model's OWN pose (what the mesh is skinned to)
+    #   pm_bindpose.smd  -> the DONOR pose, because the autoplay delta is added
+    #                       on top of whatever sequence plays, including this
+    #                       one. Donor + (own - donor) = own, which is what the
+    #                       mesh expects. Putting the own pose here instead
+    #                       applies the difference TWICE and visibly exaggerates
+    #                       the build.
+    #   pm_ownpose.smd   -> the OWN pose, purely as the delta's source
     SmdAnimationExporter.write_animation(
         skin, [res.bind_frame], out_dir / "pm_bindpose.smd", coord)
 
@@ -387,7 +473,44 @@ def port_playermodel(
     L.append('$sequence "reference" "pm_bindpose.smd" fps 1 rotate -90')
     L.append('$sequence "ragdoll" "pm_bindpose.smd" fps 30 rotate -90 '
              'activity "ACT_DIERAGDOLL" 1')
+    if own_proportions:
+        # The mesh is bound to the model's OWN proportions, so the runtime -
+        # which rebuilds every shared bone from the DONOR's bind - has to be
+        # corrected back onto it. delta = own - donor, applied always.
+        SmdAnimationExporter.write_animation(
+            skin, [res.prop_frame], out_dir / "pm_ownpose.smd", coord)
+        L.append('$animation "a_prop_base" "pm_bindpose.smd" fps 30 '
+                 'rotate -90')
+        L.append('$animation "a_proportions" "pm_ownpose.smd" fps 30 '
+                 'rotate -90 subtract "a_prop_base" 0')
+        L.append('$sequence "proportions" "a_proportions" autoplay delta '
+                 'fadein 0.2 fadeout 0.2')
+        log("own proportions kept; $proportions delta emitted", "INFO")
+
     L.append("")
+
+    # The delta above is emitted ONLY under own_proportions, and only because
+    # that flag also binds the mesh to the model's own segment lengths. The two
+    # must move together: a delta over a mesh still bound at DONOR lengths
+    # double-corrects, moving bones up to 3.9u while the flesh was solved for
+    # the donor's - simulated against a decoded m_anm sequence, worst triangle
+    # stretch went 1.72x (animation alone) -> 13.97x with 264 triangles past
+    # 1.5x, in EVERY pose because it is autoplay.
+    # own_proportions defaults OFF, and turning it on was tried and REVERTED.
+    # It looks better by every static measure - with it on all 14 ValveBiped
+    # segment lengths reproduce the source exactly and the bind-pose silhouette
+    # IoU rises 0.792/0.764 -> 0.818/0.809 - but it breaks the model in game,
+    # because those measures never exercise an animation. It moves the compiled
+    # bind off the donor's, and rule 1 above says the runtime discards a shared
+    # bone's own bind and rebuilds it from the anim library's. Measured against
+    # a hand-made port that is known good in game, |compiled bind - donor bind|
+    # per shared bone: reference p50 0.007u / max 2.34u with 23/53 bones past
+    # 0.1u, versus own_proportions p50 0.546u / max 3.96u with 43/55 past it.
+    # The whole skeleton drifts, so every donor clip poses the mesh against a
+    # bind it was never skinned to. The delta is supposed to correct that and
+    # demonstrably does not carry it in GMod. Keep the bind on the donor; the
+    # cost is that the character adopts HL2's build, which is exactly what the
+    # hand-made port accepts too.
     collision = False
     if ragdoll_collision:
         # Weight-derived hulls from the CONFORMED mesh only: after

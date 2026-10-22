@@ -32,7 +32,8 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from ..core.bone_maps import SOURCE2_TO_VALVEBIPED
+from ..core.bone_maps import (SOURCE2_TO_VALVEBIPED,
+                              VALVEBIPED_BONES)
 from ..utils.mdl_bones import read_mdl_bones, read_mdl_poseparams
 
 LogFn = Callable[[str], None]
@@ -76,6 +77,89 @@ _UP = np.array([0.0, 0.0, 1.0])
 # (see "SPINE STRAIGHTENING" in conform_to_donor). Set False to keep the
 # donor's bow, i.e. to have the flesh follow the spine joints exactly.
 _STRAIGHTEN_SPINE = True
+
+# Bind the MESH to the model's own proportions (donor orientations, the
+# model's own segment lengths) instead of to the donor's bind, and let the
+# $proportions delta carry it back onto the donor's baseline at runtime.
+# This is what the delta exists for; emitting it while the mesh stayed bound to
+# donor lengths double-corrects and tears the joints (measured 13.97x).
+# Opt-in: the trade is a correct build at rest against more deformation while
+# HL2 clips play, because those clips are authored for HL2's limb lengths.
+# Metrocop, triangle stretch p99 / max, donor bind vs own proportions:
+#   idle_all_01  1.12/2.02 -> 1.48/4.53
+#   idle_pistol  1.43/4.28 -> 1.67/4.87
+#   cidle_ar2    1.77/7.86 -> 2.07/6.12
+# Set per-port through port_playermodel(own_proportions=...).
+_BIND_TO_OWN_PROPORTIONS = False
+
+# A helper hung off the CLAVICLE takes the anatomical rotation of the nearest
+# MAPPED bone rather than its parent's. A pauldron is parented to the clavicle
+# but sits over the deltoid, and those two rotations differ by ~27 deg, which
+# left the combine captain's shoulder armour visibly displaced and bulging.
+# Scoped to clavicle-parented helpers on purpose: letting every helper re-home
+# to whatever is nearest measured WORSE on the metrocop's body (p90 0.138 ->
+# 0.155) while doing nothing for its shoulder. Shoulder-region edge p90, with
+# and without: captain 0.198 -> 0.134, grunt 0.240 -> 0.196, hazmat 0.391 ->
+# 0.299, metrocop unchanged (it has no clavicle-parented helpers).
+_HELPER_FOLLOWS_NEAREST_MAPPED = True
+
+# NARROWING THE SHOULDERS is not possible this way, tried and removed. The
+# donor's clavicle ROOTS sit further apart than a Source 2 rig's (captain
+# 1.73u -> 3.88u) and that carries the whole shoulder outboard. Offsetting the
+# clavicle's FLESH the way the spine is straightened moves nothing: the width
+# is carried by vertices weighted to the UPPER ARM and the pauldron helpers,
+# whose bones are donor-exact. Measured shoulder width was identical to 0.01u
+# with the correction on and off, on all four characters. Narrowing for real
+# means offsetting the whole arm subtree inboard, which puts the arm flesh
+# ~1.2u off the shoulder it rotates about - far worse under animation than a
+# wide shoulder is at rest.
+
+# THE RESIDUAL HAND TEAR WAS NOT IRREDUCIBLE. The three experiments below were
+# all scored against a baseline that still had the mapped-LEAF fault (a distal
+# phalanx taking its axis from its own `_end_` helper - see the `elif i in
+# mapped` branch in the anat loop), which is why they all read as "a symmetric
+# rig difference nothing can remove". It was not symmetric: distal-phalanx
+# triangle shear p90 was 1.14 LEFT vs 2.38 RIGHT on the metrocop, and the left
+# hand was already BELOW the body's shear. Fixing the leaf axis moved, per
+# model (metrocop / hazmat / grunt / captain / recon / heavy / suppressor):
+#   hand edge |ratio-1| p90  0.276/0.283/0.272/0.263/0.269/0.307/0.262
+#                         -> 0.215/0.207/0.203/0.204/0.192/0.251/0.197
+#   hand triangle shear p90  1.865/1.843/1.940/1.850/1.837/1.957/1.900
+#                         -> 1.510/1.523/1.585/1.505/1.447/1.693/1.509
+#   distal shear p90 L|R     1.14|2.38 ... 1.36|3.37  ->  L and R within 0.02
+# Re-score anything retried against THOSE numbers, not the ones below.
+#
+# PER-BONE SEGMENT SCALE - tried and rejected. A rigid per-bone transform
+# cannot absorb a segment-LENGTH difference, so what is left of the hand tear
+# after the `old_world` fix lands as a step at each finger joint. Folding a
+# uniform scale |donor segment|/|source segment| into the re-skin (blended
+# linearly about each bone head, before the DQS) removes that step exactly, and
+# measures as a wash: metrocop hand-edge |ratio-1| p90 0.276 -> 0.266, hand
+# triangle shear p90 1.865 -> 1.843, while edges off by >10% go 32.3% -> 47.5%
+# because every edge inside a shortened digit now moves. Applied body-wide it
+# is a clear regression - the whole mesh adopts HL2's segment lengths and the
+# BODY p90 goes 0.101 -> 0.297 with 10.0% -> 28.9% of edges past 10%.
+#
+# HAND-SCOPED WEIGHT RELAXATION - tried and rejected, again. Extra Laplacian
+# passes restricted to hand vertices (+2/+4/+8 on top of the pipeline's 3) move
+# the metrocop's hand p90 0.276 -> 0.280 / 0.269 / 0.266 and its triangle shear
+# p90 1.865 -> 1.887 / 1.865 / 1.876 - i.e. nothing - while >10% rises to
+# 36.8%. The residual is a rigid-rotation step at each finger joint, not a
+# weighting failure, and blurring weights cannot remove a step it has to cross.
+#
+# SEAM RELAXATION - tried and rejected. The hand's badly stretched edges are
+# not a weighting failure: they connect two DIFFERENT fingers at 0.6-1.0 of the
+# way to the fingertip, i.e. surfaces that touch in the source pose and
+# separate under the donor's progressive curl (index 14 deg, pinky 31 deg).
+# Blending weights across them makes one fingertip drag its neighbour. Measured
+# every way - gate on bone rotation, gate on how far the two bones send the same
+# point, restrict to skeletally-linked pairs, 1/2/4 passes: the metrocop got
+# worse on webbing AND grew an index->ring leak (0.000 -> 0.089u) in every
+# variant, while the grunt gained only ~20% on the knuckle band. Raising the
+# GLOBAL relax passes instead is a metric trap - a fully blurred model is rigid
+# and stretches nothing, so tearing falls monotonically while the flesh turns to
+# mush (at 6+ passes the metrocop's ring finger moved when only the index was
+# curled). Do not retry either.
 
 # Bones whose flesh must be oriented by the character frame rather than by a
 # child bone's direction — see the re-skin loop in conform_to_donor.
@@ -140,6 +224,7 @@ def conform_to_donor(
     donor_mdl: Path,
     on_log: Optional[LogFn] = None,
     extra_meshes: Optional[List[dict]] = None,
+    own_proportions: Optional[bool] = None,
 ) -> ConformResult:
     """Conform ``skin`` to the donor's bind and re-skin ``mesh`` accordingly.
 
@@ -152,6 +237,8 @@ def conform_to_donor(
     ``$proportions`` delta autoplay.
     """
     log = on_log or (lambda _m: None)
+    own_prop = (_BIND_TO_OWN_PROPORTIONS if own_proportions is None
+                else bool(own_proportions))
     donor_bones = read_mdl_bones(donor_mdl)
     donor_idx = {b.name: i for i, b in enumerate(donor_bones)}
     donor_local: Dict[str, np.ndarray] = {}
@@ -177,21 +264,85 @@ def conform_to_donor(
     renamed_native = 0
     for i, j in enumerate(joints):
         target = SOURCE2_TO_VALVEBIPED.get(j.name)
+        # A ValveBiped name is only handed out when it is one of the canonical
+        # 53 (see VALVEBIPED_BONES), OR when this donor actually defines it.
+        # Everything else keeps its own identity under z_, rather than being
+        # given an invented ValveBiped name that addons would look for and not
+        # find. The donor clause is what makes the name not invented: if the
+        # animation library carries the bone, the library drives it, and rule 1
+        # applies to it exactly as it does to the canonical 53.
+        #
+        # This is load-bearing for the HLA zombie. z_anm hangs the headcrab off
+        # ValveBiped.HC_Body_Bone under SPINE4, deliberately independent of the
+        # human head; the Source 2 rig hangs it off the HEAD. Left unmapped the
+        # crab rode Bip01_Head1, so every donor clip's head motion swung it -
+        # and because the crab body sits ~5u forward of the skull, a few degrees
+        # of head turn slid it right off, tilting the crab and uncovering the
+        # human head underneath. Both reported symptoms, one cause.
+        #
+        # Deliberately narrow: of the 26 non-canonical targets in the table
+        # (Ulna, Bicep, Trapezius, Finger?m, ...), z_anm defines only
+        # HC_Body_Bone, and m_anm/f_anm define none. So this maps exactly one
+        # extra bone on exactly one character and leaves every combine rig
+        # bit-identical.
+        if target not in VALVEBIPED_BONES and target not in donor_idx:
+            target = None
         if target and target in donor_idx:
             new_name[i] = target
             mapped[i] = target
         else:
-            new_name[i] = target or native_rename(j.name)
+            new_name[i] = native_rename(j.name)
             renamed_native += 1
     if len(set(new_name.values())) != n:
         raise ValueError("bone rename collision after conform mapping")
     idx_of_new = {nm: i for i, nm in new_name.items()}
 
+    # The SOURCE hierarchy, captured before the donor re-links anything. The
+    # re-skin needs it: `old_world` below must be the pose the mesh is actually
+    # skinned to, and that is only true on the source's own parent graph.
+    src_parent: List[Optional[int]] = [j.parent_joint_idx for j in joints]
+
     # -- donor-order reparenting for mapped bones ----------------------------
     for i, target in mapped.items():
-        dp = donor_parent.get(target)
-        if dp is not None and dp in idx_of_new:
+        dp = donor_parent[target]
+        if dp is None:
+            # The bone mapped onto the donor's ROOT (m_anm's is
+            # ValveBiped.Bip01_Pelvis) has to be a root HERE too. Skipping this
+            # case - the old `if dp is not None` guard - left the Source 2
+            # motion stack (root_motion -> ground_root -> pelvis_translations)
+            # sitting above the pelvis on every rig that has one, and rule 1
+            # then breaks in the one place a world-space bind check cannot see:
+            # CalcVirtualAnimation writes the donor's PARENT-LOCAL pelvis into
+            # that slot, but the donor authored it as MODEL space because its
+            # pelvis is a root, so the engine composes it through a chain whose
+            # accumulated bind is 120.000 deg / 41.5u. Measured on the shipped
+            # builds: pelvis bind WORLD 0.0000u from the donor (which is why
+            # every rest-pose check passed) but bind LOCAL 39.331u off, and a
+            # decoded m_anm idle_all_01 frame 0 lands the pelvis 38.46u and
+            # 120.00 deg away, worst bone 68.04u. The model's OWN sequences are
+            # exempt because pSeqStudioHdr is then the model itself.
+            joints[i].parent_joint_idx = None
+        elif dp in idx_of_new:
             joints[i].parent_joint_idx = idx_of_new[dp]
+
+    # The stack that used to sit above it (root_motion -> ground_root ->
+    # pelvis_translations) is now a root subtree of its own. That is deliberate.
+    # RE-HOMING IT UNDER THE PELVIS was tried and does not compile: those bones
+    # occupy joint indices 0..2 while the pelvis is index 3, and BOTH writers
+    # emit in array order - derive_definebone_lines would print
+    # `$definebone "z_root_motion" "ValveBiped.Bip01_Pelvis"` before the pelvis
+    # exists, and _bones_from_skin indexes `bones_in_order[parent]`, which
+    # raises IndexError (caught by the v2 parity test). Fixing it properly means
+    # renumbering the joint array, which changes every compiled bone index.
+    # Leaving them as roots is safe because they carry NO skin weight - measured
+    # 0.0 over every LOD0 vertex of all seven characters, the 10-bone
+    # root_motion subtree included - so the `R = eye(3)` fallback they hit in
+    # the anat pass cannot move a single vertex. Measured on the compiled
+    # output: the combine rigs go from 3 root bones to 4 (z_root_motion keeps
+    # its inert subtree, ValveBiped.Bip01_Pelvis joins it as a second root) and
+    # metrocop/hazmat_worker are untouched at 5, because their Source 2 rigs
+    # already root at the pelvis. Bone count and bone-name set are identical
+    # either way, and so is every vertex.
 
     # topo order over the (possibly re-linked) parent graph
     children: Dict[Optional[int], List[int]] = {}
@@ -207,10 +358,32 @@ def conform_to_donor(
         raise ValueError("skeleton is not a tree after donor reparenting")
 
     # -- old world (current HLA rest) ----------------------------------------
+    # Walked on ``src_parent``, NOT on the re-linked graph. Composing the
+    # SOURCE locals along the DONOR's parenting fabricates a rest pose the mesh
+    # was never skinned to: the only bones the donor reparents are the eight
+    # finger roots (metacarpal -> Hand), and hanging their metacarpal-relative
+    # offset off the wrist put them - and their whole sub-chain - 0.9-2.6u from
+    # where the flesh actually is, 8-29 deg off in direction from the hand.
+    # `op` in the re-skin below is exactly that position, so every finger was
+    # picked up from the wrong place and dropped on the donor's joint, tearing
+    # the knuckles open (metrocop hand-edge |ratio-1| p90 0.840 -> 0.276, worst
+    # band 1.835 -> 0.284; hazmat 0.600 -> 0.283; grunt 0.591 -> 0.272). The
+    # BIND is untouched by this: mapped bones take the donor's world outright,
+    # and for unmapped ones the parent-relative offset is identical either way.
     old_world: Dict[int, np.ndarray] = {}
-    for i in order:
+    src_order: List[int] = []
+    seen: set = set()
+    for i in range(n):
+        chain: List[int] = []
+        c: Optional[int] = i
+        while c is not None and c not in seen:
+            chain.append(c)
+            seen.add(c)
+            c = src_parent[c]
+        src_order.extend(reversed(chain))
+    for i in src_order:
         lm = _trs(joints[i].rest_translation, joints[i].rest_rotation)
-        p = joints[i].parent_joint_idx
+        p = src_parent[i]
         old_world[i] = lm if p is None else old_world[p] @ lm
 
     # -- bind pass: donor-exact for mapped, rigid-follow for the rest --------
@@ -353,6 +526,7 @@ def conform_to_donor(
         # LATERAL is never touched - that is shoulder width, where the donor's
         # build is wanted. The clavicles were tried here too (they sit 4.14u
         # high) but the lowered shoulders were not wanted.
+        tgt_world = prop_world if own_prop else bind_world
         straighten: Dict[int, np.ndarray] = {}
         _pi = idx_of_new.get("ValveBiped.Bip01_Pelvis")
         _ni = idx_of_new.get("ValveBiped.Bip01_Neck1")
@@ -361,14 +535,14 @@ def conform_to_donor(
                 if new_name[i] not in _TORSO_BONES or i == _pi:
                     continue
                 so = old_world[i][:3, 3] - old_world[_pi][:3, 3]
-                do = bind_world[i][:3, 3] - bind_world[_pi][:3, 3]
+                do = tgt_world[i][:3, 3] - tgt_world[_pi][:3, 3]
                 d_fwd = float(np.dot(so, fwd_old)) - float(np.dot(do, fwd_new))
                 vec = d_fwd * fwd_new
                 if new_name[i] == "ValveBiped.Bip01_Head1" and _ni is not None:
                     sg = float(np.dot(
                         old_world[i][:3, 3] - old_world[_ni][:3, 3], _UP))
                     dg = float(np.dot(
-                        bind_world[i][:3, 3] - bind_world[_ni][:3, 3], _UP))
+                        tgt_world[i][:3, 3] - tgt_world[_ni][:3, 3], _UP))
                     vec = vec + (sg - dg) * _UP
                 if float(np.linalg.norm(vec)) > 1e-4:
                     straighten[i] = vec
@@ -378,19 +552,41 @@ def conform_to_donor(
                     f"up to {worst:.2f}u of donor bow/lift removed")
 
         anat: List[np.ndarray] = [None] * n
-        for i in order:
+        helper_src: Dict[int, int] = {}
+        for i in ([j for j in order if j in mapped]
+                  + [j for j in order if j not in mapped]):
             op = old_world[i][:3, 3]
-            npos = bind_world[i][:3, 3]
+            npos = tgt_world[i][:3, 3]
             par_i = joints[i].parent_joint_idx
             if (i not in mapped and par_i is not None
                     and anat[par_i] is not None):
+                src = par_i
+                # Only pauldron-like helpers: hung off the CLAVICLE but sitting
+                # over the deltoid, so the clavicle's rotation is the wrong one
+                # (they differ by ~27 deg). Everything else - twists, scapulae,
+                # pectorals - genuinely belongs to its parent, and letting them
+                # re-home measured worse.
+                if (_HELPER_FOLLOWS_NEAREST_MAPPED
+                        and "Clavicle" in new_name.get(par_i, "")):
+                    here = old_world[i][:3, 3]
+                    best, bd = None, None
+                    for mi in mapped:
+                        if anat[mi] is None:
+                            continue
+                        dd = float(np.linalg.norm(
+                            old_world[mi][:3, 3] - here))
+                        if bd is None or dd < bd:
+                            best, bd = mi, dd
+                    if best is not None:
+                        src = best
+                helper_src[i] = src
                 # A bone the donor has no counterpart for (twist, scapula,
                 # pectoral, metacarpal...) has no anatomy of its own to align
                 # to: its "segment" points at another helper, and deriving a
                 # rotation from that is meaningless. It rides with the bone it
                 # hangs off, exactly as its flesh should.
                 m4 = np.eye(4)
-                R = anat[par_i][:3, :3]
+                R = anat[src][:3, :3]
                 m4[:3, :3] = R
                 m4[:3, 3] = npos - R @ op + straighten.get(i, 0.0)
                 anat[i] = m4
@@ -403,10 +599,40 @@ def conform_to_donor(
             mapped_kids = [c for c in cand if c in mapped]
             if mapped_kids:
                 cand = mapped_kids
+            elif i in mapped:
+                # A mapped bone must NEVER take its axis from an unmapped child.
+                # Every unmapped bone is still at its PROVISIONAL rigid-follow
+                # position here (the re-place pass below runs after this loop),
+                # which is bind_world[i] @ inv(old_world[i]) @ old_world[c] - so
+                # `nd` is identically FrameDelta_i . od and the swing collapses
+                # into the frame delta, the one rotation the comment above says
+                # must never reach vertices. It only bites on the mapped LEAVES,
+                # whose sole child is a `*_end_*` tip: the ten distal phalanges
+                # and the two toe balls. ValveBiped's right-side frames sit
+                # ~180 deg from Source 2's, so the right hand got swung 134-164
+                # deg where the left got 20-52 - dot(u, FD.u) +0.62..+0.88 left
+                # vs -0.82..-0.95 right, identical on all seven characters -
+                # which turned an exactly mirror-symmetric source hand into a
+                # port with 1.4-2.2u (p90) of L/R asymmetry. With no mapped
+                # child there is no donor segment to align to at all, so fall
+                # through to the `R is None` branch and inherit the parent's
+                # anatomical rotation, exactly as an unmapped helper does.
+                # The TOE BALL is the same shape and was worse: the right foot's
+                # triangle shear ran p90 2.78 / p99 8.52 / max 72.9 against the
+                # left foot's 1.17 / 1.28 / 1.39 on the metrocop (hazmat 3.16 /
+                # 16.1 / 28.8 vs 1.28 / 1.79 / 2.57). After the fix both feet
+                # measure the LEFT numbers, and the whole foot region's edge
+                # |ratio-1| goes p90 0.196 -> 0.073 / max 3.90 -> 0.22
+                # (metrocop), 0.244 -> 0.136 / 7.61 -> 0.68 (grunt), 0.245 ->
+                # 0.108 / 10.38 -> 0.76 (hazmat). Every OTHER region - calf,
+                # palm, torso, head, thigh, upperarm, forearm, clavicle - is
+                # bit-identical, which is the whole point: only mapped leaves
+                # were ever taking a frame delta.
+                cand = []
             segs = []
             for c in cand:
                 od = old_world[c][:3, 3] - op
-                nd = bind_world[c][:3, 3] - npos
+                nd = tgt_world[c][:3, 3] - npos
                 lo = float(np.linalg.norm(od))
                 ln = float(np.linalg.norm(nd))
                 if lo > 1e-4 and ln > 1e-4:
@@ -487,12 +713,20 @@ def conform_to_donor(
             p = joints[i].parent_joint_idx
             if i in mapped or p is None or anat[p] is None:
                 continue
-            bind_world[i] = anat[p] @ old_world[i]
-            anat[i] = anat[p].copy()
-            anat_rotations[i] = anat[p][:3, :3].copy()
+            # Re-place from the SAME bone the flesh rotation came from, or
+            # this pass silently undoes the choice made above.
+            s = helper_src.get(i, p)
+            if anat[s] is None:
+                s = p
+            tgt_world[i] = anat[s] @ old_world[i]
+            if tgt_world is not bind_world:
+                bind_world[i] = tgt_world[i]
+            anat[i] = anat[s].copy()
+            anat_rotations[i] = anat[s][:3, :3].copy()
             # prop_world tracks bind for unmapped bones (delta zero)
-            prop_world[i] = prop_world[p] @ (
-                np.linalg.inv(bind_world[p]) @ bind_world[i])
+            if tgt_world is bind_world:
+                prop_world[i] = prop_world[p] @ (
+                    np.linalg.inv(bind_world[p]) @ bind_world[i])
 
         dq: List[Tuple[np.ndarray, np.ndarray]] = []
         for i in range(n):
@@ -580,9 +814,10 @@ def conform_to_donor(
         p = joints[i].parent_joint_idx
         bl = bind_world[i] if p is None else np.linalg.inv(bind_world[p]) @ bind_world[i]
         pl = prop_world[i] if p is None else np.linalg.inv(prop_world[p]) @ prop_world[i]
+        rest = pl if own_prop else bl
         joints[i].name = new_name[i]
-        joints[i].rest_translation = bl[:3, 3].copy()
-        joints[i].rest_rotation = _mat_to_quat(bl[:3, :3])
+        joints[i].rest_translation = rest[:3, 3].copy()
+        joints[i].rest_rotation = _mat_to_quat(rest[:3, :3])
         joints[i].rest_scale = _ONE.copy()
         bind_frame[i] = (bl[:3, 3].copy(), _mat_to_quat(bl[:3, :3]), _ONE.copy())
         prop_frame[i] = (pl[:3, 3].copy(), _mat_to_quat(pl[:3, :3]), _ONE.copy())
@@ -594,15 +829,8 @@ def conform_to_donor(
         pp_lines.append(
             f'$poseparameter "{p.name}" {p.start:.6f} {p.end:.6f}{loop}')
 
-    # Split the report: a bone the donor lacks still gets a proper ValveBiped
-    # name when bone_maps knows one (the twist/helper bones) — only the rest
-    # fall back to z_*, and conflating the two made the log claim z_ bones that
-    # are not in the model.
-    n_z = sum(1 for i, nm in new_name.items()
-              if i not in mapped and nm.startswith("z_"))
-    log(f"conformed {len(mapped)} bone(s) to donor bind "
-        f"({donor_mdl.name}); {renamed_native - n_z} helper bone(s) named "
-        f"from the ValveBiped map, {n_z} renamed z_*")
+    log(f"conformed {len(mapped)} bone(s) to the canonical ValveBiped "
+        f"skeleton ({donor_mdl.name}); {renamed_native} kept under z_*")
     if pp_lines:
         log(f"mirrored {len(pp_lines)} donor $poseparameter(s)")
     return ConformResult(
