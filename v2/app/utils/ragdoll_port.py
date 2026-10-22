@@ -18,6 +18,7 @@ Qt-free: reachable from the GUI tool, CLIs and tests alike.
 
 from __future__ import annotations
 
+import copy
 import re
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -262,12 +263,27 @@ def _frame_from_worlds(skin, worlds: Dict[str, np.ndarray]) -> dict:
     return frame
 
 
+def _seq_name(raw: str, taken: set) -> str:
+    """QC-safe, unique sequence name for a clip."""
+    s = "".join(c if c.isalnum() or c in "_-" else "_" for c in raw).strip("_")
+    s = s or "anim"
+    if s[0].isdigit():
+        s = "a_" + s
+    base, k = s, 2
+    while s.lower() in taken:
+        s = f"{base}_{k}"
+        k += 1
+    taken.add(s.lower())
+    return s
+
+
 def port_ragdoll(
     glb_path: Path,
     out_dir: Path,
     modelname: str,
     cdmaterials: str,
     *,
+    export_animations: bool = True,
     surfaceprop: str = presets.DEFAULT_SURFACEPROP,
     skeleton_naming: str = "native",      # native | auto | valvebiped
     constraint_source: str = "s2",        # s2 | valvebiped_donor
@@ -360,6 +376,12 @@ def port_ragdoll(
     # 41 units and rotates 120 degrees in every clip), so kept bones'
     # frames are converted to world space now and re-based onto the pruned
     # hierarchy afterwards.
+    # The full clip set is written out below, after the prune. Sampling needs
+    # the PRE-prune hierarchy (indices shift and helper ancestors disappear),
+    # so keep a snapshot rather than holding every sampled frame in memory —
+    # a 40-clip HLA character is thousands of frames x 100+ bones.
+    pre_prune_skin = copy.deepcopy(skin) if (export_animations and clips) else None
+
     idle_clip = _find_clip(clips, "idle")
     rag_clip = _find_clip(clips, "ragdoll")
     idle_worlds = rag_worlds = None
@@ -481,6 +503,31 @@ def port_ragdoll(
     SmdAnimationExporter.write_animation(
         skin, rag_frames, out_dir / "a_ragdoll.smd", coord)
 
+    # Every clip in the GLB, as its own $sequence. The idle/ragdoll pair above
+    # stays: those two are single static frames a ragdoll needs regardless of
+    # what the source model happens to animate.
+    anim_seqs: List[Tuple[str, str, int]] = []
+    if pre_prune_skin is not None:
+        taken = {"idle", "ragdoll"}
+        for clip in clips:
+            try:
+                frames, nframes = sample_clip(clip, pre_prune_skin, CLIP_FPS)
+            except Exception as exc:      # noqa: BLE001 - one bad clip only
+                log(f"clip '{clip.name}' skipped ({exc})", "WARNING")
+                continue
+            rebased = [_frame_from_worlds(skin, _frame_worlds(pre_prune_skin, f))
+                       for f in frames]
+            seq = _seq_name(clip.name, taken)
+            smd = f"anim_{seq}.smd"
+            SmdAnimationExporter.write_animation(
+                skin, rebased, out_dir / smd, coord)
+            anim_seqs.append((seq, smd, len(rebased)))
+        if anim_seqs:
+            log(f"exported {len(anim_seqs)} animation(s) from the GLB "
+                f"({sum(a[2] for a in anim_seqs)} frames total)", "INFO")
+    elif export_animations:
+        log("no animation clips in the GLB", "INFO")
+
     # QC ---------------------------------------------------------------------
     L: List[str] = [f'$modelname "{modelname}"',
                     f'$cdmaterials "{cdmaterials}"']
@@ -503,6 +550,9 @@ def port_ragdoll(
     L.append('$sequence "idle" "a_idle.smd" fps 1 loop')
     L.append('$sequence "ragdoll" "a_ragdoll.smd" fps 30 '
              'activity "ACT_DIERAGDOLL" 1')
+    for seq, smd, nframes in anim_seqs:
+        loop = " loop" if nframes > 1 else ""
+        L.append(f'$sequence "{seq}" "{smd}" fps {CLIP_FPS:.0f}{loop}')
     L.append("")
     L.extend(coll_lines)
     qc_path = out_dir / f"{name_base}_ragdoll.qc"

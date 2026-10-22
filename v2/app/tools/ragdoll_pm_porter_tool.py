@@ -150,6 +150,14 @@ class RagdollPmPorterTool(BaseTool):
             "Valve's hand-tuned humanoid values (needs true ValveBiped\n"
             "orientations, i.e. a donor conform).")
         rform.addRow("Constraint source:", self.constraint_combo)
+        self.export_anims_check = QCheckBox("Export the GLB's animations")
+        self.export_anims_check.setChecked(True)
+        self.export_anims_check.setToolTip(
+            "Write every animation clip in the GLB as its own SMD and "
+            "$sequence. A choreo character can carry hundreds, which is slow "
+            "to port and compile - turn this off for a ragdoll that only needs "
+            "its idle and death poses.")
+        rform.addRow("", self.export_anims_check)
         self.vpk_row = self.create_picker(
             "open_file", "source_vpk",
             file_filter="Source 2 packages (*.vpk *.vmdl_c)",
@@ -238,6 +246,7 @@ class RagdollPmPorterTool(BaseTool):
                 _SKELETON_NAMING[self.skeleton_combo.currentIndex()],
             'constraint_source':
                 _CONSTRAINT_SOURCE[self.constraint_combo.currentIndex()],
+            'export_animations': self.export_anims_check.isChecked(),
             'source_vpk': self.vpk_row.path(),
             'compile': self.compile_check.isChecked(),
             'studiomdl': self.studiomdl_row.path(),
@@ -291,6 +300,8 @@ class RagdollPmPorterTool(BaseTool):
         self.constraint_combo.setCurrentIndex(
             _CONSTRAINT_SOURCE.index(source)
             if source in _CONSTRAINT_SOURCE else 0)
+        self.export_anims_check.setChecked(
+            bool(r.get('export_animations', True)))
         if r.get('source_vpk'):
             self.vpk_row.set_path(r.get('source_vpk', ''))
         self.compile_check.setChecked(bool(r.get('compile', False)))
@@ -343,6 +354,7 @@ class RagdollPmPorterTool(BaseTool):
                     _SKELETON_NAMING[self.skeleton_combo.currentIndex()],
                 constraint_source=
                     _CONSTRAINT_SOURCE[self.constraint_combo.currentIndex()],
+                export_animations=self.export_anims_check.isChecked(),
             )
             if donor and Path(donor).is_file():
                 kwargs["donor_mdl"] = Path(donor)
