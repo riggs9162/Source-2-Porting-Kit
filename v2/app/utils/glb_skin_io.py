@@ -179,14 +179,30 @@ def _tokens(name: str) -> List[str]:
     return [t for t in name.lower().replace("-", "_").split("_") if t]
 
 
+# Laterality words. A slot's left and right halves are drawn TOGETHER, so they
+# must never be folded into one another however alike their names look.
+_SIDE_TOKENS = frozenset(("left", "right", "l", "r", "lt", "rt", "lh", "rh"))
+
+
 def _same_group(a: str, b: str) -> bool:
     """Do two mesh names look like variants of one interchangeable slot?
 
     True when one name is a token-prefix of the other (``tank`` /
-    ``tank_destroyed``) or they first differ at a purely numeric token
-    (``helmet_default_00`` / ``helmet_default_01``). Names that diverge on a
-    word — ``combine_grunt_grenadeholster`` vs ``combine_helmet_default_00``
-    — stay in separate slots.
+    ``tank_destroyed``), when they first differ at a purely numeric token
+    (``helmet_default_00`` / ``helmet_default_01``), or when they differ at
+    exactly one token AT EITHER END (``hazmat_forearm_left`` /
+    ``zombie_forearm_left``, ``body_v2_a`` / ``body_v2_worker``). Names that
+    diverge on a middle word — ``worker_shoulder_left`` vs
+    ``worker_forearm_left`` — stay in separate slots, as do
+    ``combine_grunt_grenadeholster`` vs ``combine_helmet_default_00``.
+
+    The end-token rule exists because Source 2 characters name outfit variants
+    as a PREFIX, which the prefix rule alone cannot see: the HLA zombie ships
+    5 outfits x 3 limbs x 2 sides plus 6 bodies and 5 skins, and one slot per
+    mesh produced 43 bodygroups. GMod's studiomdl refuses to compile 32 or
+    more (EXCEPTION_ACCESS_VIOLATION) and a model that slips past it overflows
+    the running product in mstudiobodyparts_t::base, which crashes the engine
+    on view. Grouping properly gives that zombie 10 slots.
     """
     ta, tb = _tokens(a), _tokens(b)
     k = 0
@@ -194,7 +210,21 @@ def _same_group(a: str, b: str) -> bool:
         k += 1
     if k == len(ta) or k == len(tb):
         return True
-    return ta[k].isdigit() and tb[k].isdigit()
+    if ta[k].isdigit() and tb[k].isdigit():
+        return True
+    if len(ta) != len(tb) or len(ta) < 2:
+        return False
+    diff = [i for i in range(len(ta)) if ta[i] != tb[i]]
+    if len(diff) != 1 or diff[0] not in (0, len(ta) - 1):
+        return False
+    if ta[diff[0]] in _SIDE_TOKENS or tb[diff[0]] in _SIDE_TOKENS:
+        return False
+    # What the two names still share has to name a SLOT, not just a number:
+    # `hazmat_forearm_left`/`zombie_forearm_left` share "forearm left" and are
+    # variants, while `head_01`/`hands_01` share only "01" and are two
+    # different pieces of gear that happen to be numbered alike.
+    rest = ta[1:] if diff[0] == 0 else ta[:-1]
+    return any(not t.isdigit() for t in rest)
 
 
 def group_bodygroups(sets: List[Tuple[str, str, int]]

@@ -282,6 +282,16 @@ def port_playermodel(
         if len(smds) > 1 or add_blank:
             log(f"bodygroup '{gname}': {len(smds)} variant(s)"
                 f"{' + blank' if add_blank else ''}", "INFO")
+    # GMod's studiomdl refuses 32 or more bodygroups outright
+    # (EXCEPTION_ACCESS_VIOLATION); StudioMDL CE compiles them, and the model
+    # then crashes the engine and HLMV the moment it is drawn, because the
+    # running product in mstudiobodyparts_t::base overflows its signed int well
+    # before the last slot. The HLA zombie hit this with 43 slots. Loud, because
+    # a silent pass here produces a file that only fails at view time.
+    if len(groups) >= 32:
+        log(f"{len(groups)} bodygroups: 32 or more crashes GMod and HLMV "
+            f"(the engine's bodypart index overflows). Merge variant meshes in "
+            f"the source, or drop bodygroups, to get under 32.", "ERROR")
 
     coord = CoordinateMode(scale=1.0, swap_axes=False)
     SmdAnimationExporter.write_animation(
