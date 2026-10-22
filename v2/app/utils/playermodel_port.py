@@ -393,13 +393,17 @@ def port_playermodel(
         # The rig is conformed to the donor, so its bones carry true ValveBiped
         # orientations and Valve's anatomical constraints apply — elbows and
         # knees become hinges rather than free in all three axes.
-        coll_lines, _hbox, cerr = build_ragdoll_collision(
+        coll_lines, hbox_lines, cerr = build_ragdoll_collision(
             skin=skin, all_arrays=all_arrays, out_dir=out_dir,
             name_base=name_base, phys_data=None, physics_glb=None,
             prebuilt_hulls=phys_hulls or None, constraint_rows=phys_rows,
             total_mass=total_mass, constraint_source="valvebiped_donor",
             phys_smd_name="pm_physics.smd", on_log=log)
         if coll_lines:
+            if hbox_lines:
+                L.append('$hboxset "default"')
+                L.extend(hbox_lines)
+                L.append("")
             L.extend(coll_lines)
             collision = True
         else:

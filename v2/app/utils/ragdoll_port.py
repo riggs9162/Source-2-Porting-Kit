@@ -28,7 +28,8 @@ from ..core import ragdoll_presets as presets
 from ..core.bone_maps import valvebiped_name
 from ..tools.gltf_animation import (derive_bind_pose_local, parse_clips,
                                     parse_skin, sample_clip)
-from ..tools.ragdoll_physics import (_mat33_to_quat, bones_above_phys_root,
+from ..tools.ragdoll_physics import (hitbox_lines_from_hulls,
+    _mat33_to_quat, bones_above_phys_root,
                                      build_hitbox_lines, build_ragdoll,
                                      build_ragdoll_phys, is_humanoid_skeleton,
                                      load_phys_dump, prune_skin_joints,
@@ -189,6 +190,10 @@ def build_ragdoll_collision(
     # rows apply: elbows and knees become real hinges instead of the symmetric
     # fallback's three-degrees-of-freedom, which lets them bend sideways.
     donor_axes = constraint_source == "valvebiped_donor"
+    # build_ragdoll resolves the hull source itself and reports back only when
+    # the hulls are real authored geometry, so a model that ships a
+    # _physics.glb but no PHYS dump still gets hitboxes.
+    real_hulls: List[Tuple[int, "trimesh.Trimesh"]] = []
     lines, err = build_ragdoll(
         render_mesh=mesh, vertex_joints=vj, vertex_weights=vw, skin=skin,
         coord=coord, phys_smd_path=phys_smd_path,
@@ -199,10 +204,23 @@ def build_ragdoll_collision(
         constraint_source=constraint_source,
         rotdamping=(presets.DONOR_ROTDAMPING if donor_axes
                     else presets.DEFAULT_ROTDAMPING),
+        out_real_hulls=real_hulls,
         on_log=_rlog)
     if lines is None:
         return None, None, err
-    return lines, None, None
+    # Hitboxes for the conformed path too, so a playermodel is hit-detected the
+    # same way its ragdoll counterpart is. Only from real hulls — weight-derived
+    # blobs are fitted to skin weights and would make nonsense hitboxes.
+    # The caller's own hulls win: build_ragdoll narrows them to the SIMULATED
+    # set, which is right for physics but loses coverage for hit detection (it
+    # cost the playermodels two hitboxes each, 19 -> 17).
+    hbox_hulls = prebuilt_hulls or real_hulls
+    hbox = (hitbox_lines_from_hulls(skin, hbox_hulls)
+            if hbox_hulls else None)
+    if hbox:
+        log(f"  hitboxes: {len(hbox)} from the conformed collision hulls",
+            "INFO")
+    return lines, hbox, None
 
 
 def _find_clip(clips, needle: str):

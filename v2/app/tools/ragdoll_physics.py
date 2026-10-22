@@ -779,6 +779,47 @@ def build_hitbox_lines(phys: "PhysData",
     return lines
 
 
+def hitbox_lines_from_hulls(
+    skin,
+    hulls: List[Tuple[int, "trimesh.Trimesh"]],
+) -> List[str]:
+    """``$hbox`` lines from already-built collision hulls in MODEL space.
+
+    The PHYS path (`build_hitbox_lines`) reads part-local shape points straight
+    out of the dump, but a conformed playermodel's hulls have been carried into
+    the donor's bind space, so the bone-local AABB has to be taken against the
+    CONFORMED bind: `inv(bone_world) @ hull_vertices`. Same hitgroup table, so
+    a playermodel gets the hitboxes its ragdoll counterpart gets.
+    """
+    world: Dict[int, np.ndarray] = {}
+
+    def _fk(i: int) -> np.ndarray:
+        if i in world:
+            return world[i]
+        j = skin.joints[i]
+        m = np.eye(4)
+        m[:3, :3] = _quat_to_mat33(j.rest_rotation)
+        m[:3, 3] = np.asarray(j.rest_translation, dtype=np.float64)
+        p = j.parent_joint_idx
+        world[i] = m if p is None else _fk(p) @ m
+        return world[i]
+
+    lines: List[str] = []
+    for ji, hull in hulls:
+        v = np.asarray(hull.vertices, dtype=np.float64)
+        if not len(v):
+            continue
+        inv = np.linalg.inv(_fk(int(ji)))
+        loc = v @ inv[:3, :3].T + inv[:3, 3]
+        lo, hi = loc.min(axis=0), loc.max(axis=0)
+        name = skin.joints[int(ji)].name
+        grp = presets.HITGROUP_OF.get(valvebiped_name(name), 0)
+        lines.append(f'$hbox {grp} "{name}" '
+                     f'{lo[0]:.2f} {lo[1]:.2f} {lo[2]:.2f} '
+                     f'{hi[0]:.2f} {hi[1]:.2f} {hi[2]:.2f}')
+    return lines
+
+
 def build_collisionjoints_from_phys(
     phys_smd_name: str,
     phys: "PhysData",
@@ -931,6 +972,7 @@ def build_ragdoll(
     min_hull_verts: int = 8,
     constraint_source: str = "symmetric",
     rotdamping: float = presets.DEFAULT_ROTDAMPING,
+    out_real_hulls: Optional[List[Tuple[int, "trimesh.Trimesh"]]] = None,
     on_log: LogFn = print,
 ) -> Tuple[Optional[List[str]], Optional[str]]:
     """Build the per-bone hulls, write the ragdoll physics SMD, and return the
@@ -961,6 +1003,10 @@ def build_ragdoll(
             bone_ref[ji] = rverts[sel].mean(axis=0)
 
     hulls: List[Tuple[int, trimesh.Trimesh]] = []
+    # Real authored geometry (Rubikon shapes or the _physics.glb) vs blobs
+    # fitted to skin weights. Only the former is precise enough to derive
+    # hitboxes from - see the fill of out_real_hulls below.
+    hulls_are_real = False
     if prebuilt_hulls:
         # Caller already has real PHYS hulls in this skin's space (the
         # playermodel path pushes the Rubikon shapes through the same conform
@@ -970,6 +1016,7 @@ def build_ragdoll(
         on_log(f"  hull source: Source 2 PHYS shapes ({len(hulls)} part(s)"
                + (f", {dropped} not in the simulated set" if dropped else "")
                + ")")
+        hulls_are_real = True
     if not hulls and physics_mesh is not None and bone_ref:
         real = build_hulls_from_physics_mesh(physics_mesh, bone_ref, on_log=on_log)
         # Guard against single-mesh / non-ragdoll collision (or a recovery that
@@ -977,6 +1024,7 @@ def build_ragdoll(
         # per-bone coverage.
         if len(real) >= 4:
             hulls = real
+            hulls_are_real = True
             on_log("  hull source: real Source 2 physics mesh")
         elif real:
             on_log(f"  physics glb yielded only {len(real)} bone hull(s) "
@@ -994,6 +1042,8 @@ def build_ragdoll(
 
     if not hulls:
         return None, "no per-bone hulls could be built"
+    if out_real_hulls is not None and hulls_are_real:
+        out_real_hulls.extend(hulls)
 
     hull_indices = {i for i, _ in hulls}
     root_idx = sim_indices[0]
