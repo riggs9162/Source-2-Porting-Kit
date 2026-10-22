@@ -73,6 +73,60 @@ def _match_scalar_inputs(
     return ao_value, roughness_value, metallic_value
 
 
+def compute_emissive_weight(
+    selfillum: Optional[np.ndarray],
+    height: int,
+    width: int
+) -> Optional[np.ndarray]:
+    """How strongly each pixel is marked as glowing, from a selfillum mask.
+
+    Uses the strongest color channel rather than the luminance: a saturated
+    red glow is fully emissive even though it only carries 0.21 of luminance,
+    and the question here is whether the artist marked the pixel, not how
+    bright it reads. Returns None when there is no mask.
+    """
+    if selfillum is None:
+        return None
+    if selfillum.ndim > 2 and selfillum.shape[2] >= 3:
+        weight = np.max(
+            np.clip(np.asarray(selfillum[:, :, :3], dtype=np.float32), 0.0, 1.0),
+            axis=2
+        )
+        if weight.shape != (height, width):
+            weight = _resize_scalar(weight, height, width)
+        return weight
+    return _extract_scalar_map(selfillum, height, width, 0.0)
+
+
+def relieve_ao_on_emissive(
+    ao: Optional[np.ndarray],
+    selfillum: Optional[np.ndarray],
+    height: int,
+    width: int,
+    amount: float = 1.0
+) -> Optional[np.ndarray]:
+    """Lift AO back towards unoccluded wherever the material glows.
+
+    Ambient occlusion says how much *ambient* light reaches a surface, and an
+    emissive panel makes its own — baking the crevice around a glowing strip
+    over the strip itself dims it for a reason that doesn't apply to it.
+    ``amount`` is how much of that occlusion to take back on a fully emissive
+    pixel: 0 bakes AO exactly as authored, 1 removes it there entirely.
+    Partially marked pixels get a proportional share, so the relief fades out
+    with the mask instead of leaving a hard edge where it stops.
+
+    Returns ``ao`` unchanged when there is nothing to relieve.
+    """
+    amount = float(np.clip(amount, 0.0, 1.0))
+    if ao is None or amount <= 0.0:
+        return ao
+    weight = compute_emissive_weight(selfillum, height, width)
+    if weight is None:
+        return ao
+    ao_value = _extract_scalar_map(ao, height, width, 1.0)
+    return ao_value + (1.0 - ao_value) * (amount * weight)
+
+
 def _albedo_chroma(color_linear: np.ndarray) -> np.ndarray:
     """Per-pixel chroma in [0,1] from a linear-space RGB image: max - min channel."""
     rgb = color_linear[:, :, :3]

@@ -544,6 +544,7 @@ class VmatBatchRunner(QThread):
         prefix: str,
         suffix: str,
         fake_ao_strength: float,
+        fake_emissive_ao_relief: float,
         fake_gloss_gamma: float,
         fake_metal_diffuse_suppression: float,
         fake_phong_strength: float,
@@ -581,6 +582,7 @@ class VmatBatchRunner(QThread):
         # `_split_prefix` for the rule.
         self._prefix_path, self._prefix_tail = self._split_prefix(prefix)
         self.fake_ao_strength = fake_ao_strength
+        self.fake_emissive_ao_relief = fake_emissive_ao_relief
         self.fake_gloss_gamma = fake_gloss_gamma
         self.fake_metal_diffuse_suppression = fake_metal_diffuse_suppression
         self.fake_phong_strength = fake_phong_strength
@@ -753,6 +755,7 @@ class VmatBatchRunner(QThread):
                 if self.mode == "Fake PBR":
                     options = ProcessingOptions(
                         ao_strength=self.fake_ao_strength,
+                        emissive_ao_relief=self.fake_emissive_ao_relief,
                         gloss_gamma=self.fake_gloss_gamma,
                         shader=self.fake_shader,
                         surfaceprop=self.fake_surfaceprop,
@@ -1221,6 +1224,18 @@ class VmatPBRTool(BaseTool):
         self.fake_ao_slider, self.fake_ao_value = self._make_slider(0, 200, 50, 0.01)
         form.addRow("AO Strength:", self._slider_row(self.fake_ao_slider, self.fake_ao_value))
 
+        self.fake_emissive_ao_relief_slider, self.fake_emissive_ao_relief_value = self._make_slider(
+            0, 100, 100, 0.01,
+        )
+        self.fake_emissive_ao_relief_slider.setToolTip(
+            "How much AO to take back where the selfillum mask marks the "
+            "surface. A glowing panel makes its own light, so occluding it "
+            "only dims the glow. 1.00 = no AO on fully emissive pixels, "
+            "0.00 = bake AO as authored."
+        )
+        form.addRow("Emissive AO Relief:", self._slider_row(
+            self.fake_emissive_ao_relief_slider, self.fake_emissive_ao_relief_value))
+
         self.fake_gamma_slider, self.fake_gamma_value = self._make_slider(10, 40, 22, 0.1)
         form.addRow("Gloss Gamma:", self._slider_row(self.fake_gamma_slider, self.fake_gamma_value))
 
@@ -1490,6 +1505,7 @@ class VmatPBRTool(BaseTool):
             "generate_vmt": self.generate_vmt.isChecked(),
             "generate_mipmaps": self.generate_mipmaps.isChecked(),
             "fake_ao_strength": self.fake_ao_slider.value() / 100.0,
+            "fake_emissive_ao_relief": self.fake_emissive_ao_relief_slider.value() / 100.0,
             "fake_gloss_gamma": self.fake_gamma_slider.value() / 10.0,
             "fake_metal_diffuse_suppression": self.fake_metal_suppression_slider.value() / 100.0,
             "fake_phong_strength": self.fake_phong_strength_slider.value() / 100.0,
@@ -1517,7 +1533,7 @@ class VmatPBRTool(BaseTool):
             "vmat_root", "texture_root", "output_root", "mode", "material_path",
             "append_material_subfolders", "preserve_structure", "prefix", "suffix",
             "generate_vtf", "generate_vmt", "generate_mipmaps", "fake_ao_strength",
-            "fake_gloss_gamma", "fake_metal_diffuse_suppression", "fake_phong_strength",
+            "fake_emissive_ao_relief", "fake_gloss_gamma", "fake_metal_diffuse_suppression", "fake_phong_strength",
             "fake_phong_tint_mode", "fake_colored_metal_relief", "fake_shader",
             "fake_surfaceprop", "exo_emission",
             "exo_parallax", "exo_alphablend", "glow_mode", "transparency_mode",
@@ -1559,6 +1575,9 @@ class VmatPBRTool(BaseTool):
         self.generate_vmt.setChecked(bool(entry.get("generate_vmt", True)))
         self.generate_mipmaps.setChecked(bool(entry.get("generate_mipmaps", True)))
         self.fake_ao_slider.setValue(int(float(entry.get("fake_ao_strength", 0.5)) * 100))
+        self.fake_emissive_ao_relief_slider.setValue(
+            int(float(entry.get("fake_emissive_ao_relief", 1.0)) * 100)
+        )
         self.fake_gamma_slider.setValue(int(float(entry.get("fake_gloss_gamma", 2.2)) * 10))
         self.fake_metal_suppression_slider.setValue(
             int(float(entry.get("fake_metal_diffuse_suppression", 0.7)) * 100)
@@ -1903,6 +1922,7 @@ class VmatPBRTool(BaseTool):
             prefix=self.prefix_input.text().strip(),
             suffix=self.suffix_input.text().strip(),
             fake_ao_strength=self.fake_ao_slider.value() / 100.0,
+            fake_emissive_ao_relief=self.fake_emissive_ao_relief_slider.value() / 100.0,
             fake_gloss_gamma=self.fake_gamma_slider.value() / 10.0,
             fake_metal_diffuse_suppression=self.fake_metal_suppression_slider.value() / 100.0,
             fake_phong_strength=self.fake_phong_strength_slider.value() / 100.0,

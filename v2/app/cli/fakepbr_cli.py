@@ -215,6 +215,10 @@ Examples:
     proc_group = parser.add_argument_group('Processing Options')
     proc_group.add_argument('--ao-strength', type=float, default=0.7,
                           help='AO bake strength (default: 0.7)')
+    proc_group.add_argument('--emissive-ao-relief', type=float, default=1.0,
+                          help='How much AO to take back where the selfillum '
+                               'mask marks the surface: 1.0 = none there, '
+                               '0.0 = bake AO as authored (default: 1.0)')
     proc_group.add_argument('--gloss-gamma', type=float, default=2.0,
                           help='Roughness-to-exponent gamma (default: 2.0)')
     proc_group.add_argument('--invert-green', action='store_true',
@@ -229,6 +233,7 @@ Examples:
     # Create processing options
     options = ProcessingOptions(
         ao_strength=args.ao_strength,
+        emissive_ao_relief=args.emissive_ao_relief,
         gloss_gamma=args.gloss_gamma,
         invert_green=args.invert_green,
         target_branch=args.target_branch,

@@ -58,7 +58,8 @@ from ..utils.pbr_processing import (
     pack_normal_with_phong_mask,
     create_phong_exponent_texture,
     create_colored_envmap_mask,
-    compute_fakepbr_material_stats
+    compute_fakepbr_material_stats,
+    relieve_ao_on_emissive
 )
 from ..utils.vmt_generator import generate_fakepbr_vmt
 
@@ -117,6 +118,11 @@ class PBRInputs:
 class ProcessingOptions:
     """Options for PBR processing"""
     ao_strength: float = 0.7
+    # How much of the AO to take back where the selfillum mask marks the
+    # surface as emissive. A glowing panel makes its own light, so occluding
+    # it only dims the glow. 1.0 removes AO there entirely, 0.0 bakes it as
+    # authored. Only bites when the material has both an AO map and a mask.
+    emissive_ao_relief: float = 1.0
     gloss_gamma: float = 2.0
     generate_vtf: bool = True
     generate_vmt: bool = True
@@ -624,6 +630,19 @@ class FakePBRProcessor:
                 tintmask_data = resize_to_match(tintmask_data, height, width, "tint mask")
                 self._check_cancel()
 
+                # AO says how much ambient light reaches the surface, and a
+                # glowing panel makes its own — so the selfillum mask lifts the
+                # occlusion back off it once here, before anything bakes AO in.
+                ao_baked = relieve_ao_on_emissive(
+                    ao_data, selfillum_data, height, width,
+                    self.options.emissive_ao_relief,
+                )
+                if ao_baked is not ao_data:
+                    self.log(
+                        f"  → Relieving AO on the glow mask "
+                        f"(strength: {self.options.emissive_ao_relief:.2f})"
+                    )
+
                 # Process base texture
                 self.log(f"[FakePBR] Processing base texture...")
                 self.log(f"  → Baking AO with power curve (strength: {self.options.ao_strength:.2f})")
@@ -634,7 +653,7 @@ class FakePBRProcessor:
                     self.log(f"  → Baking tint mask into base texture alpha ($blendtintbybasealpha)")
                 base_texture = process_fakepbr_base_texture(
                     color_data,
-                    ao_data,
+                    ao_baked,
                     metallic_data,
                     self.options.ao_strength,
                     self.options.metal_diffuse_suppression,
@@ -655,7 +674,7 @@ class FakePBRProcessor:
                     self.log(f"  → Computing bump alpha Phong mask (tint mode: {tint_mode_active})")
                     normal_texture = pack_normal_with_phong_mask(
                         normal_data,
-                        ao_data,
+                        ao_baked,
                         metallic_data,
                         roughness_data,
                         self.options.invert_green,
@@ -687,7 +706,7 @@ class FakePBRProcessor:
                     self.log(f"  → Converting roughness to gloss: (1-r)^{self.options.gloss_gamma:.2f}")
                     self.log(f"  → Packing R=exponent, G=metallic, A=rim")
                     phong_texture = create_phong_exponent_texture(
-                        roughness_data, metallic_data, ao_data, self.options.gloss_gamma, height, width,
+                        roughness_data, metallic_data, ao_baked, self.options.gloss_gamma, height, width,
                         phong_strength=self.options.phong_strength
                     )
                     self.log(f"  ✓ Phong exponent texture computed")
@@ -701,7 +720,7 @@ class FakePBRProcessor:
                     self.log(f"  → Packing RGB colored metal tint / roughness intensity")
                     envmask_texture = create_colored_envmap_mask(
                         color_data,
-                        ao_data,
+                        ao_baked,
                         metallic_data,
                         roughness_data,
                         self.options.envmask_gamma
@@ -1235,7 +1254,27 @@ class FakePBRTool(BaseTool):
         ao_layout.addWidget(self.ao_strength_slider)
         ao_layout.addWidget(self.ao_strength_value)
         options_layout.addRow("AO Strength:", ao_layout)
-        
+
+        # Emissive AO Relief
+        emissive_ao_layout = QHBoxLayout()
+        self.emissive_ao_relief_slider = QSlider(Qt.Horizontal)
+        self.emissive_ao_relief_slider.setRange(0, 100)
+        self.emissive_ao_relief_slider.setValue(100)
+        self.emissive_ao_relief_slider.setToolTip(
+            "How much AO to take back where the selfillum mask marks the "
+            "surface. A glowing panel makes its own light, so occluding it "
+            "only dims the glow. 1.00 = no AO on fully emissive pixels, "
+            "0.00 = bake AO as authored. Needs both an AO map and a "
+            "selfillum mask to do anything."
+        )
+        self.emissive_ao_relief_value = QLabel("1.00")
+        self.emissive_ao_relief_slider.valueChanged.connect(
+            lambda v: self.emissive_ao_relief_value.setText(f"{v/100:.2f}")
+        )
+        emissive_ao_layout.addWidget(self.emissive_ao_relief_slider)
+        emissive_ao_layout.addWidget(self.emissive_ao_relief_value)
+        options_layout.addRow("Emissive AO Relief:", emissive_ao_layout)
+
         # Gloss Gamma
         gamma_layout = QHBoxLayout()
         self.gloss_gamma_slider = QSlider(Qt.Horizontal)
@@ -1593,6 +1632,17 @@ class FakePBRTool(BaseTool):
 
         self.auto_ao_slider, self.auto_ao_value = self._make_auto_slider(0, 200, 50, 0.01)
         form.addRow("AO Strength:", self._slider_row(self.auto_ao_slider, self.auto_ao_value))
+
+        self.auto_emissive_ao_relief_slider, self.auto_emissive_ao_relief_value = self._make_auto_slider(
+            0, 100, 100, 0.01,
+        )
+        self.auto_emissive_ao_relief_slider.setToolTip(
+            "How much AO to take back where the selfillum mask marks the "
+            "surface. 1.00 = no AO on fully emissive pixels, 0.00 = bake AO "
+            "as authored."
+        )
+        form.addRow("Emissive AO Relief:", self._slider_row(
+            self.auto_emissive_ao_relief_slider, self.auto_emissive_ao_relief_value))
 
         self.auto_gamma_slider, self.auto_gamma_value = self._make_auto_slider(10, 40, 22, 0.1)
         form.addRow("Gloss Gamma:", self._slider_row(self.auto_gamma_slider, self.auto_gamma_value))
@@ -1965,6 +2015,8 @@ class FakePBRTool(BaseTool):
             metal_supp_val = float(opts.get('metal_diffuse_suppression', 0.7))
             relief_val = float(opts.get('colored_metal_relief', 0.5))
             self.auto_ao_slider.setValue(int(ao_val * 100))
+            self.auto_emissive_ao_relief_slider.setValue(
+                int(float(opts.get('emissive_ao_relief', 1.0)) * 100))
             self.auto_gamma_slider.setValue(int(gamma_val * 10))
             self.auto_metal_suppression_slider.setValue(int(metal_supp_val * 100))
             self.auto_colored_metal_relief_slider.setValue(int(relief_val * 100))
@@ -2021,6 +2073,8 @@ class FakePBRTool(BaseTool):
             metal_supp_val = float(options.get('metal_diffuse_suppression', 0.7))
             relief_val = float(options.get('colored_metal_relief', 0.5))
             self.ao_strength_slider.setValue(int(ao_val * 100))
+            self.emissive_ao_relief_slider.setValue(
+                int(float(options.get('emissive_ao_relief', 1.0)) * 100))
             self.gloss_gamma_slider.setValue(int(gamma_val * 10))
             self.metal_suppression_slider.setValue(int(metal_supp_val * 100))
             self.colored_metal_relief_slider.setValue(int(relief_val * 100))
@@ -2068,6 +2122,7 @@ class FakePBRTool(BaseTool):
             },
             'options': {
                 'ao_strength': options.ao_strength,
+                'emissive_ao_relief': options.emissive_ao_relief,
                 'gloss_gamma': options.gloss_gamma,
                 'metal_diffuse_suppression': options.metal_diffuse_suppression,
                 'phong_tint_mode': options.phong_tint_mode,
@@ -2112,6 +2167,7 @@ class FakePBRTool(BaseTool):
         """Construct an automation history entry from current automation UI state"""
         opts = {
             'ao_strength': self.auto_ao_slider.value() / 100.0,
+            'emissive_ao_relief': self.auto_emissive_ao_relief_slider.value() / 100.0,
             'gloss_gamma': self.auto_gamma_slider.value() / 10.0,
             'metal_diffuse_suppression': self.auto_metal_suppression_slider.value() / 100.0,
             'phong_tint_mode': self.auto_phong_tint_mode_combo.currentData() or 'selective',
@@ -2175,6 +2231,7 @@ class FakePBRTool(BaseTool):
         """Get current processing options from UI"""
         return ProcessingOptions(
             ao_strength=self.ao_strength_slider.value() / 100.0,
+            emissive_ao_relief=self.emissive_ao_relief_slider.value() / 100.0,
             gloss_gamma=self.gloss_gamma_slider.value() / 10.0,
             metal_diffuse_suppression=self.metal_suppression_slider.value() / 100.0,
             phong_strength=self.phong_strength_slider.value() / 100.0,
@@ -2465,6 +2522,7 @@ class FakePBRTool(BaseTool):
 
         # Options
         ao_strength = self.auto_ao_slider.value() / 100.0
+        emissive_ao_relief = self.auto_emissive_ao_relief_slider.value() / 100.0
         gloss_gamma = self.auto_gamma_slider.value() / 10.0
         metal_suppression = self.auto_metal_suppression_slider.value() / 100.0
         phong_strength = self.auto_phong_strength_slider.value() / 100.0
@@ -2515,6 +2573,7 @@ class FakePBRTool(BaseTool):
                 'row': row,
                 'options': ProcessingOptions(
                     ao_strength=ao_strength,
+                    emissive_ao_relief=emissive_ao_relief,
                     gloss_gamma=gloss_gamma,
                     metal_diffuse_suppression=metal_suppression,
                     phong_strength=phong_strength,
@@ -2543,6 +2602,7 @@ class FakePBRTool(BaseTool):
         def make_processor():
             proc = FakePBRProcessor(ProcessingOptions(
                 ao_strength=ao_strength,
+                emissive_ao_relief=emissive_ao_relief,
                 gloss_gamma=gloss_gamma,
                 metal_diffuse_suppression=metal_suppression,
                 phong_strength=phong_strength,
