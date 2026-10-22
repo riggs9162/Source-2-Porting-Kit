@@ -558,17 +558,23 @@ def material_relative_path(path: Any) -> str:
     return stem.name
 
 
+#: The `$basetexture` line, which `%rectanglemap` is placed under so the two
+#: references that must agree sit side by side.
+_BASETEXTURE = re.compile(r'(?im)^[ \t]*"?\$basetexture"?[ \t]+\S.*$')
+
+
 def inject_rectanglemap(vmt_path: Any, reference: str) -> str:
     """Point a VMT's `%rectanglemap` at `reference`. Returns what was done.
 
     An existing entry is replaced in place, keeping its indentation and its
-    original `%`/`$` prefix. Otherwise the key is inserted as the first line of
-    the shader block, matching the indentation the file already uses.
+    original `%`/`$` prefix. Otherwise the key goes directly under
+    `$basetexture`, or first in the shader block when there is none, matching
+    the indentation the file already uses. The file's line endings are kept.
 
     Returns ``"updated"``, ``"added"`` or ``"unchanged"``.
     """
     file_path = Path(vmt_path)
-    text = file_path.read_text(encoding="utf-8", errors="replace")
+    text, newline = _read_vmt(file_path)
     line = f'"%rectanglemap" "{reference}"'
 
     existing = _RECTANGLEMAP.search(text)
@@ -581,16 +587,31 @@ def inject_rectanglemap(vmt_path: Any, reference: str) -> str:
         replacement = f'{existing.group(1)}"{prefix}rectanglemap" "{reference}"'
         file_path.write_text(_RECTANGLEMAP.sub(lambda _m: replacement, text,
                                                count=1),
-                             encoding="utf-8")
+                             encoding="utf-8", newline=newline)
         return "updated"
 
-    brace = text.find("{")
-    if brace == -1:
-        raise HotspotError(f"{file_path.name} has no shader block to add to")
-    indent = _detect_indent(text)
-    updated = f"{text[:brace + 1]}\n{indent}{line}{text[brace + 1:]}"
-    file_path.write_text(updated, encoding="utf-8")
+    basetexture = _BASETEXTURE.search(text)
+    if basetexture is not None:
+        indent = basetexture.group(0)[:len(basetexture.group(0))
+                                      - len(basetexture.group(0).lstrip())]
+        at = basetexture.end()
+    else:
+        brace = text.find("{")
+        if brace == -1:
+            raise HotspotError(f"{file_path.name} has no shader block to add to")
+        indent = _detect_indent(text)
+        at = brace + 1
+    updated = f"{text[:at]}\n{indent}{line}{text[at:]}"
+    file_path.write_text(updated, encoding="utf-8", newline=newline)
     return "added"
+
+
+def _read_vmt(path: Path) -> tuple[str, str]:
+    """A VMT's text with newlines normalised, and the newline it was written with."""
+    raw = path.read_bytes()
+    newline = "\r\n" if b"\r\n" in raw else "\n"
+    text = raw.decode("utf-8", errors="replace").replace("\r\n", "\n")
+    return text, newline
 
 
 def _detect_indent(text: str) -> str:
