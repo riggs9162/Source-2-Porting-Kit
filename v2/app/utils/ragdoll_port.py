@@ -320,11 +320,23 @@ def port_ragdoll(
     use_valvebiped = (skeleton_naming == "valvebiped"
                       or (skeleton_naming == "auto" and humanoid))
     if phys_data is None and not use_valvebiped:
-        raise ValueError(
-            "no PHYS sidecar and a native skeleton: weight-derived hulls "
-            "need ValveBiped-mappable bones. Set the Source VPK so the "
-            "<stem>_phys.txt sidecar can be auto-dumped, ship it next to "
-            "the GLB yourself, or pick ValveBiped naming.")
+        # A humanoid rig can still be ragdolled without a PHYS dump: the
+        # weight-hull fallback only needs ValveBiped names to know which bones
+        # simulate, so retarget rather than refuse. combine_recon is the case
+        # this exists for - it is the one character in hlvr_characters shipping
+        # no <stem>_phys.txt, and refusing made it the only one that could not
+        # be ported at all.
+        if humanoid:
+            log("no PHYS sidecar and a native skeleton - retargeting to "
+                "ValveBiped so the weight-derived hulls have sim bones to "
+                "attach to", "WARNING")
+            use_valvebiped = True
+        else:
+            raise ValueError(
+                "no PHYS sidecar and a non-humanoid native skeleton: "
+                "weight-derived hulls need ValveBiped-mappable bones. Set the "
+                "Source VPK so the <stem>_phys.txt sidecar can be auto-dumped, "
+                "or ship it next to the GLB yourself.")
     if use_valvebiped:
         if donor_mdl and Path(donor_mdl).is_file():
             try:
@@ -495,7 +507,17 @@ def port_ragdoll(
     L.extend(coll_lines)
     qc_path = out_dir / f"{name_base}_ragdoll.qc"
     qc_path.write_text("\n".join(L) + "\n", encoding="ascii")
-    parts = len(phys_data.parts) if phys_data is not None else 0
+    # Count the solids actually emitted rather than the PHYS dump's parts: the
+    # weight-hull fallback builds real hulls with no phys_data behind it, and
+    # reporting 0 there made a working ragdoll look like it had no physics at
+    # all (combine_recon ships no sidecar yet compiles 19 solids). Every
+    # simulated bone but the root carries one $jointconstrain per axis.
+    if phys_data is not None:
+        parts = len(phys_data.parts)
+    else:
+        constrained = {ln.split('"')[1] for ln in coll_lines
+                       if ln.lstrip().startswith("$jointconstrain")}
+        parts = len(constrained) + 1 if constrained else 0
     log(f"QC written: {qc_path.name} ({len(skin.joints)} bones, "
         f"{len(groups)} bodygroup(s) from {len(smd_of_set)} mesh(es))",
         "SUCCESS")
