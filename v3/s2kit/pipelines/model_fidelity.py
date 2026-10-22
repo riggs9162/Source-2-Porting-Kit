@@ -53,11 +53,11 @@ def parse_model_fidelity(data_text: str, ctrl_text: str, morph_text: str = "",
         raise ValueError("MRPH document count does not match the model resource block table")
     morph_lookup = {block_index: index for index, block_index in enumerate(morph_indices)}
     masks = data.get("m_refMeshGroupMasks", [])
-    lod_masks = data.get("m_refLODGroupMasks", [])
+    lod_masks = data.get("m_refLODGroupMasks") or []
     meshes = []
     for entry in ctrl.get("embedded_meshes", []):
         mesh_index = int(entry["mesh_index"])
-        if not 0 <= mesh_index < len(masks) or mesh_index >= len(lod_masks):
+        if not 0 <= mesh_index < len(masks):
             raise ValueError(f"CTRL mesh {mesh_index} is absent from authored mask tables")
         morph_block = int(entry.get("morph_block", -1))
         if morph_block >= 0 and morph_block not in morph_lookup:
@@ -66,7 +66,8 @@ def parse_model_fidelity(data_text: str, ctrl_text: str, morph_text: str = "",
             index=mesh_index, name=str(entry["name"]),
             data_block=int(entry["data_block"]), morph_block=morph_block,
             morph_index=morph_lookup.get(morph_block),
-            group_mask=int(masks[mesh_index]), lod_mask=int(lod_masks[mesh_index]),
+            group_mask=int(masks[mesh_index]),
+            lod_mask=int(lod_masks[mesh_index]) if mesh_index < len(lod_masks) else -1,
         ))
     keyvalues = parse_kv3_documents(data.get("m_modelInfo", {}).get("m_keyValueText", ""))
     embedded = keyvalues[0] if keyvalues else {}
@@ -83,7 +84,7 @@ def parse_model_fidelity(data_text: str, ctrl_text: str, morph_text: str = "",
         default_mask=int(data.get("m_nDefaultMeshGroupMask", -1)),
         hidden_bodygroups=data.get("m_BodyGroupsHiddenInTools", []),
         skins=data.get("m_materialGroups", []),
-        lod_distances=data.get("m_lodGroupSwitchDistances", []),
+        lod_distances=data.get("m_lodGroupSwitchDistances") or [],
         morphs=morphs, constraints=embedded.get("BoneConstraintList", []),
         skin_morphs=embedded.get("materialgroup_driven_morph_list", []),
         physics=physics, source_keyvalues=embedded,
