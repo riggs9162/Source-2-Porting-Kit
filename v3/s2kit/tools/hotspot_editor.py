@@ -305,12 +305,18 @@ class HotspotEditor(ToolPage):
         self._push_undo()
         loaded.width = loaded.width or sheet.width
         loaded.height = loaded.height or sheet.height
+        factor = hotspot.oversize_factor(loaded)
+        hotspot.shrink_sheet(loaded, factor)
         self.canvas.load(loaded, self._preview_png)
         self._rect_path = Path(path)
         self._show_target()
         note = (f"{len(loaded)} rect(s) from {Path(path).name}")
         if loaded.source_format == "source2":
             note += " - converted from Source 2 coordinates"
+        if factor > 1:
+            note += (f" - scaled down {factor}x, they were drawn for a "
+                     f"{loaded.width * factor} x {loaded.height * factor} "
+                     "copy of this texture. Save to keep it")
         self.ctx.toast(note)
         self._on_canvas_change()
 

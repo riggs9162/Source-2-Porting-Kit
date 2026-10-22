@@ -518,6 +518,46 @@ def write_sheet(sheet: RectSheet, path: Any, *, target: str = "hammerpp",
     return file_path
 
 
+def oversize_factor(sheet: RectSheet, *, limit: int = 16) -> int:
+    """How many times too large for its texture a pixel sheet was drawn, or 1.
+
+    Hammer++ rects are in pixels of the texture the material actually loads, so
+    a sheet drawn on the full-size source and kept after the VTF was shrunk
+    covers a fraction of the art. That shows as the sheet overrunning the
+    texture by an exact power of two - its far edge lands on the bigger copy's
+    edge and every coordinate divides by it. Only that case is answered here;
+    anything else is left for validation to report.
+    """
+    if not (sheet.width and sheet.height and sheet.rects):
+        return 1
+    right = max(rect.x2 for rect in sheet.rects)
+    bottom = max(rect.y2 for rect in sheet.rects)
+    if right <= sheet.width and bottom <= sheet.height:
+        return 1
+    factor = 2
+    while factor <= limit:
+        reaches_edge = (right == sheet.width * factor
+                        or bottom == sheet.height * factor)
+        fits = right <= sheet.width * factor and bottom <= sheet.height * factor
+        if reaches_edge and fits and all(
+                value % factor == 0 for rect in sheet.rects
+                for value in (rect.x, rect.y, rect.w, rect.h)):
+            return factor
+        factor *= 2
+    return 1
+
+
+def shrink_sheet(sheet: RectSheet, factor: int) -> None:
+    """Divide every pixel coordinate in `sheet` by `factor`, in place."""
+    if factor <= 1:
+        return
+    sheet.rects = [replace(rect, x=rect.x // factor, y=rect.y // factor,
+                           w=rect.w // factor, h=rect.h // factor,
+                           inset_x=rect.inset_x // factor,
+                           inset_y=rect.inset_y // factor)
+                   for rect in sheet.rects]
+
+
 def describe_losses(sheet: RectSheet, target: str) -> list[str]:
     """What writing to `target` would silently drop. Empty when nothing is lost."""
     losses: list[str] = []
