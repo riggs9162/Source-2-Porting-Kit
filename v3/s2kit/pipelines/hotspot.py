@@ -637,6 +637,142 @@ def read_rectanglemap(vmt_path: Any) -> Optional[str]:
 
 
 # ----------------------------------------------------------------------
+# Pairing a material with its texture and rect file
+# ----------------------------------------------------------------------
+
+#: Texture formats a material's `$basetexture` may be found as, best first.
+TEXTURE_EXTENSIONS = (".vtf", ".png", ".tga", ".jpg", ".jpeg", ".bmp")
+
+
+def materials_root(path: Any) -> Optional[Path]:
+    """The nearest `materials` folder above `path`, or None.
+
+    The same folder :func:`material_relative_path` measures against, so a
+    reference built by one resolves through the other.
+    """
+    for parent in Path(path).parents:
+        if parent.name.lower() == "materials":
+            return parent
+    return None
+
+
+def _clean_reference(reference: str, extension: str) -> str:
+    cleaned = reference.replace("\\", "/").strip().strip("/")
+    if cleaned.lower().endswith(extension):
+        cleaned = cleaned[:-len(extension)]
+    return cleaned
+
+
+def _content_roots(root: Path) -> list[Path]:
+    """`root` first, then every other `materials` folder the game mounts with it.
+
+    A GMod addon commonly ships its VMTs and VTFs in different addons, so a
+    `$basetexture` that is not under the VMT's own `materials` folder is looked
+    for in the sibling addons and the game's own `materials`.
+    """
+    roots = [root]
+    addon = root.parent
+    if addon.parent.name.lower() != "addons":
+        return roots
+    roots.append(addon.parent.parent / "materials")
+    try:
+        roots.extend(sorted(sibling / "materials"
+                            for sibling in addon.parent.iterdir()
+                            if sibling != addon))
+    except OSError:
+        pass
+    return roots
+
+
+def resolve_basetexture(vmt_path: Any) -> Optional[Path]:
+    """The texture file a VMT's `$basetexture` names, or None.
+
+    Tries the VMT's own folder, its `materials` root, and then the other content
+    roots a GMod install mounts beside it. A `.vtf` wins over a source image of
+    the same name.
+    """
+    from s2kit.pipelines import vmt as vmt_module
+
+    file_path = Path(vmt_path)
+    reference = vmt_module.read_texture_refs(file_path).get("color")
+    if not reference:
+        return None
+    cleaned = _clean_reference(reference, ".vtf")
+
+    candidates = [file_path.parent / Path(cleaned).name]
+    root = materials_root(file_path)
+    if root is not None:
+        candidates += [content / cleaned for content in _content_roots(root)]
+    for stem in candidates:
+        for extension in TEXTURE_EXTENSIONS:
+            candidate = stem.with_name(stem.name + extension)
+            try:
+                if candidate.is_file():
+                    return candidate
+            except OSError:
+                continue
+    return None
+
+
+def find_material_for_texture(texture_path: Any) -> Optional[Path]:
+    """The VMT beside a texture whose `$basetexture` names that texture.
+
+    Matched on the reference itself rather than by resolving files, so a sheet
+    still being authored as a PNG pairs with the VMT that will point at its VTF.
+    """
+    from s2kit.pipelines import vmt as vmt_module
+
+    texture = Path(texture_path)
+    wanted = material_relative_path(texture).lower()
+    loose = materials_root(texture) is None
+    try:
+        materials = sorted(texture.parent.glob("*.vmt"))
+    except OSError:
+        return None
+    for material in materials:
+        reference = vmt_module.read_texture_refs(material).get("color")
+        if not reference:
+            continue
+        cleaned = _clean_reference(reference, ".vtf").lower()
+        if cleaned == wanted or (loose and Path(cleaned).name == wanted):
+            return material
+    return None
+
+
+def resolve_rectanglemap(reference: str, vmt_path: Any) -> Path:
+    """Where a `%rectanglemap` reference points on disk.
+
+    The reference is materials-relative and carries no extension. A VMT outside
+    any `materials` folder can only mean a file beside it.
+    """
+    cleaned = _clean_reference(reference, ".rect")
+    root = materials_root(vmt_path)
+    if root is None:
+        return Path(vmt_path).parent / (Path(cleaned).name + ".rect")
+    return root / (cleaned + ".rect")
+
+
+def rect_path_for_material(vmt_path: Any,
+                           texture_path: Optional[Any] = None) -> Path:
+    """The `.rect` a material uses, whether or not it exists yet.
+
+    In order: whatever the VMT's `%rectanglemap` already names, a rect named
+    after the material beside the VMT, one named after the texture beside the
+    texture, and otherwise a new file named after the material beside the VMT -
+    which is where Hammer++ and Strata expect to find it.
+    """
+    material = Path(vmt_path)
+    reference = read_rectanglemap(material)
+    if reference:
+        return resolve_rectanglemap(reference, material)
+    beside_material = material.with_suffix(".rect")
+    if beside_material.is_file() or texture_path is None:
+        return beside_material
+    beside_texture = Path(texture_path).with_suffix(".rect")
+    return beside_texture if beside_texture.is_file() else beside_material
+
+
+# ----------------------------------------------------------------------
 # Validation
 # ----------------------------------------------------------------------
 

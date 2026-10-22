@@ -73,8 +73,8 @@ class HotspotEditor(ToolDefinition):
                        "the file plain."),
         BoolParam("update_vmt", "Wire up the VMT's %rectanglemap", default=True,
                   group="Output",
-                  help="Adds or updates the line in the matching .vmt beside "
-                       "the texture."),
+                  help="Adds or updates the line in the material's .vmt, "
+                       "under $basetexture."),
         IntParam("detect_min_size", "Smallest detected region", default=16,
                  min=2, max=512, suffix="px", group="Detection"),
     ]
@@ -86,6 +86,18 @@ saying where those regions are, and letting the editor pick the right one per
 face. In Hammer++ or Strata you apply the material, press **Fit**, and it snaps
 the face's UVs onto whichever rectangle best matches its size and aspect. One
 material, one draw call, no manual aligning.
+
+#### Opening a sheet
+
+**Open material** takes the `.vmt` and does the rest: its `$basetexture` is
+decoded onto the canvas, and the rect file it uses is loaded if there is one.
+The texture is looked for beside the VMT, under its `materials` folder, and in
+the other addons GMod mounts with it. **Open texture** works the other way
+round - a texture is paired with the VMT beside it that names it.
+
+The rect file is the one the VMT's `%rectanglemap` already names; failing that
+one named after the material beside the VMT. The status bar says which file
+Save will write.
 
 #### Getting rectangles onto the sheet
 
@@ -156,9 +168,11 @@ thin wall, the sheet needs a long thin rectangle.
 
 #### Saving
 
-Writes the `.rect` beside the texture and, unless you turn it off, adds
-`%rectanglemap` to the matching VMT. The reference is materials-relative and
-carries no extension, which is the form Hammer expects.
+Writes the `.rect` beside the material's VMT, named after it, and unless you
+turn it off adds `%rectanglemap` to that VMT, directly under `$basetexture`.
+The reference is materials-relative and carries no extension, which is the form
+Hammer expects. A sheet saved in the Source 2 format is not wired - Hammer++
+cannot read it.
 
 Overlapping rectangles are fine and are not reported as a problem - authoring
 several candidates over the same art is how you give Fit something to choose

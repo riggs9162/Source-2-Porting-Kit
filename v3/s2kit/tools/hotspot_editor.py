@@ -73,6 +73,9 @@ class HotspotEditor(ToolPage):
     def init(self):
         super().init()
         self._texture_path: Optional[Path] = None
+        #: The VMT the sheet belongs to: opened directly, or found beside the
+        #: texture. Save names the rect after it and wires its %rectanglemap.
+        self._material_path: Optional[Path] = None
         self._rect_path: Optional[Path] = None
         self._preview_png: Optional[Path] = None
         self._undo: list[list[Rect]] = []
@@ -99,6 +102,7 @@ class HotspotEditor(ToolPage):
 
         self._cursor_text = common.caption("")
         self._sheet_text = common.caption("No texture loaded")
+        self._target_text = common.caption("")
         self._rect_list = ft.Column(spacing=2, scroll=ft.ScrollMode.AUTO,
                                     expand=True)
         self._issues = ft.Column(spacing=2, tight=True)
@@ -142,6 +146,8 @@ class HotspotEditor(ToolPage):
                                      on_click=lambda _e: handler())
 
         return ft.Row(spacing=6, wrap=True, controls=[
+            button("Open material", "DESCRIPTION", self._pick_material,
+                   "Open a .vmt - its $basetexture and .rect load with it"),
             button("Open texture", "IMAGE", self._pick_texture,
                    "Load the trim sheet to draw on"),
             button("Open .rect", "FOLDER_OPEN", self._pick_rect,
@@ -165,7 +171,8 @@ class HotspotEditor(ToolPage):
 
     def _statusbar(self) -> ft.Control:
         return ft.Row(spacing=14, controls=[
-            self._sheet_text, ft.Container(expand=True), self._cursor_text])
+            self._sheet_text, self._target_text, ft.Container(expand=True),
+            self._cursor_text])
 
     def _sidebar(self) -> ft.Control:
         return ft.Column(expand=True, spacing=10, controls=[
@@ -195,6 +202,15 @@ class HotspotEditor(ToolPage):
     # Loading
     # ------------------------------------------------------------------
 
+    def _pick_material(self) -> None:
+        self.ctx.page.run_task(self._pick_material_async)
+
+    async def _pick_material_async(self) -> None:
+        picked = await self.ctx.pick_file(title="Open a material",
+                                          extensions=("vmt",))
+        if picked:
+            self._load_texture(picked[0])
+
     def _pick_texture(self) -> None:
         self.ctx.page.run_task(self._pick_texture_async)
 
@@ -206,17 +222,28 @@ class HotspotEditor(ToolPage):
             self._load_texture(picked[0])
 
     def _load_texture(self, path: Path) -> None:
-        """Decode any supported texture into a PNG the canvas can draw."""
+        """Load a trim sheet, given either its VMT or the texture itself.
+
+        Whichever is opened, the other half of the pair is found: a VMT's
+        `$basetexture` is decoded onto the canvas, and a texture is matched to
+        the VMT beside it that names it. The rect file then follows the
+        material - see :func:`hotspot.rect_path_for_material` - and is loaded
+        when one already exists.
+        """
         from s2kit.media import images
 
         path = Path(path)
+        material: Optional[Path] = None
         source = path
         if path.suffix.lower() == ".vmt":
-            reference = self._basetexture_of(path)
-            if reference is None:
-                self.ctx.toast(f"{path.name} has no $basetexture", level="ERROR")
+            material = path
+            source = hotspot.resolve_basetexture(path)
+            if source is None:
+                self.ctx.toast(f"Could not find the $basetexture of {path.name}",
+                               level="ERROR")
                 return
-            source = reference
+        else:
+            material = hotspot.find_material_for_texture(path)
 
         # Decoded rather than preview-rendered: rectangles are authored in real
         # texel coordinates, so the canvas has to show the texture at its native
@@ -230,31 +257,32 @@ class HotspotEditor(ToolPage):
 
         self._preview_png = self._scratch / f"{source.stem}.png"
         image.save(self._preview_png)
-        self._texture_path = path if path.suffix.lower() == ".vmt" else source
+        self._texture_path = source
+        self._material_path = material
 
         sheet = self.canvas.sheet
         sheet.width, sheet.height = info.width, info.height
         self.canvas.load(sheet, self._preview_png)
-        self._sheet_text.value = (f"{source.name}   {info.width} x {info.height}")
-        self._rect_path = source.with_suffix(".rect")
+        label = f"{source.name}   {info.width} x {info.height}"
+        if material is not None:
+            label = f"{material.name}  ->  {label}"
+        self._sheet_text.value = label
+        self._rect_path = (hotspot.rect_path_for_material(material, source)
+                           if material is not None
+                           else source.with_suffix(".rect"))
+        self._show_target()
 
-        # A rect file already beside the texture is almost certainly its own.
         if self._rect_path.is_file():
             self._load_rect(self._rect_path)
         else:
             self._on_canvas_change()
         self._safe_update(self._sheet_text)
 
-    @staticmethod
-    def _basetexture_of(vmt_path: Path) -> Optional[Path]:
-        """Resolve a VMT's `$basetexture` to a file on disk."""
-        from s2kit.pipelines import vmt as vmt_module
-
-        refs = vmt_module.read_texture_refs(vmt_path)
-        reference = refs.get("color")
-        if not reference:
-            return None
-        return vmt_module.resolve_texture_ref(reference, vmt_path.parent)
+    def _show_target(self) -> None:
+        """Say in the status bar where Save will write."""
+        self._target_text.value = ("" if self._rect_path is None
+                                   else f"Saves to {self._rect_path.name}")
+        self._safe_update(self._target_text)
 
     def _pick_rect(self) -> None:
         self.ctx.page.run_task(self._pick_rect_async)
@@ -279,6 +307,7 @@ class HotspotEditor(ToolPage):
         loaded.height = loaded.height or sheet.height
         self.canvas.load(loaded, self._preview_png)
         self._rect_path = Path(path)
+        self._show_target()
         note = (f"{len(loaded)} rect(s) from {Path(path).name}")
         if loaded.source_format == "source2":
             note += " - converted from Source 2 coordinates"
@@ -711,7 +740,7 @@ class HotspotEditor(ToolPage):
         ctx.artifact(written, label=written.name)
 
         if bool(ctx.prefs.get("update_vmt", True)):
-            self._wire_vmt(ctx, rect_path)
+            self._wire_vmt(ctx, rect_path, target)
 
         ctx.metric("Rectangles", len(sheet), tone="good")
         ctx.metric("Coverage", f"{sheet.coverage() * 100:.0f}%")
@@ -726,20 +755,29 @@ class HotspotEditor(ToolPage):
                   numeric_columns=(0,))
         ctx.summary(f"{len(sheet)} rectangle(s) -> {written.name}")
 
-    def _wire_vmt(self, ctx: JobContext, rect_path: Path) -> None:
-        """Point the matching VMT at the rect file we just wrote."""
-        candidates = [rect_path.with_suffix(".vmt")]
-        if self._texture_path is not None:
-            candidates.insert(0, Path(self._texture_path).with_suffix(".vmt"))
-        vmt_path = next((path for path in candidates if path.is_file()), None)
-        if vmt_path is None:
-            ctx.warn(f"No .vmt beside {rect_path.name} - add "
-                     f'"%rectanglemap" "{hotspot.material_relative_path(rect_path)}"'
-                     " to it by hand")
+    def _wire_vmt(self, ctx: JobContext, rect_path: Path, target: str) -> None:
+        """Point the material's `%rectanglemap` at the rect file just written.
+
+        Only a Hammer++ rect is wired: `%rectanglemap` is read by Hammer++ and
+        Strata, neither of which reads the Source 2 KV3 dialect.
+        """
+        reference = hotspot.material_relative_path(rect_path)
+        line = f'"%rectanglemap" "{reference}"'
+        if target == "source2":
+            ctx.info(f"Saved as Source 2 - {line} left out, since Hammer++ "
+                     "cannot read that format")
             return
 
-        reference = hotspot.material_relative_path(rect_path)
+        vmt_path = self._material_path or rect_path.with_suffix(".vmt")
+        if not vmt_path.is_file():
+            ctx.warn(f"No .vmt found for {rect_path.name} - add {line} to it "
+                     "by hand")
+            return
+        if hotspot.materials_root(rect_path) is None:
+            ctx.warn(f"{rect_path.name} is not under a materials folder, so "
+                     "Hammer cannot resolve the reference written for it")
+
         action = hotspot.inject_rectanglemap(vmt_path, reference)
-        ctx.info(f'{action} "%rectanglemap" "{reference}" in {vmt_path.name}')
+        ctx.info(f"{action} {line} in {vmt_path.name}")
         if action != "unchanged":
             ctx.artifact(vmt_path, label=vmt_path.name)
