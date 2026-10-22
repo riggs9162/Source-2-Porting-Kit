@@ -397,6 +397,8 @@ def port_native_model(
                                    loop=authored.loop, delta=authored.delta,
                                    translated_events=len(translated_events)))
         log(f"Sequence {index + 1}/{len(clips)}: {clip.name}, {count} frames at {authored.fps:g} fps")
+    if dynamic_prop and not clips:
+        lines.append('$sequence "idle" "bind.smd" fps 1')
     if not dynamic_prop and not any(clip.name.lower() == "ragdoll" for clip in clips):
         lines.append('$sequence "ragdoll" "bind.smd" fps 30 activity "ACT_DIERAGDOLL" 1')
     qc.write_text("\n".join(lines) + "\n" + collision, encoding="utf-8")
