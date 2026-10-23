@@ -24,9 +24,9 @@ internal sealed class ToolPage : UserControl
         {
             var value = draft.GetValueOrDefault(parameter.Key, parameter.Default);
             layout.Controls.Add(KitStyle.Label(parameter.Label + (parameter.Required ? " *" : ""), 10, true));
-            var row = new TableLayoutPanel { Width = 720, Height = 42, ColumnCount = 2, Margin = new(0, 0, 0, 12) };
+            var row = new TableLayoutPanel { Width = 720, Height = KitStyle.Scale(42), ColumnCount = 2, Margin = new(0, 0, 0, 12) };
             row.ColumnStyles.Add(new(SizeType.Percent, 100));
-            row.ColumnStyles.Add(new(SizeType.Absolute, parameter.Kind is ParameterKind.File or ParameterKind.Directory ? 98 : 0));
+            row.ColumnStyles.Add(new(SizeType.Absolute, parameter.Kind is ParameterKind.File or ParameterKind.Directory ? KitStyle.Scale(110) : 0));
             Control field = parameter.Kind switch
             {
                 ParameterKind.Boolean => new CheckBox { Checked = bool.TryParse(value, out var check) && check, Text = "Enabled", AutoSize = true },
@@ -52,12 +52,26 @@ internal sealed class ToolPage : UserControl
                 layout.Controls.Add(KitStyle.Label(parameter.Description));
         }
         var buttons = new FlowLayoutPanel { AutoSize = true, Margin = new(0, 12, 0, 0), Width = 720 };
-        buttons.Controls.Add(KitStyle.Button("Run tool", Run));
+        buttons.Controls.Add(KitStyle.PrimaryButton("Run tool", Run));
         buttons.Controls.Add(KitStyle.Button("View jobs", (_, _) => showJobs()));
         layout.Controls.Add(buttons);
         layout.Controls.Add(KitStyle.Label("Outputs are saved in a separate folder for each job and remain available in Jobs."));
         scroll.Controls.Add(layout);
         Controls.Add(scroll);
+        void FitForm()
+        {
+            var width = Math.Max(280, scroll.ClientSize.Width - 24);
+            layout.MaximumSize = new(width, 0);
+            foreach (Control child in layout.Controls)
+            {
+                if (child is TableLayoutPanel or FlowLayoutPanel)
+                    child.Width = width - 18;
+                if (child is Label)
+                    child.MaximumSize = new(width - 18, 0);
+            }
+        }
+        scroll.ClientSizeChanged += (_, _) => FitForm();
+        FitForm();
     }
 
     private void Browse(ToolParameter parameter, Control field)

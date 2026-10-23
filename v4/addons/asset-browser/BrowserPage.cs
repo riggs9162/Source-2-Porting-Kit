@@ -31,11 +31,11 @@ internal sealed class BrowserControl : UserControl
         Dock = DockStyle.Fill;
         Padding = new(20);
         var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 5 };
-        layout.RowStyles.Add(new(SizeType.Absolute, 56));
-        layout.RowStyles.Add(new(SizeType.Absolute, 44));
-        layout.RowStyles.Add(new(SizeType.Absolute, 44));
+        layout.RowStyles.Add(new(SizeType.Absolute, KitStyle.Scale(56)));
+        layout.RowStyles.Add(new(SizeType.Absolute, KitStyle.Scale(44)));
+        layout.RowStyles.Add(new(SizeType.Absolute, KitStyle.Scale(44)));
         layout.RowStyles.Add(new(SizeType.Percent, 100));
-        layout.RowStyles.Add(new(SizeType.Absolute, 42));
+        layout.RowStyles.Add(new(SizeType.Absolute, KitStyle.Scale(42)));
         layout.Controls.Add(KitStyle.Label("Asset browser", 20, true));
         var pathRow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 4 };
         pathRow.ColumnStyles.Add(new(SizeType.Percent, 100));
