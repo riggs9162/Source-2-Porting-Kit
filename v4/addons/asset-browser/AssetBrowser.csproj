@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <AssemblyName>Kit.Addons.AssetBrowser</AssemblyName>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/Kit.Contracts/Kit.Contracts.csproj" Private="false" />
+    <ProjectReference Include="../../src/Kit.DesktopSdk/Kit.DesktopSdk.csproj" Private="false" />
+  </ItemGroup>
+</Project>

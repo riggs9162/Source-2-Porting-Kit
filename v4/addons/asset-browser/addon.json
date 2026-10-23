@@ -1,0 +1,12 @@
+{
+  "id": "asset-browser",
+  "name": "Asset browser",
+  "version": "1.0.0",
+  "description": "Paged, read-only browsing of folders and VPK archives.",
+  "author": "Source 2 Porting Kit",
+  "apiVersion": 1,
+  "assembly": "bin/{configuration}/net10.0-windows/Kit.Addons.AssetBrowser.dll",
+  "entryPoint": "PortingKit.Addons.AssetBrowser.AssetBrowserAddon",
+  "project": "AssetBrowser.csproj",
+  "dependencies": []
+}
