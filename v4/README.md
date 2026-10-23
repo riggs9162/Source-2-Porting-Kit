@@ -1,6 +1,8 @@
-# Source 2 Porting Kit V4
+# Source Backport (V4)
 
-V4 is a Windows desktop application built with C# and .NET 10. It has its own
+**Source 2 → Source 1 asset porting.**
+
+Source Backport is the V4 Windows desktop application built with C# and .NET 10. It has its own
 backend and directory-based add-ons. It does not load the Python applications.
 
 This first milestone provides the architecture, desktop shell, and working
@@ -23,7 +25,7 @@ remain usable. Running `Build.ps1` directly stops at the first build error.
 
 The checked-in application uses only the .NET libraries shipped with the SDK;
 there are no additional NuGet dependencies. Native asset export requires the
-separate Source2Viewer-CLI executable. Configure it in Settings or supply a tool
+separate Source2Viewer-CLI executable. Configure it in Tool settings or supply a tool
 override. StudioMDL and FFmpeg paths are also available for future add-ons.
 
 ## Included add-ons
@@ -33,6 +35,23 @@ override. StudioMDL and FFmpeg paths are also available for future add-ons.
 | `addons/asset-browser/` | Native asset browser, folder and VPK providers, paged listing tool |
 | `addons/utilities/` | Environment report and streaming file inventory with optional SHA-256 |
 | `addons/vrf/` | Cancellable VRF export and resource-block inspection |
+
+## Personalize your workshop
+
+Open **Appearance** in the sidebar or toolbar. Choose Graphite, Blueprint, or
+Paper, then set an accent color, interface font, text size, spacing, and personal
+workspace name. The RAM readout can also be hidden. **Apply appearance** saves
+these preferences and updates the shell and add-on controls immediately, without
+restarting. Preferences return at the next launch. **Reset choices** restores the
+form defaults; apply them to save.
+
+The interface uses native drawing and small reusable vector marks. Themes add no
+browser runtime, background images, or animated effects. Very low-contrast custom
+accents are adjusted to keep controls readable. The build/output filenames and
+add-on IDs retain their V4 names for compatibility with existing scripts.
+
+The [visual rules](DESIGN.md) describe the identity; the [add-on guide](ADDONS.md)
+documents the shared styling API.
 
 The browser reads VPK v1/v2 directory metadata without retaining the entire index
 or decoding textures, audio, or geometry. It supports embedded and split-archive

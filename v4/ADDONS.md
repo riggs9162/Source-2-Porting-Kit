@@ -1,4 +1,4 @@
-# V4 add-ons
+# Source Backport add-ons
 
 An add-on owns one directory under `v4/addons/`. Keep its manifest, C# project,
 UI, processing logic, parsers, assets, and documentation inside that directory.
@@ -140,6 +140,19 @@ navigation belongs in add-on-owned state, not an undisposed hidden Control.
 Keep processing in UI-independent classes inside the same add-on folder. Opening
 a page must not decode an entire archive. Use providers, small asset references,
 paged metadata, asynchronous loading, and explicit resource ownership.
+
+Use `KitStyle.Label`, `KitStyle.Button`, `KitStyle.PrimaryButton`, and
+`KitStyle.Grid` for native controls. The host applies the active theme to each
+page and updates an open page after appearance changes. `KitStyle.Palette`
+provides semantic colors for custom drawing. `KitStyle.Font` returns cached fonts;
+do not dispose fonts borrowed from it. `StyledLabel` preserves the intended type
+size and supports Normal, Muted, and Accent tones. `KitStyle.RowHeight` and
+`ControlHeight` expose density/text-size metrics.
+
+For custom drawing, read the current palette during paint and invalidate when
+appearance changes. If subscribing to `KitStyle.AppearanceChanged`, unsubscribe
+when the page is disposed. The shared styling pass is idempotent and reuses
+controls, preserving entered values and native keyboard/accessibility behaviour.
 
 ## Validation
 
