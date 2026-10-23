@@ -1,4 +1,5 @@
 using PortingKit.Core;
+using PortingKit.Core.Automation;
 
 namespace PortingKit.Desktop;
 
@@ -21,7 +22,11 @@ internal static class Program
         KitHost? host = null;
         try
         {
-            host = Task.Run(() => KitHost.OpenAsync(root, state)).GetAwaiter().GetResult();
+            host = Task.Run(async () =>
+            {
+                await AgentClient.ReleaseIdleHeadlessAsync(root, state);
+                return await KitHost.OpenAsync(root, state, hostKind: "desktop");
+            }).GetAwaiter().GetResult();
             Application.ThreadException += (_, e) =>
             {
                 host.Log.Write(LogLevel.Error, "desktop", e.Exception.ToString());

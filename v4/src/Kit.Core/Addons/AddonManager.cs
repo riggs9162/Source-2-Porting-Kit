@@ -14,6 +14,9 @@ public sealed class AddonManager(IHostServices host, ContributionCatalog catalog
     private readonly List<Slot> loaded = [];
     public IReadOnlyList<AddonInfo> Snapshot() => slots.Select(slot => slot.Info).ToArray();
 
+    public ISettings GetSettings(string id) => slots.FirstOrDefault(slot => slot.Manifest.Id == id)?.Context?.Settings
+        ?? throw new InvalidOperationException("Settings are available only for loaded add-ons.");
+
     public async Task LoadAsync(CancellationToken cancellationToken = default)
     {
         var root = Path.Combine(host.RootDirectory, "addons");

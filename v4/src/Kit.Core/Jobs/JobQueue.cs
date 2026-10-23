@@ -111,6 +111,22 @@ public sealed class JobQueue : IJobQueue, IAsyncDisposable
         return true;
     }
 
+    public async Task<bool> StopIfIdleAsync(CancellationToken cancellationToken)
+    {
+        await submissions.WaitAsync(cancellationToken);
+        try
+        {
+            lock (gate)
+            {
+                if (entries.Values.Any(entry => IsActive(entry.Snapshot.Status))) return false;
+                stopping = true;
+                pending.Writer.TryComplete();
+                return true;
+            }
+        }
+        finally { submissions.Release(); }
+    }
+
     private async Task ConsumeAsync()
     {
         await foreach (var entry in pending.Reader.ReadAllAsync())

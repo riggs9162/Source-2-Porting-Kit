@@ -59,9 +59,7 @@ internal sealed class AddonsPage : UserControl
         {
             updating = true;
             grid.Enabled = false;
-            var enabled = host.Settings.Get<Dictionary<string, bool>>("addons", []);
-            enabled[addons[e.RowIndex].Id] = (bool)(grid.Rows[e.RowIndex].Cells[0].Value ?? true);
-            await host.Settings.SetAsync("addons", enabled);
+            await host.SetAddonEnabledAsync(addons[e.RowIndex].Id, (bool)(grid.Rows[e.RowIndex].Cells[0].Value ?? true));
         }
         catch (Exception exception)
         {

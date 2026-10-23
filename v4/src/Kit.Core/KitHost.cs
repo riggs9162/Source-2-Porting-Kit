@@ -1,3 +1,5 @@
+using PortingKit.Core.Automation;
+
 namespace PortingKit.Core;
 
 public sealed record HostOptions(int Workers = 1, int DiskCacheMegabytes = 512)
@@ -15,6 +17,11 @@ public sealed class KitHost : IHostServices, IAsyncDisposable
 {
     private readonly FileStream stateLock;
     private int disposed;
+    private AgentServer? agentServer;
+    private readonly CancellationTokenSource headlessStop = new();
+    public string HostKind { get; private set; } = "embedded";
+    public CancellationToken HeadlessStopping => headlessStop.Token;
+    internal void RequestHeadlessStop() => headlessStop.Cancel();
 
     private KitHost(string rootDirectory, string stateDirectory, SettingsStore settings, FileStream stateLock)
     {
@@ -49,8 +56,15 @@ public sealed class KitHost : IHostServices, IAsyncDisposable
     public IWorkspaces Workspaces { get; }
     public AddonManager Addons { get; }
 
+    public Task SetAddonEnabledAsync(string id, bool enabled, CancellationToken cancellationToken = default)
+    {
+        if (!Addons.Snapshot().Any(addon => addon.Id == id)) throw new KeyNotFoundException("Unknown add-on: " + id);
+        return ((SettingsStore)Settings).UpdateAsync("addons", new Dictionary<string, bool>(),
+            current => new Dictionary<string, bool>(current) { [id] = enabled }, cancellationToken);
+    }
+
     public static async Task<KitHost> OpenAsync(string rootDirectory, string? stateDirectory = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default, string hostKind = "embedded")
     {
         stateDirectory ??= Path.Combine(rootDirectory, ".state");
         Directory.CreateDirectory(stateDirectory);
@@ -68,6 +82,7 @@ public sealed class KitHost : IHostServices, IAsyncDisposable
         {
             var settings = await SettingsStore.OpenAsync(Path.Combine(stateDirectory, "settings.json"));
             host = new KitHost(rootDirectory, stateDirectory, settings, stateLock);
+            host.HostKind = hostKind;
         }
         catch
         {
@@ -78,6 +93,7 @@ public sealed class KitHost : IHostServices, IAsyncDisposable
         {
             await host.Queue.StartAsync(host.Options.Workers);
             await host.Addons.LoadAsync(cancellationToken);
+            host.agentServer = new(host);
             host.Log.Write(LogLevel.Info, "host", $"V4 ready. Workers: {host.Options.Workers}. Cache: {host.Options.DiskCacheMegabytes} MB.");
             return host;
         }
@@ -94,6 +110,7 @@ public sealed class KitHost : IHostServices, IAsyncDisposable
             return;
         try
         {
+            if (agentServer is not null) await agentServer.DisposeAsync();
             await Queue.DisposeAsync();
             await Addons.DisposeAsync();
             await Log.DisposeAsync();
@@ -101,6 +118,7 @@ public sealed class KitHost : IHostServices, IAsyncDisposable
         finally
         {
             stateLock.Dispose();
+            headlessStop.Dispose();
         }
     }
 }

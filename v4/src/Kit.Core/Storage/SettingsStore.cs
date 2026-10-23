@@ -42,16 +42,21 @@ public sealed class SettingsStore : ISettings
     }
 
     public async Task SetAsync<T>(string key, T value, CancellationToken cancellationToken = default)
+        => await UpdateAsync(key, value, _ => value, cancellationToken);
+
+    public async Task<T> UpdateAsync<T>(string key, T fallback, Func<T, T> change, CancellationToken cancellationToken = default)
     {
         await writer.WaitAsync(cancellationToken);
         try
         {
+            var value = change(Get(key, fallback));
             var next = new Dictionary<string, JsonElement>(values)
             {
                 [key] = JsonSerializer.SerializeToElement(value, JsonFiles.Options)
             };
             await JsonFiles.WriteAsync(path, next, cancellationToken);
             Volatile.Write(ref values, next);
+            return value;
         }
         finally
         {

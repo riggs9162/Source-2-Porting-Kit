@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using PortingKit.Core;
+using PortingKit.Core.Automation;
 
 namespace PortingKit.Desktop;
 
@@ -19,10 +20,17 @@ internal sealed class MainWindow : Form
     private Control? activePage;
     private bool closing;
     private bool readyToClose;
+    private readonly IDisposable agentSettings;
 
     public MainWindow(KitHost host)
     {
         this.host = host;
+        agentSettings = host.Events.Subscribe<AgentSettingsChanged>((change, _) =>
+        {
+            if (change.AddonId is null && change.Key == "appearance" && IsHandleCreated && !IsDisposed)
+                BeginInvoke(() => { if (!IsDisposed) KitStyle.Configure(host.Settings.Get("appearance", new AppearanceOptions())); });
+            return ValueTask.CompletedTask;
+        });
         KitStyle.Configure(host.Settings.Get("appearance", new AppearanceOptions()));
         Text = AppIdentity.Name + "  |  " + AppIdentity.Purpose;
         AutoScaleMode = AutoScaleMode.Dpi;
@@ -91,6 +99,7 @@ internal sealed class MainWindow : Form
         FormClosed += (_, _) =>
         {
             timer.Dispose();
+            agentSettings.Dispose();
             KitStyle.AppearanceChanged -= AppearanceChanged;
         };
         Shown += (_, _) =>
