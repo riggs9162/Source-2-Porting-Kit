@@ -4,6 +4,10 @@
     <TargetFramework>net10.0-windows</TargetFramework>
     <UseWindowsForms>true</UseWindowsForms>
     <AssemblyName>Source2PortingKit</AssemblyName>
+    <Product>Source Backport</Product>
+    <Title>Source Backport</Title>
+    <Description>Source 2 to Source 1 asset porting</Description>
+    <ApplicationIcon>Assets/SourceBackport.ico</ApplicationIcon>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../Kit.Core/Kit.Core.csproj" />

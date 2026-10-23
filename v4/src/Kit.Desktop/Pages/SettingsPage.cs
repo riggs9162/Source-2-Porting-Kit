@@ -15,7 +15,7 @@ internal sealed class SettingsPage : UserControl
         Padding = new(24);
         AutoScroll = true;
         var layout = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false };
-        layout.Controls.Add(KitStyle.Label("Settings", 22, true));
+        layout.Controls.Add(KitStyle.Label("Tool settings", 22, true));
         layout.Controls.Add(KitStyle.Label("External tools"));
         foreach (var (key, name) in new[] { ("vrf", "Source2Viewer-CLI"), ("studiomdl", "StudioMDL"), ("ffmpeg", "FFmpeg") })
         {
@@ -47,7 +47,7 @@ internal sealed class SettingsPage : UserControl
             try
             {
                 await host.Cache.ClearAsync();
-                MessageBox.Show(this, "Unused cached previews were removed. Active previews were kept.", "Cache cleared");
+                MessageBox.Show(this, "Unused cached previews were removed. Active previews were kept.", AppIdentity.Name);
             }
             catch (Exception exception)
             {
@@ -65,7 +65,7 @@ internal sealed class SettingsPage : UserControl
             foreach (var (key, field) in paths)
                 await host.Settings.SetAsync("tools." + key, field.Text.Trim().Trim('"'));
             await host.Settings.SetAsync("runtime", new HostOptions((int)workers.Value, (int)cache.Value).Validate());
-            MessageBox.Show(this, "Settings saved.", "Source 2 Porting Kit");
+            MessageBox.Show(this, "Settings saved.", AppIdentity.Name);
         }
         catch (Exception exception)
         {

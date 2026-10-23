@@ -15,7 +15,7 @@ internal static class Program
             out var first);
         if (!first)
         {
-            MessageBox.Show("V4 is already running with this settings directory.", "Source 2 Porting Kit");
+            MessageBox.Show("Source Backport is already running with this settings directory.", AppIdentity.Name);
             return;
         }
         KitHost? host = null;
@@ -25,13 +25,13 @@ internal static class Program
             Application.ThreadException += (_, e) =>
             {
                 host.Log.Write(LogLevel.Error, "desktop", e.Exception.ToString());
-                MessageBox.Show(e.Exception.Message, "Source 2 Porting Kit", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show(e.Exception.Message, AppIdentity.Name, MessageBoxButtons.OK, MessageBoxIcon.Error);
             };
             Application.Run(new MainWindow(host));
         }
         catch (Exception exception)
         {
-            MessageBox.Show(exception.Message, "V4 could not start", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            MessageBox.Show(exception.Message, AppIdentity.Name + " could not start", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
         finally
         {

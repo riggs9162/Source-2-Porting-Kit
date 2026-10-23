@@ -6,11 +6,14 @@ namespace PortingKit.Desktop;
 internal sealed class MainWindow : Form
 {
     private readonly KitHost host;
-    private readonly TreeView navigation = new() { Dock = DockStyle.Left, Width = 246, BorderStyle = BorderStyle.None,
-        ShowLines = false, ShowPlusMinus = false, ShowRootLines = false, HideSelection = false, FullRowSelect = true,
-        ItemHeight = 34, Indent = 14 };
+    private readonly NavigationTree navigation = new();
+    private readonly Panel sidebar = new() { Dock = DockStyle.Fill };
     private readonly Panel content = new() { Dock = DockStyle.Fill };
-    private readonly Label status = new() { Dock = DockStyle.Bottom, Height = 30, Padding = new(16, 5, 16, 0) };
+    private readonly Panel toolbar = new() { Dock = DockStyle.Top, Height = 76, Padding = new(24, 17, 20, 0) };
+    private readonly Label breadcrumb = new() { Dock = DockStyle.Fill, AutoEllipsis = true, TextAlign = ContentAlignment.MiddleLeft };
+    private readonly Label status = new() { Dock = DockStyle.Bottom, Height = 32, Padding = new(24, 7, 16, 0) };
+    private readonly Label edition = new() { Text = "V4  /  LOCAL WORKSPACE", Dock = DockStyle.Bottom, Height = 44, Padding = new(20, 12, 0, 0) };
+    private readonly TableLayoutPanel shell = new() { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1 };
     private readonly System.Windows.Forms.Timer timer = new() { Interval = 1000 };
     private readonly Dictionary<string, TreeNode> nodes = [];
     private Control? activePage;
@@ -20,27 +23,37 @@ internal sealed class MainWindow : Form
     public MainWindow(KitHost host)
     {
         this.host = host;
-        Text = "Source 2 Porting Kit / V4";
-        MinimumSize = new(900, 640);
-        Size = new(1320, 880);
+        KitStyle.Configure(host.Settings.Get("appearance", new AppearanceOptions()));
+        Text = AppIdentity.Name + "  |  " + AppIdentity.Purpose;
+        AutoScaleMode = AutoScaleMode.Dpi;
+        MinimumSize = new(1000, 700);
+        Size = new(1380, 920);
         StartPosition = FormStartPosition.CenterScreen;
-        BackColor = KitStyle.Background;
-        var header = new Label
-        {
-            Text = "SOURCE 2   /   PORTING KIT V4", Dock = DockStyle.Top, Height = 58,
-            Padding = new(18, 16, 0, 0), Font = new("Segoe UI", 14, FontStyle.Bold)
-        };
-        var menu = BuildMenu();
-        Controls.Add(content);
-        Controls.Add(navigation);
-        Controls.Add(status);
-        Controls.Add(header);
-        Controls.Add(menu);
-        MainMenuStrip = menu;
-        AddNavigation("overview", "Overview", () => new OverviewPage(host));
-        AddNavigation("jobs", "Jobs", () => new JobsPage(host));
-        AddNavigation("addons", "Add-ons", () => new AddonsPage(host));
-        AddNavigation("settings", "Settings", () => new SettingsPage(host));
+        Icon = AppIdentity.CreateIcon();
+        shell.ColumnStyles.Add(new(SizeType.Absolute, 252));
+        shell.ColumnStyles.Add(new(SizeType.Percent, 100));
+        sidebar.Controls.Add(navigation);
+        sidebar.Controls.Add(edition);
+        sidebar.Controls.Add(new BrandPanel());
+        var workspace = new Panel { Dock = DockStyle.Fill };
+        workspace.Controls.Add(content);
+        workspace.Controls.Add(status);
+        workspace.Controls.Add(toolbar);
+        shell.Controls.Add(sidebar, 0, 0);
+        shell.Controls.Add(workspace, 1, 0);
+        Controls.Add(shell);
+        var commandLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1 };
+        commandLayout.ColumnStyles.Add(new(SizeType.Percent, 100));
+        commandLayout.ColumnStyles.Add(new(SizeType.AutoSize));
+        var commands = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = false };
+        commands.Controls.Add(KitStyle.Button("New workspace", async (_, _) => await PickWorkspaceAsync(true)));
+        commands.Controls.Add(KitStyle.Button("Open workspace", async (_, _) => await PickWorkspaceAsync(false)));
+        commands.Controls.Add(KitStyle.Button("Appearance", (_, _) => SelectPage("appearance")));
+        commandLayout.Controls.Add(breadcrumb);
+        commandLayout.Controls.Add(commands);
+        toolbar.Controls.Add(commandLayout);
+        AddNavigation("overview", "Workshop", CreateOverview);
+        AddNavigation("jobs", "Jobs & outputs", () => new JobsPage(host));
         var categories = new Dictionary<string, TreeNode>();
         TreeNode Category(string name)
         {
@@ -56,36 +69,80 @@ internal sealed class MainWindow : Form
         foreach (var tool in host.Contributions.GetAll<ITool>().OrderBy(tool => tool.Value.Definition.Category).ThenBy(tool => tool.Value.Definition.Name))
             AddNavigation(tool.Id, tool.Value.Definition.Name, () => new ToolPage(host, tool, () => SelectPage("jobs")),
                 Category(tool.Value.Definition.Category));
+        var application = Category("Application");
+        AddNavigation("addons", "Add-ons", () => new AddonsPage(host), application);
+        AddNavigation("appearance", "Appearance", () => new AppearancePage(host), application);
+        AddNavigation("settings", "Tool settings", () => new SettingsPage(host), application);
         navigation.AfterSelect += (_, e) =>
         {
             if (e.Node?.Tag is Func<Control> create)
+            {
+                breadcrumb.Text = (e.Node.Parent?.Text ?? "WORKSPACE") + "  /  " + e.Node.Text;
                 ShowPage(create);
+            }
         };
+        navigation.BeforeCollapse += (_, e) => e.Cancel = true;
         navigation.ExpandAll();
-        KitStyle.Apply(this);
-        navigation.BackColor = KitStyle.Background;
-        navigation.LineColor = KitStyle.Border;
-        header.ForeColor = KitStyle.Accent;
-        status.ForeColor = KitStyle.Muted;
+        KitStyle.AppearanceChanged += AppearanceChanged;
+        ApplyAppearance();
         timer.Tick += (_, _) => RefreshStatus();
         timer.Start();
         FormClosing += OnClosing;
-        FormClosed += (_, _) => timer.Dispose();
-        Shown += (_, _) => SelectPage("overview");
+        FormClosed += (_, _) =>
+        {
+            timer.Dispose();
+            KitStyle.AppearanceChanged -= AppearanceChanged;
+        };
+        Shown += (_, _) =>
+        {
+            NativeChrome.Apply(this);
+            SelectPage("overview");
+        };
     }
 
-    private MenuStrip BuildMenu()
+    private Control CreateOverview() => new OverviewPage(host, SelectPage, PickWorkspaceAsync, OpenWorkspaceAsync);
+
+    private void AppearanceChanged(object? sender, EventArgs e)
     {
-        var menu = new MenuStrip { Dock = DockStyle.Top };
-        var workspace = new ToolStripMenuItem("Workspace");
-        workspace.DropDownItems.Add("New workspace...", null, async (_, _) => await PickWorkspaceAsync(true));
-        workspace.DropDownItems.Add("Open workspace...", null, async (_, _) => await PickWorkspaceAsync(false));
-        foreach (var path in host.Workspaces.Recent)
-            workspace.DropDownItems.Add(path, null, async (_, _) => await OpenWorkspaceAsync(path));
-        menu.Items.Add(workspace);
-        menu.Items.Add("Show logs", null, (_, _) => DesktopActions.Reveal(Path.Combine(host.StateDirectory, "logs")));
-        menu.Items.Add("Show add-ons", null, (_, _) => DesktopActions.Reveal(Path.Combine(host.RootDirectory, "addons")));
-        return menu;
+        ApplyAppearance();
+        var previous = Icon;
+        Icon = AppIdentity.CreateIcon();
+        previous?.Dispose();
+    }
+
+    private void ApplyAppearance()
+    {
+        SuspendLayout();
+        try
+        {
+            KitStyle.Apply(this);
+            sidebar.BackColor = navigation.BackColor = edition.BackColor = KitStyle.Palette.Sidebar;
+            navigation.ItemHeight = KitStyle.Scale(KitStyle.Appearance.Density == "Compact" ? 31 : 38);
+            navigation.ForeColor = KitStyle.Text;
+            edition.ForeColor = KitStyle.Muted;
+            edition.Font = KitStyle.Font(8, mono: true);
+            toolbar.BackColor = KitStyle.Surface;
+            SetToolbarSurface(toolbar);
+            breadcrumb.Font = KitStyle.Font(9, true);
+            breadcrumb.ForeColor = KitStyle.Muted;
+            status.BackColor = KitStyle.Surface;
+            status.ForeColor = KitStyle.Muted;
+            status.Font = KitStyle.Font(8.5F);
+            shell.ColumnStyles[0].Width = KitStyle.Scale(252);
+            NativeChrome.Apply(this);
+            RefreshStatus();
+        }
+        finally
+        {
+            ResumeLayout(true);
+        }
+    }
+
+    private static void SetToolbarSurface(Control parent)
+    {
+        parent.BackColor = KitStyle.Surface;
+        foreach (Control child in parent.Controls)
+            SetToolbarSurface(child);
     }
 
     private void AddNavigation(string id, string name, Func<Control> create, TreeNode? parent = null)
@@ -105,7 +162,7 @@ internal sealed class MainWindow : Form
                 navigation.SelectedNode = node;
         }
         else
-            MessageBox.Show(this, "This tool is not available. Check its add-on in Add-ons.", "Source 2 Porting Kit");
+            MessageBox.Show(this, "This tool is not available. Check its add-on in Add-ons.", AppIdentity.Name);
     }
 
     private void ShowPage(Func<Control> create)
@@ -144,6 +201,8 @@ internal sealed class MainWindow : Form
             else
                 await host.Workspaces.OpenAsync(dialog.SelectedPath);
             RefreshStatus();
+            if (activePage is OverviewPage)
+                SelectPage("overview");
         }
         catch (Exception exception)
         {
@@ -157,6 +216,7 @@ internal sealed class MainWindow : Form
         {
             await host.Workspaces.OpenAsync(path);
             RefreshStatus();
+            SelectPage("overview");
         }
         catch (Exception exception)
         {
@@ -168,7 +228,8 @@ internal sealed class MainWindow : Form
     {
         using var process = Process.GetCurrentProcess();
         var active = host.Jobs.Snapshot().Count(job => JobQueue.IsActive(job.Status));
-        status.Text = $"{host.Workspaces.Current?.Name ?? "No workspace selected"}    |    {active} active jobs    |    {process.WorkingSet64 / 1048576.0:N0} MB RAM    |    .NET {Environment.Version.Major}";
+        var memory = KitStyle.Appearance.ShowMemory ? $"    /    {process.WorkingSet64 / 1048576.0:N0} MB RAM" : "";
+        status.Text = $"{host.Workspaces.Current?.Name ?? "No project open"}    /    {active} active jobs{memory}    /    {AppIdentity.Purpose}";
     }
 
     private async void OnClosing(object? sender, FormClosingEventArgs e)

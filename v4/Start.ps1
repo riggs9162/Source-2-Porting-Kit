@@ -4,7 +4,7 @@ $ErrorActionPreference = 'Stop'
 $application = Join-Path $PSScriptRoot 'src/Kit.Desktop/bin/Release/net10.0-windows/Source2PortingKit.exe'
 $running = Get-Process -Name Source2PortingKit -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $application }
 if ($running) {
-    Write-Host 'V4 is already running.'
+    Write-Host 'Source Backport is already running.'
     return
 }
 if (!$NoBuild) {
