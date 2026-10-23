@@ -54,11 +54,12 @@ internal sealed class VpkProvider : IAssetProvider
 internal sealed class VpkAssetStream(byte[] preload, FileStream file, long dataLength) : Stream
 {
     private long position;
+    private readonly long dataStart = file.Position;
     public override bool CanRead => true;
-    public override bool CanSeek => false;
+    public override bool CanSeek => true;
     public override bool CanWrite => false;
     public override long Length => preload.Length + dataLength;
-    public override long Position { get => position; set => throw new NotSupportedException(); }
+    public override long Position { get => position; set => Seek(value, SeekOrigin.Begin); }
     public override int Read(byte[] buffer, int offset, int count) => Read(buffer.AsSpan(offset, count));
 
     public override int Read(Span<byte> buffer)
@@ -101,7 +102,15 @@ internal sealed class VpkAssetStream(byte[] preload, FileStream file, long dataL
     }
 
     public override void Flush() { }
-    public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+    public override long Seek(long offset, SeekOrigin origin)
+    {
+        var next = checked((origin switch { SeekOrigin.Begin => 0, SeekOrigin.Current => position, SeekOrigin.End => Length,
+            _ => throw new ArgumentOutOfRangeException(nameof(origin)) }) + offset);
+        if (next < 0 || next > Length) throw new IOException("Seek position is outside this VPK asset.");
+        file.Position = dataStart + Math.Max(0, next - preload.Length);
+        position = next;
+        return position;
+    }
     public override void SetLength(long value) => throw new NotSupportedException();
     public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
 }
