@@ -60,13 +60,14 @@ Port models, materials, sounds, and more from games like Half-Life: Alyx back to
 
 ## Repository Layout
 
-The kit has been rewritten twice; each generation lives in its own self-contained tree with its own dependencies and entry point.
+Each generation lives in its own self-contained tree with its own dependencies and entry point.
 
 | Tree | Generation | Entry point | Status |
 | --- | --- | --- | --- |
 | [v1/](v1/) | Original Tkinter porter (`tools/` plugin registry, VTFLib-based) | `python v1/porter.py` | Frozen — kept for backward compatibility, not extended |
 | [v2/](v2/) | PySide6 desktop app (current release) | `python v2/main.py` | **Active** — this is what the released `.exe` builds from |
 | [v3/](v3/) | Flet rebuild with a uniform tool framework | `python v3/run.py` | In development — see [v3/README.md](v3/README.md) |
+| [v4/](v4/) | C#/.NET 10 desktop app with directory-based add-ons | `v4/Start.cmd` | Foundation available: native shell, add-on SDK, background jobs, asset browsing, utility tools, and VRF exports. See [v4/README.md](v4/README.md) |
 
 The trees share no code. Unless stated otherwise, everything below refers to **v2**.
 
