@@ -1,13 +1,15 @@
 param(
     [ValidateSet('Debug', 'Release')]
     [string]$Configuration = 'Release',
-    [switch]$ContinueOnAddonError
+    [switch]$ContinueOnAddonError,
+    [switch]$AgentsOnly
 )
 
 $ErrorActionPreference = 'Stop'
 Push-Location -LiteralPath $PSScriptRoot
 try {
-    $projects = @('src/Kit.Desktop/Kit.Desktop.csproj', 'src/Kit.Cli/Kit.Cli.csproj')
+    $projects = @('src/Kit.Cli/Kit.Cli.csproj', 'src/Kit.Mcp/Kit.Mcp.csproj')
+    if (!$AgentsOnly) { $projects = @('src/Kit.Desktop/Kit.Desktop.csproj') + $projects }
     foreach ($project in $projects) {
         & dotnet build $project -c $Configuration --nologo -v quiet
         if ($LASTEXITCODE -ne 0) { throw "Could not build $project" }
