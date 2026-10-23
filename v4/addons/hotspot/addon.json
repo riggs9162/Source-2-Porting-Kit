@@ -1,0 +1,12 @@
+{
+  "id": "hotspot",
+  "name": "Hotspot editor",
+  "version": "1.0.0",
+  "description": "Native trim-sheet editing, Source 2 and Hammer++ rectangle maps, and material linking.",
+  "author": "Source Backport",
+  "apiVersion": 1,
+  "assembly": "bin/{configuration}/net10.0-windows/Kit.Addons.Hotspot.dll",
+  "entryPoint": "PortingKit.Addons.Hotspot.HotspotAddon",
+  "project": "Hotspot.csproj",
+  "dependencies": []
+}
