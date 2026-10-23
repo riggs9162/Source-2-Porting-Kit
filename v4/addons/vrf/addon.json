@@ -1,0 +1,12 @@
+{
+  "id": "vrf",
+  "name": "VRF integration",
+  "version": "1.0.0",
+  "description": "Cancellable Source 2 Viewer exports and resource-block inspection.",
+  "author": "Source 2 Porting Kit",
+  "apiVersion": 1,
+  "assembly": "bin/{configuration}/net10.0/Kit.Addons.Vrf.dll",
+  "entryPoint": "PortingKit.Addons.Vrf.VrfAddon",
+  "project": "Vrf.csproj",
+  "dependencies": []
+}
