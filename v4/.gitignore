@@ -1,0 +1,5 @@
+**/bin/
+**/obj/
+.state/
+tests/
+*.user
