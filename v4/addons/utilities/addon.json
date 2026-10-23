@@ -1,0 +1,12 @@
+{
+  "id": "utilities",
+  "name": "Utilities",
+  "version": "1.0.0",
+  "description": "Environment checks and streaming file inventories.",
+  "author": "Source 2 Porting Kit",
+  "apiVersion": 1,
+  "assembly": "bin/{configuration}/net10.0/Kit.Addons.Utilities.dll",
+  "entryPoint": "PortingKit.Addons.Utilities.UtilitiesAddon",
+  "project": "Utilities.csproj",
+  "dependencies": []
+}
