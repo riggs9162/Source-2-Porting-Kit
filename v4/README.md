@@ -36,6 +36,13 @@ override. StudioMDL and FFmpeg paths are also available for future add-ons.
 | `addons/asset-browser/` | Native asset browser, folder and VPK providers, paged listing tool |
 | `addons/utilities/` | Environment report and streaming file inventory with optional SHA-256 |
 | `addons/vrf/` | Cancellable VRF export and resource-block inspection |
+| `addons/hotspot/` | Native hotspot editor, bounded VTF/image previews, Source 2/Hammer++ rectangle conversion, detection, and VMT linking |
+
+Open **Materials > Hotspot editor** to edit trim-sheet regions. It supports drawing,
+resizing, multi-selection, exact coordinates, undo/redo, grid personalization,
+layout presets, region detection, fit previews, and recovery drafts. Its processing
+operations are also available through the CLI and MCP. See the
+[hotspot guide](addons/hotspot/README.md) for formats, shortcuts, and agent examples.
 
 ## Personalize your workshop
 

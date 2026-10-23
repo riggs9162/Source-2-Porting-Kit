@@ -67,7 +67,7 @@ Each generation lives in its own self-contained tree with its own dependencies a
 | [v1/](v1/) | Original Tkinter porter (`tools/` plugin registry, VTFLib-based) | `python v1/porter.py` | Frozen — kept for backward compatibility, not extended |
 | [v2/](v2/) | PySide6 desktop app (current release) | `python v2/main.py` | **Active** — this is what the released `.exe` builds from |
 | [v3/](v3/) | Flet rebuild with a uniform tool framework | `python v3/run.py` | In development — see [v3/README.md](v3/README.md) |
-| [v4/](v4/) | **Source Backport**, a C#/.NET 10 desktop app for Source 2 to Source 1 asset porting | `v4/Start.cmd` | Native workspace, appearance presets, add-on SDK, background jobs, asset browsing, utility tools, VRF exports, and shared MCP/CLI agent access. See [v4/README.md](v4/README.md) |
+| [v4/](v4/) | **Source Backport**, a C#/.NET 10 desktop app for Source 2 to Source 1 asset porting | `v4/Start.cmd` | Native workspace, hotspot editor, appearance presets, add-on SDK, background jobs, asset browsing, utility tools, VRF exports, and shared MCP/CLI agent access. See [v4/README.md](v4/README.md) |
 
 The trees share no code. Unless stated otherwise, everything below refers to **v2**.
 
