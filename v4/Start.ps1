@@ -8,7 +8,7 @@ if ($running) {
     return
 }
 if (!$NoBuild) {
-    & (Join-Path $PSScriptRoot 'Build.ps1')
+    & (Join-Path $PSScriptRoot 'Build.ps1') -ContinueOnAddonError
 }
 if (!(Test-Path -LiteralPath $application -PathType Leaf)) {
     throw 'Build V4 before launching it with -NoBuild.'

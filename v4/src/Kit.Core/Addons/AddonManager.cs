@@ -86,6 +86,9 @@ public sealed class AddonManager(IHostServices host, ContributionCatalog catalog
             return;
         try
         {
+            var buildError = Path.Combine(slot.Directory, "obj", "v4-build-error.txt");
+            if (File.Exists(buildError))
+                throw new InvalidOperationException(await File.ReadAllTextAsync(buildError, cancellationToken));
             var configuration = Assembly.GetExecutingAssembly().GetCustomAttribute<AssemblyConfigurationAttribute>()?.Configuration ?? "Release";
             var relative = slot.Manifest.Assembly.Replace("{configuration}", configuration, StringComparison.Ordinal);
             var assemblyPath = JsonFiles.ContainedPath(slot.Directory, relative);
