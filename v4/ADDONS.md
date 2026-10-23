@@ -156,6 +156,13 @@ controls, preserving entered values and native keyboard/accessibility behaviour.
 
 ## Validation
 
+Every registered `ITool` is automatically available through the CLI and as a
+typed MCP tool. Keep computation independent of desktop controls and declare
+accurate parameter kinds, ranges, choices, and required fields. Agents call the
+same executor through the shared queue; no separate agent registration is needed.
+Asset providers are also exposed through paged list and bounded stream reads.
+See [AGENT_ACCESS.md](AGENT_ACCESS.md) for discovery, job polling, and configuration.
+
 Build with `Build.ps1`, verify discovery through `s2kit addons`, inspect the schema
 with `s2kit describe <addon>/<tool>`, and run a real small input through both the
 CLI and desktop. Verify failures and cancellation as well as success. Local test

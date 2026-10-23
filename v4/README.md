@@ -23,8 +23,9 @@ remain usable. Running `Build.ps1` directly stops at the first build error.
 .\Start.ps1 -NoBuild
 ```
 
-The checked-in application uses only the .NET libraries shipped with the SDK;
-there are no additional NuGet dependencies. Native asset export requires the
+The desktop, CLI, backend, and included add-ons use the libraries shipped with
+the .NET SDK. The optional MCP entry point uses the pinned official C# MCP SDK.
+Native asset export requires the
 separate Source2Viewer-CLI executable. Configure it in Tool settings or supply a tool
 override. StudioMDL and FFmpeg paths are also available for future add-ons.
 
@@ -78,6 +79,7 @@ v4/
     Kit.DesktopSdk/         # Optional native-page interface and shared controls
     Kit.Desktop/            # Windows Forms shell and schema-driven tool pages
     Kit.Cli/                # Headless access to the same tools and job queue
+    Kit.Mcp/                # Official MCP stdio transport over the shared agent API
   .state/                   # Ignored local settings, cache, logs, job history, outputs
 ```
 
@@ -113,7 +115,12 @@ streams on demand. `IPreviewSession` defines disposable ownership for future
 viewer resources. Native renderer integration and its map/texture memory budget
 still need their own measured prototype.
 
-## Command line
+## Agent access: MCP and CLI
+
+Use [AGENT_ACCESS.md](AGENT_ACCESS.md) for agent workflows, the full operation
+catalog, backend lifecycle, and MCP configuration. `Get-AgentConfig.ps1` prints
+a ready-to-use stdio server entry for this checkout. New add-on tools appear
+automatically in both interfaces.
 
 ```powershell
 $cli = '.\src\Kit.Cli\bin\Release\net10.0-windows\s2kit.exe'
@@ -123,13 +130,17 @@ $cli = '.\src\Kit.Cli\bin\Release\net10.0-windows\s2kit.exe'
 & $cli doctor
 & $cli run utilities/inventory --directory 'A:\My assets' --hash true
 & $cli jobs
+& $cli assets providers
+& $cli operations
 ```
 
-The CLI prints JSON and uses the same registered tools, validation, queue,
-settings, and output records as the desktop. Ctrl+C cancels its current job.
-Close the desktop before using its state directory, or specify a separate
-`--state 'A:\My V4 CLI state'`. It does not create a desktop window, although the
-Windows Desktop runtime is required to resolve add-ons with native UI extensions.
+The CLI and MCP share the running desktop's backend. When it is closed, they
+automatically start a hidden headless backend that keeps submitted jobs alive
+after clients disconnect. The CLI prints JSON; `run` waits and `submit` returns
+a job ID immediately. Ctrl+C cancels a job awaited by `run`. Use a separate
+`--state` directory before the command for isolated work. The Windows Desktop
+runtime is required to resolve add-ons with native UI extensions; their pages
+are not created by headless access. `Backport.cmd` and `Mcp.cmd` are launchers.
 
 ## Add a tool
 
