@@ -14,8 +14,15 @@ public sealed record TexturePreview(Bitmap Bitmap, int Width, int Height) : IDis
     {
         token.ThrowIfCancellationRequested();
         var extension = Path.GetExtension(path).ToLowerInvariant();
+        if (extension == ".vmt")
+        {
+            path = MaterialFiles.TextureFor(path) ?? throw new InvalidDataException("Could not resolve this VMT's base texture. Check its $basetexture reference and materials folder.");
+            extension = Path.GetExtension(path).ToLowerInvariant();
+        }
         if (extension == ".vtf") return LoadVtf(path, token);
         if (extension == ".tga") return LoadTga(path, token);
+        if (extension is not (".png" or ".jpg" or ".jpeg" or ".bmp" or ".gif" or ".tif" or ".tiff"))
+            throw new InvalidDataException("Choose a VMT, VTF, TGA, PNG, JPEG, BMP, GIF, or TIFF. Export compiled Source 2 textures to PNG with the VRF add-on first.");
         using var stream = File.OpenRead(path);
         using var source = Image.FromStream(stream, false, true);
         CheckSize(source.Width, source.Height);

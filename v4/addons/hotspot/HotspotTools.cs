@@ -22,7 +22,7 @@ public sealed class HotspotTool(string operation) : ITool
                 new("flags", "Write Strata flags", ParameterKind.Boolean, "true"), new("repair_scale", "Fix oversized pixel regions", ParameterKind.Boolean, "false", Description: "Only repairs an exact 2x/4x/8x/16x mismatch to the supplied texture size."),
                 new("output", "Output file", ParameterKind.Text, Description: "Leave empty for the job's artifact folder.")]),
         "detect" => new("Detect hotspot regions", "Hotspots", "Detects alpha islands or flat seams on a bounded native texture preview. Coordinates use the original dimensions; review the generated sheet before use.",
-            [new("texture", "Texture", ParameterKind.File, Required: true), new("minimum", "Minimum region pixels", ParameterKind.Integer, "16", Minimum: 1, Maximum: 4096),
+            [new("texture", "Texture or material VMT", ParameterKind.File, Required: true, Description: "VMT inputs resolve their base texture automatically."), new("minimum", "Minimum region pixels", ParameterKind.Integer, "16", Minimum: 1, Maximum: 4096),
                 new("snap", "Snap grid (0 disables)", ParameterKind.Integer, "0", Minimum: 0, Maximum: 1024)]),
         "link-material" => new("Link hotspot material", "Hotspots", "Updates only the VMT's rectangle-map reference after validating the Hammer++ sheet against its base texture. Backs up the VMT.",
             [new("material", "Material VMT", ParameterKind.File, Required: true), new("rect", "Hammer++ rectangle map", ParameterKind.File, Required: true)]),
