@@ -3,7 +3,7 @@
 from pathlib import Path
 
 from s2kit.core.jobs import JobCancelled, JobContext
-from s2kit.pipelines.workflow import WorkflowOptions, run_workflow
+from s2kit.pipelines.workflow import WorkflowOptions, namespace_problem, normalize_namespace, run_workflow
 from s2kit.definitions.workflow import PortingWorkflow as _PortingWorkflowDefinition
 
 
@@ -13,6 +13,9 @@ class PortingWorkflow(_PortingWorkflowDefinition):
 
     def validate(self, values: dict) -> dict[str, str]:
         """Apply the workflow's source, namespace and project invariants before launching."""
+        problem = namespace_problem(normalize_namespace(str(values["namespace"])))
+        if problem:
+            return {"namespace": problem}
         try:
             self._options(values, {}).validate()
         except (ValueError, OSError) as exc:
@@ -30,7 +33,7 @@ class PortingWorkflow(_PortingWorkflowDefinition):
             source=str(source),
             project=str(values["project"]),
             target="compiled" if values["model_mode"] == "ragdoll" else str(values["target"]),
-            material_source=str(values["material_source"] or ""), namespace=str(values["namespace"]),
+            material_source=str(values["material_source"] or ""), namespace=normalize_namespace(str(values["namespace"])),
             vpk_filter=str(values["vpk_filter"] or ""),
             vrf_executable=str(prefs.get("vrf_cli_path", "") or ""),
             compiler=str(values["compiler"] or prefs.get("studiomdl_path", "") or ""),

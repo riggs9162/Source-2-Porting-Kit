@@ -16,6 +16,26 @@ from urllib.parse import unquote
 
 from s2kit.pipelines.porting import PortCancelled, check_cancelled
 
+NAMESPACE_PATTERN = r"[a-z0-9_]+(?:/[a-z0-9_]+)*"
+NAMESPACE_RULE = ("Use lowercase letters, digits and underscores, with / or \\ between folders, "
+                  "for example my_addon/props")
+
+
+def normalize_namespace(value: str) -> str:
+    """Accept a namespace as typed on Windows: backslashes, capitals, spaces and stray separators."""
+    parts = [re.sub(r"\s+", "_", part.strip()) for part in value.replace("\\", "/").split("/")]
+    return "/".join(part for part in parts if part).lower()
+
+
+def namespace_problem(value: str) -> str:
+    """Explain why a normalized namespace cannot be used, or return an empty string."""
+    if re.fullmatch(NAMESPACE_PATTERN, value):
+        return ""
+    invalid = sorted(set(re.sub(r"[a-z0-9_/]", "", value)))
+    if invalid:
+        return f"{NAMESPACE_RULE}. Remove: {' '.join(invalid)}"
+    return NAMESPACE_RULE
+
 
 @dataclass(frozen=True)
 class WorkflowOptions:
@@ -57,8 +77,8 @@ class WorkflowOptions:
             raise ValueError("Choose a glTF/GLB, VMAT, compiled Source 2 model/material, VPK, or exported folder")
         if source.suffix.lower() in {".vmat", ".vmat_c"} and self.target != "materials":
             raise ValueError("VMAT inputs require the Materials target")
-        if not re.fullmatch(r"[a-z0-9_]+(?:/[a-z0-9_]+)*", self.namespace):
-            raise ValueError("Output namespace must use lowercase letters, digits, underscores and folder separators")
+        if namespace_problem(self.namespace):
+            raise ValueError(f"Output namespace: {namespace_problem(self.namespace)}")
         roots = [source if source.is_dir() else source.parent]
         if self.material_source:
             material = Path(self.material_source).resolve()

@@ -48,7 +48,8 @@ class PortingWorkflow(ToolDefinition):
         PathParam("project", "Workflow project folder", mode="directory", must_exist=False,
                   required=True, group="Output", help="Choose a separate folder outside the source tree. Reuse it to resume the same settings."),
         TextParam("namespace", "Output namespace", default="ports", required=True, group="Output",
-                  help="Lowercase folder path used under models and materials/models, for example my_addon/props."),
+                  help="Folder path used under models and materials/models, for example my_addon/props. "
+                       "Capitals, spaces and backslashes are converted."),
         BoolParam("collision", "Generate model collision", default=True, group="Conversion",
                   depends_on=("model_mode", "generic")),
         BoolParam("include_source_animations", "Include original Alyx animations on ragdolls", default=False,

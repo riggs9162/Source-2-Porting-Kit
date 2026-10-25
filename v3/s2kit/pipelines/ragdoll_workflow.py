@@ -95,8 +95,10 @@ def discover_assets(options) -> list[RagdollAsset]:
 
 def validate_options(options) -> None:
     """Reject ambiguous output names and writes overlapping installed inputs."""
-    if not re.fullmatch(r"[a-z0-9_]+(?:/[a-z0-9_]+)*", options.namespace):
-        raise ValueError("Output namespace needs lowercase letters, digits, underscores and separators")
+    from s2kit.pipelines.workflow import namespace_problem
+
+    if namespace_problem(options.namespace):
+        raise ValueError(f"Output namespace: {namespace_problem(options.namespace)}")
     project = Path(options.project).resolve()
     if not str(options.project).strip():
         raise ValueError("Choose a workflow project folder")
