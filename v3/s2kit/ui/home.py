@@ -60,7 +60,7 @@ class HomePage(ft.Container):
                             ft.Text(APP_NAME, size=22,
                                     weight=ft.FontWeight.W_700),
                             common.caption(
-                                f"v{__version__}  -  Flet rebuild.  "
+                                f"v{__version__}  -  Early access.  "
                                 f"{registry.count()} tools registered.  "
                                 "Press Ctrl+K for the command palette."),
                         ],
