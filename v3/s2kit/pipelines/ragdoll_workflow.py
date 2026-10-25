@@ -683,14 +683,16 @@ def _package_staged(options, assets, records, log, cancel, staging: Path) -> lis
             registrations.append(f'player_manager.AddValidModel({json.dumps(display)}, {json.dumps(modelname)})')
             registrations.append(f'list.Set("PlayerOptionsModel", {json.dumps(display)}, {json.dumps(modelname)})')
         log(f"Packaged {asset.relative}" + (" and playermodel" if pm_ok else ""), "INFO")
-    namespace_identity = hashlib.sha256(options.namespace.encode()).hexdigest()[:16]
-    registration = staging / "lua" / "autorun" / f"s2kit_{namespace_identity}_playermodels.lua"
-    registration.parent.mkdir(parents=True, exist_ok=True)
-    registration.write_text('if ( SERVER ) then\n    AddCSLuaFile()\nend\n\n' +
-                            "\n".join(registrations) + "\n", encoding="utf-8")
+    if registrations:
+        namespace_identity = hashlib.sha256(options.namespace.encode()).hexdigest()[:16]
+        registration = staging / "lua" / "autorun" / f"s2kit_{namespace_identity}_playermodels.lua"
+        registration.parent.mkdir(parents=True, exist_ok=True)
+        registration.write_text('if ( SERVER ) then\n    AddCSLuaFile()\nend\n\n' +
+                                "\n".join(registrations) + "\n", encoding="utf-8")
+        written.append(registration)
     kinds = {_built_kind(options, asset) for asset in successful}
     contents = "ragdolls" if kinds == {"ragdoll"} else "props" if kinds == {"prop"} else "models"
-    written.extend([registration, _write_json(staging / "addon.json", {
+    written.extend([_write_json(staging / "addon.json", {
         "title": options.namespace.replace("/", " ") + " " + contents, "type": "model",
         "tags": ["realism"], "ignore": [],
     })])
