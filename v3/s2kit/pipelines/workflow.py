@@ -33,6 +33,7 @@ class WorkflowOptions:
     collision: bool = True
     emit_normal: bool = True
     model_mode: str = "generic"
+    model_type: str = "auto"
     source_urls: str = ""
     include_source_animations: bool = False
     create_playermodels: bool = False
@@ -386,7 +387,7 @@ def write_report(project: Path, state: dict) -> Path:
         for record in state.get("tasks", {}).values():
             for name in record.get("outputs", {}):
                 path = Path(name)
-                if path.name in {"ragdoll-report.json", "playermodel_report.json", "playermodel-report.json",
+                if path.name in {"ragdoll-report.json", "prop-report.json", "playermodel_report.json", "playermodel-report.json",
                                  "compiled-report.json", "material-report.json"}:
                     lines.append(f"- [{path.name}](<{path.as_posix()}>)")
         lines.extend(["", "## Validation", "",

@@ -24,7 +24,7 @@ class PortingWorkflow(_PortingWorkflowDefinition):
         """Build identical options for validation and execution."""
         input_kind = values["input_kind"]
         if input_kind == "urls" and values["model_mode"] != "ragdoll":
-            raise ValueError("Pasted model URLs require the GMod ragdoll addon port type")
+            raise ValueError("Pasted model URLs require the GMod model addon port type")
         source = values["source_folder"] if input_kind == "folder" else values["source_file"] if input_kind == "file" else ""
         return WorkflowOptions(
             source=str(source),
@@ -36,7 +36,7 @@ class PortingWorkflow(_PortingWorkflowDefinition):
             compiler=str(values["compiler"] or prefs.get("studiomdl_path", "") or ""),
             game=str(values["game"] or prefs.get("gameinfo_path", "") or ""),
             collision=bool(values["collision"]), emit_normal=bool(values["emit_normal"]),
-            model_mode=str(values["model_mode"]),
+            model_mode=str(values["model_mode"]), model_type=str(values["model_type"]),
             source_urls=str(values["source_urls"]) if input_kind == "urls" else "",
             include_source_animations=bool(values["include_source_animations"]),
             create_playermodels=bool(values["create_playermodels"]),
@@ -59,7 +59,7 @@ class PortingWorkflow(_PortingWorkflowDefinition):
             ctx.artifact(Path(settings.project) / name)
         if (Path(settings.project) / "addon-manifest.json").is_file():
             ctx.artifact(Path(settings.project) / "addon-manifest.json")
-        successful = sum(record["status"] == "success" for record in state["tasks"].values())
+        successful = sum(record["status"] in {"success", "skipped"} for record in state["tasks"].values())
         ctx.metric("Completed items", successful)
         ctx.summary(f"{state['status'].title()}: {successful}/{len(state['tasks'])} items complete")
         if state["status"] == "interrupted":

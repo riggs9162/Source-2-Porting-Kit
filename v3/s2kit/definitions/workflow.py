@@ -7,8 +7,9 @@ from s2kit.core.params import BoolParam, ChoiceParam, PathParam, TextParam, opti
 
 
 @tool(id="port-workflow", title="Porting Workflow", category="Models", order=0,
-      icon="ACCOUNT_TREE", description="Port Source 2 ragdolls into a complete GMod addon, with optional playermodels.",
-      keywords=("ragdoll", "playermodel", "vpk", "guided", "preflight", "queue", "resume", "report"))
+      icon="ACCOUNT_TREE", description="Port Source 2 props and ragdolls into a complete GMod addon, with optional playermodels.",
+      keywords=("prop", "static", "dynamic", "ragdoll", "playermodel", "vpk", "guided", "preflight",
+                "queue", "resume", "report"))
 class PortingWorkflow(ToolDefinition):
     """Shared declaration for PortingWorkflow."""
     EXECUTOR = "s2kit.tools.workflow:PortingWorkflow"
@@ -16,7 +17,11 @@ class PortingWorkflow(ToolDefinition):
     RUN_LABEL = "Port"
     PARAMS = [
         ChoiceParam("model_mode", "Port type", default="ragdoll", group="Workflow",
-                    choices=options(("ragdoll", "GMod ragdoll addon"), ("generic", "General asset workflow"))),
+                    choices=options(("ragdoll", "GMod model addon"), ("generic", "General asset workflow"))),
+        ChoiceParam("model_type", "Model type", default="auto", group="Workflow",
+                    depends_on=("model_mode", "ragdoll"),
+                    choices=options(("auto", "Detect for each model"), ("prop", "Props"), ("ragdoll", "Ragdolls")),
+                    help="Detection ports jointed characters as ragdolls and everything else as static or animated props."),
         ChoiceParam("action", "Action", default="run", group="Workflow", style="segmented",
                     choices=options(("run", "Port / resume"), ("inspect", "Plan and check"))),
         ChoiceParam("target", "Target", default="sources", group="Workflow",
@@ -46,16 +51,18 @@ class PortingWorkflow(ToolDefinition):
                   help="Lowercase folder path used under models and materials/models, for example my_addon/props."),
         BoolParam("collision", "Generate model collision", default=True, group="Conversion",
                   depends_on=("model_mode", "generic")),
-        BoolParam("include_source_animations", "Include original Alyx animations", default=False,
-                  group="Conversion", depends_on=("model_mode", "ragdoll")),
+        BoolParam("include_source_animations", "Include original Alyx animations on ragdolls", default=False,
+                  group="Conversion", depends_on=("model_mode", "ragdoll"),
+                  help="Props always keep their authored animations."),
         BoolParam("create_playermodels", "Also create humanoid playermodels", default=False,
                   group="Conversion", depends_on=("model_mode", "ragdoll"),
-                  help="Keep original body proportions while retargeting the standard GMod player animation set."),
+                  help="Keep original body proportions while retargeting the standard GMod player animation set. "
+                       "Props are skipped."),
         BoolParam("emit_normal", "Ship material normal maps", default=True, group="Conversion",
                   help="Preserve supported source normal maps through the material conversion pipeline."),
         PathParam("compiler", "studiomdl executable", mode="open_file", must_exist=False,
                   group="Compile",
-                  help="Empty uses Preferences. Ragdoll addons compile in an isolated project folder."),
+                  help="Empty uses Preferences. Model addons compile in an isolated project folder."),
         PathParam("game", "Compile game folder", mode="directory", must_exist=False,
                   group="Compile", help="Empty uses Preferences; gameinfo.txt must exist."),
         BoolParam("install", "Install completed addon into GMod", default=False,
@@ -64,19 +71,31 @@ class PortingWorkflow(ToolDefinition):
                   group="Installation", depends_on=("install", True),
                   help="Editable sources and reports remain in the workflow project."),
     ]
-    HELP = """### One-click ragdoll addons
+    HELP = """### One-click model addons
 
-Choose **GMod ragdoll addon**, paste Source 2 Viewer model URLs one per line,
+Choose **GMod model addon**, paste Source 2 Viewer model URLs one per line,
 and choose a separate project folder and output namespace. Set 32-bit StudioMDL CE
 and its game folder here or in Preferences, then click **Port**.
 
-Exact collision output uses the compiler's VPhysics library and a local helper
+**Model type** decides how each model is built. **Detect for each model** ports
+skinned models whose physics joins bodies with joints, and characters with
+authored AO capsules, as ragdolls. Every other model becomes a prop:
+
+* An unskinned model becomes a static prop with its source collision, authored
+  mass, skins and lower LOD meshes.
+* A skinned model becomes an animated prop with its native skeleton, every
+  authored clip, attachments, hitboxes and bone-following collision.
+
+Source bodygroups on props are combined into one body; the report says so.
+
+Exact ragdoll collision output uses the compiler's VPhysics library and a local helper
 built with the Windows .NET Framework C# compiler. Enable .NET Framework 4.8 if
 it is unavailable. The GMod addon has no helper or compiler runtime dependency.
 
 The project contains editable model sources, original extraction data, detailed
-conversion reports, and a ready-to-install **addon** folder. Original animations,
+conversion reports, and a ready-to-install **addon** folder. Original ragdoll animations,
 source-proportioned humanoid playermodels, and installation are independent options.
+Playermodels are built only from ragdolls.
 
 Native ragdolls retain source-sized geometry and source-derived collision.
 Reports distinguish preserved values, Source 1 adaptations and generated physics.

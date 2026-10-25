@@ -1,4 +1,4 @@
-"""Serial, resumable Source 2 ragdoll batches and self-contained GMod addons."""
+"""Serial, resumable Source 2 model batches - props and ragdolls - and self-contained GMod addons."""
 
 from __future__ import annotations
 
@@ -71,7 +71,7 @@ def discover_assets(options) -> list[RagdollAsset]:
             for name in selected:
                 path = resource_path(name)
                 if path.suffix.lower() != ".vmdl_c":
-                    raise ValueError(f"Ragdoll input must name an exact .vmdl_c resource: {name}")
+                    raise ValueError(f"Model input must name an exact .vmdl_c resource: {name}")
                 assets.append(_asset(source, path.as_posix(), path.as_posix()))
         elif source.suffix.lower() == ".vmdl_c":
             assets.append(_asset(source, "", source.name))
@@ -86,7 +86,7 @@ def discover_assets(options) -> list[RagdollAsset]:
                 assets.append(_asset(model.render_path, "", relative, str(material_root.resolve())))
     unique = {asset.key: asset for asset in assets}
     if not unique:
-        raise ValueError("No selected skinned model sources were found")
+        raise ValueError("No selected model sources were found")
     names = [asset.relative.casefold() for asset in unique.values()]
     if len(names) != len(set(names)):
         raise ValueError("Selected resources collide under the output namespace")
@@ -100,6 +100,8 @@ def validate_options(options) -> None:
     project = Path(options.project).resolve()
     if not str(options.project).strip():
         raise ValueError("Choose a workflow project folder")
+    if options.model_type not in {"auto", "ragdoll", "prop"}:
+        raise ValueError("Model type must be automatic, ragdoll or prop")
     for asset in discover_assets(options):
         source = Path(asset.source)
         root = source.parent
@@ -257,32 +259,64 @@ def _compiler_game(options, material_payload: Path | None = None) -> Path:
     return game
 
 
-def _extract(options, asset, log, cancel) -> list[Path]:
-    """Export one asset independently so an unrelated resource cannot block it."""
+def _model_kind(options, asset: RagdollAsset) -> str:
+    """Resolve whether a source becomes a ragdoll or a prop, detecting it when automatic."""
+    if options.model_type != "auto":
+        return options.model_type
+    from s2kit.pipelines.prop_port import classify_model
+
+    return classify_model(_render_source(options, asset))
+
+
+def _built_kind(options, asset: RagdollAsset) -> str:
+    """Read the kind a completed conversion recorded for its model."""
+    descriptor = _paths(options, asset)[1] / "build.json"
+    return json.loads(descriptor.read_text(encoding="utf-8")).get("kind", "ragdoll")
+
+
+def _export(options, asset: RagdollAsset, destination: Path, animations: bool, log, cancel) -> None:
+    """Run one isolated Source 2 Viewer export of a selected model."""
     from s2kit.pipelines import vrf
 
-    destination, _, _ = _paths(options, asset)
-    if destination.exists():
-        destination.rename(destination.with_name(destination.name + f"-previous-{time.time_ns()}"))
     executable = vrf.resolve_vrf_executable(explicit=options.vrf_executable or None)
     result = vrf.run_vrf_export(
         executable, Path(asset.source), destination, vpk_filepath=asset.resource or None,
-        threads=1, include_animations=options.include_source_animations,
-        compose_additive=options.include_source_animations,
+        threads=1, include_animations=animations, compose_additive=animations,
         on_log=lambda message: log(message, "INFO"), cancel=cancel)
     check_cancelled(cancel)
     if result:
         raise ValueError(f"Source 2 Viewer exited with {result}")
+
+
+def _extract(options, asset, log, cancel) -> list[Path]:
+    """Export one asset independently so an unrelated resource cannot block it.
+
+    Props always keep their authored clips. Ragdolls keep them only when
+    requested, so an automatic export without clips is repeated with them once
+    the model turns out to be an animated prop.
+    """
+    from s2kit.pipelines.prop_port import is_skinned
+
+    destination, _, _ = _paths(options, asset)
+    if destination.exists():
+        destination.rename(destination.with_name(destination.name + f"-previous-{time.time_ns()}"))
+    animations = options.include_source_animations or options.model_type == "prop"
+    _export(options, asset, destination, animations, log, cancel)
+    if not animations and _model_kind(options, asset) == "prop" and is_skinned(_render_source(options, asset)):
+        log("Animated prop detected; exporting again with its authored clips", "INFO")
+        shutil.rmtree(destination)
+        _export(options, asset, destination, True, log, cancel)
     return sorted(p for p in destination.rglob("*") if p.is_file())
 
 
 def _convert(options, asset, log, cancel, *, playermodel=False) -> list[Path]:
-    """Write native or player sources and retain their complete conversion audit."""
+    """Write prop, native ragdoll or player sources and retain their complete conversion audit."""
     from s2kit.pipelines.ragdoll_port import port_ragdoll
 
     source = _render_source(options, asset)
     _, destination, _ = _paths(options, asset)
     modelname = f"{options.namespace}/{asset.relative}" + ("_pm.mdl" if playermodel else ".mdl")
+    kind = "ragdoll" if playermodel else _model_kind(options, asset)
     calibration_path = Path(options.project) / "calibration" / "compiler_calibration.json"
     calibration = json.loads(calibration_path.read_text(encoding="utf-8")) if calibration_path.is_file() else {}
     friction_scale = float(calibration.get("friction_compile_scale", 1.0))
@@ -297,6 +331,11 @@ def _convert(options, asset, log, cancel, *, playermodel=False) -> list[Path]:
             friction_scale=friction_scale,
             include_source_animations=options.include_source_animations,
             on_log=log, cancel=cancel)
+    elif kind == "prop":
+        from s2kit.pipelines.prop_port import port_prop
+
+        result = port_prop(source, destination, modelname=modelname,
+                           cdmaterials=f"models/{options.namespace}/", on_log=log, cancel=cancel)
     else:
         result = port_ragdoll(
             source, destination, modelname=modelname,
@@ -310,7 +349,7 @@ def _convert(options, asset, log, cancel, *, playermodel=False) -> list[Path]:
         qcs.append(str(result.animation_qc))
     qcs.append(str(result.qc))
     descriptor = _write_json(destination / "build.json", {
-        "modelname": modelname, "qcs": qcs, "source": str(source),
+        "modelname": modelname, "qcs": qcs, "source": str(source), "kind": kind,
         "playermodel": playermodel, "report": getattr(result, "report", {}),
         "warnings": result.warnings,
     })
@@ -602,7 +641,7 @@ def _package_staged(options, assets, records, log, cancel, staging: Path) -> lis
         records.get(f"{kind}:{asset.key}", {}).get("status") == "success"
         for kind in ("native", "materials", "compile"))]
     if not successful:
-        raise ValueError("No validated ragdoll with complete materials is available to package")
+        raise ValueError("No validated model with complete materials is available to package")
     staging.mkdir()
     copied = {}
     registrations = []
@@ -649,8 +688,10 @@ def _package_staged(options, assets, records, log, cancel, staging: Path) -> lis
     registration.parent.mkdir(parents=True, exist_ok=True)
     registration.write_text('if ( SERVER ) then\n    AddCSLuaFile()\nend\n\n' +
                             "\n".join(registrations) + "\n", encoding="utf-8")
+    kinds = {_built_kind(options, asset) for asset in successful}
+    contents = "ragdolls" if kinds == {"ragdoll"} else "props" if kinds == {"prop"} else "models"
     written.extend([registration, _write_json(staging / "addon.json", {
-        "title": options.namespace.replace("/", " ") + " ragdolls", "type": "model",
+        "title": options.namespace.replace("/", " ") + " " + contents, "type": "model",
         "tags": ["realism"], "ignore": [],
     })])
     manifest_data = {
@@ -758,8 +799,9 @@ def _implementation_bytes(function) -> bytes:
 def _stage_signature(kind: str) -> str:
     """Invalidate affected cached stages when their production converter changes."""
     names = {
-        "extract": ["vrf", "model_fidelity", "model_metadata", "native_lods"],
-        "native": ["ragdoll_port", "ragdoll_physics", "ragdoll_contacts", "ragdoll_appearance", "lod_materials", "model_fidelity",
+        "extract": ["vrf", "model_fidelity", "model_metadata", "native_lods", "prop_port"],
+        "native": ["prop_port", "gltf_smd", "native_physics", "dmx_mesh", "physics", "bone_overlays",
+                   "smd_export", "smd_export_helpers", "ragdoll_port", "ragdoll_physics", "ragdoll_contacts", "ragdoll_appearance", "lod_materials", "model_fidelity",
                    "gltf_accessors", "morph_atlas", "ragdoll_flex", "ragdoll_runtime", "ragdoll_correctives", "procedural_native",
                    "ragdoll_attachments", "ragdoll_animations", "morph_animation", "model_metadata", "smd_animation_export",
                    "gltf_animation", "glb_skin", "native_port", "skeleton_retarget"],
@@ -787,9 +829,10 @@ def _stage_signature(kind: str) -> str:
     digest.update(defaults_bytes)
     helpers = [_paths, _write_json, resource_path, _implementation_bytes]
     helpers.extend({
-        "native": [_render_source], "player": [_render_source],
+        "extract": [_export, _model_kind, _render_source],
+        "native": [_render_source, _model_kind], "player": [_render_source],
         "materials": [_material_sources], "compile": [_compiler_game], "compile_pm": [_compiler_game],
-        "package": [_package_staged, _replace_directory, _discard_staging],
+        "package": [_package_staged, _replace_directory, _discard_staging, _built_kind],
         "install": [_replace_directory, _discard_staging],
     }.get(kind, []))
     for helper in helpers:
@@ -862,7 +905,8 @@ def run_ragdoll_workflow(options, *, inspect_only: bool = False,
             queue.append((f"native:{asset.key}", "native", asset, [*prerequisite, "calibrate"]))
             queue.append((f"materials:{asset.key}", "materials", asset, [f"native:{asset.key}"]))
             queue.append((f"compile:{asset.key}", "compile", asset, [f"native:{asset.key}", f"materials:{asset.key}"]))
-            if options.create_playermodels and "headcrab" not in asset.relative.casefold():
+            if (options.create_playermodels and options.model_type != "prop"
+                    and "headcrab" not in asset.relative.casefold()):
                 queue.append((f"player:{asset.key}", "player", asset, [f"native:{asset.key}"]))
                 queue.append((f"compile_pm:{asset.key}", "compile_pm", asset, [f"player:{asset.key}", f"materials:{asset.key}"]))
         queue.append(("package", "package", None, []))
@@ -903,6 +947,12 @@ def run_ragdoll_workflow(options, *, inspect_only: bool = False,
                     reusable = False
                 if reusable and not any(state["tasks"][dep].get("rerun") for dep in deps):
                     record["rerun"] = False
+                    progress(index + 1, len(queue))
+                    continue
+                if (kind in {"player", "compile_pm"} and state["tasks"][f"native:{asset.key}"]["status"] == "success"
+                        and _built_kind(options, asset) == "prop"):
+                    record.update(status="skipped", error="", rerun=False, outputs={},
+                                  messages=[["INFO", "Playermodels are built only from ragdoll characters"]])
                     progress(index + 1, len(queue))
                     continue
                 record.update(status="running", messages=[], error="", rerun=True)
@@ -954,7 +1004,7 @@ def run_ragdoll_workflow(options, *, inspect_only: bool = False,
                 atomic_json(checkpoint, state)
                 write_report(project, state)
                 progress(index + 1, len(queue))
-            state["status"] = "success" if all(record["status"] == "success"
+            state["status"] = "success" if all(record["status"] in {"success", "skipped"}
                 for record in state["tasks"].values()) else "incomplete"
         except PortCancelled:
             state["status"] = "interrupted"
