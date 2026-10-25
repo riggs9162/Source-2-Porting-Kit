@@ -54,5 +54,8 @@ def cache_dir() -> Path:
 
 
 def assets_dir() -> Path:
-    """Static assets served to the Flet client (icons, fonts)."""
+    """Static assets served to the Flet client (icons, fonts); a frozen build reads its bundled copy."""
+    bundled = getattr(sys, "_MEIPASS", None)
+    if bundled:
+        return Path(bundled) / "assets"
     return _ensure(app_root() / "assets")

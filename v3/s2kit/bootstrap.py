@@ -191,6 +191,9 @@ def pip_install(packages: list[str]) -> bool:
     """Run `pip install` for the given requirement specs in this interpreter."""
     if not packages:
         return True
+    if getattr(sys, "frozen", False):
+        print("The packaged app cannot install Python packages; download a complete build.")
+        return False
     cmd = [sys.executable, "-m", "pip", "install", "--upgrade", *packages]
     print(f"\n> {' '.join(cmd)}\n", flush=True)
     try:
@@ -223,10 +226,11 @@ def setup_logging(console_level: str = "INFO") -> Path:
     file_handler.setFormatter(logging.Formatter(LOG_FORMAT))
     root.addHandler(file_handler)
 
-    console = logging.StreamHandler(sys.stdout)
-    console.setLevel(getattr(logging, console_level.upper(), logging.INFO))
-    console.setFormatter(logging.Formatter("%(levelname)-7s %(name)s: %(message)s"))
-    root.addHandler(console)
+    if sys.stdout is not None:
+        console = logging.StreamHandler(sys.stdout)
+        console.setLevel(getattr(logging, console_level.upper(), logging.INFO))
+        console.setFormatter(logging.Formatter("%(levelname)-7s %(name)s: %(message)s"))
+        root.addHandler(console)
 
     # Flet's transport logs every serialised control patch at DEBUG, which
     # buries our own lines and turns a single session into megabytes of log.
@@ -258,7 +262,8 @@ def _record(kind: str, text: str) -> None:
     _LAST_ERROR.append(text)
     del _LAST_ERROR[:-5]
     logger.critical("%s\n%s", kind, text)
-    sys.stderr.write(f"\n{'=' * 68}\n{kind}\n{'=' * 68}\n{text}\n")
+    if sys.stderr is not None:
+        sys.stderr.write(f"\n{'=' * 68}\n{kind}\n{'=' * 68}\n{text}\n")
 
 
 def install_exception_hooks() -> None:

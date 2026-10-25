@@ -132,7 +132,9 @@ def expand_animation_graph(qc_path: Path) -> str:
 def ensure_animation_sources(cache: Path | None = None, *, on_log=None, cancel=None) -> Path:
     """Download the pinned upstream archive once into a verified source cache."""
     log = on_log or (lambda message, level="INFO": None)
-    base = Path(cache) if cache else Path(__file__).resolve().parents[2] / ".cache" / "player_animations"
+    from s2kit.core import paths
+
+    base = Path(cache) if cache else paths.cache_dir() / "player_animations"
     destination = base / SOURCE_REVISION
     provenance = destination / "s2kit_provenance.json"
     if provenance.is_file():
