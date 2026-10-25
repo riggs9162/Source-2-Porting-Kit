@@ -132,6 +132,15 @@ def add_model_origin_bone(path: Path, index: int, name: str) -> None:
                     encoding="utf-8", newline="\n")
 
 
+def additive_composed(glb_path: Path) -> bool:
+    """Whether the export composed its additive clips over the bind pose, per its fidelity sidecar."""
+    sidecar = Path(glb_path).with_suffix(".fidelity.json")
+    if not sidecar.is_file():
+        return False
+    export = json.loads(sidecar.read_text(encoding="utf-8")).get("animation_export", {})
+    return bool(export.get("additive_composed"))
+
+
 def _kinematic_root(document: dict, skin) -> str:
     """Choose the authored collision bone containing the most other physics bones."""
     names = document["m_boneNames"]
@@ -232,7 +241,7 @@ def port_native_model(
         raise ValueError(f"Event translations refer to absent sequences: {sorted(unknown_events)}")
     if not metadata.animations and clips:
         raise ValueError("Authored animation metadata is missing; export again with VRF Batch Export")
-    if any(animation.delta for animation in metadata.animations.values()):
+    if not additive_composed(glb_path) and any(animation.delta for animation in metadata.animations.values()):
         raise ValueError("Additive Source 2 clips need explicit composition before native SMD export")
     origin_bone = ""
     if any(attachment.root_transform for attachment in metadata.attachments):
