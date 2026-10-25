@@ -246,6 +246,49 @@ def log_environment(report: EnvironmentReport) -> None:
         logger.debug(line)
 
 
+def use_bundled_client() -> Optional[Path]:
+    """Point Flet at the window client a packaged build ships instead of its shared stock client.
+
+    The archive is unpacked once per build into local app data, keyed by its
+    digest. From source, the client `build_exe.py` compiled into `build/` is
+    used when present. An existing ``FLET_VIEW_PATH`` is left alone. Returns
+    the client folder, or None when Flet's stock client will run.
+    """
+    import json
+    import zipfile
+
+    if os.environ.get("FLET_VIEW_PATH"):
+        return None
+    bundled = getattr(sys, "_MEIPASS", None)
+    if not bundled:
+        compiled = paths.app_root() / "build" / "flet-client" / "flet"
+        if not (compiled / "flet.exe").is_file():
+            return None
+        os.environ["FLET_VIEW_PATH"] = str(compiled)
+        return compiled
+    package = Path(bundled) / "flet_desktop" / "app"
+    stamp = package / "client.json"
+    if not stamp.is_file():
+        return None
+    digest = json.loads(stamp.read_text(encoding="utf-8"))["sha256"]
+    root = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "Source 2 Porting Kit" / "client"
+    target = root / digest[:16]
+    if not (target / "flet" / "flet.exe").is_file():
+        staging = root / f"{digest[:16]}.{os.getpid()}"
+        shutil.rmtree(staging, ignore_errors=True)
+        with zipfile.ZipFile(package / "flet-windows.zip") as archive:
+            archive.extractall(staging)
+        shutil.rmtree(target, ignore_errors=True)
+        try:
+            staging.rename(target)
+        except OSError:
+            shutil.rmtree(staging, ignore_errors=True)
+            if not (target / "flet" / "flet.exe").is_file():
+                raise
+    os.environ["FLET_VIEW_PATH"] = str(target / "flet")
+    return target / "flet"
+
+
 # ----------------------------------------------------------------------
 # Crash handling
 # ----------------------------------------------------------------------

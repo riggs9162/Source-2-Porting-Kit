@@ -175,6 +175,7 @@ def main(argv: list[str] | None = None) -> int:
     log_file = bootstrap.setup_logging(console_level=args.log_level)
     bootstrap.install_exception_hooks()
     bootstrap.log_environment(report)
+    bootstrap.use_bundled_client()
 
     from s2kit.app import launch
 
