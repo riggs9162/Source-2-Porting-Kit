@@ -66,7 +66,7 @@ Each generation lives in its own self-contained tree with its own dependencies a
 | --- | --- | --- | --- |
 | [v1/](v1/) | Original Tkinter porter (`tools/` plugin registry, VTFLib-based) | `python v1/porter.py` | Frozen — kept for backward compatibility, not extended |
 | [v2/](v2/) | PySide6 desktop app (current release) | `python v2/main.py` | **Active** — this is what the released `.exe` builds from |
-| [v3/](v3/) | Flet rebuild with a uniform tool framework | `python v3/run.py` | In development — see [v3/README.md](v3/README.md) |
+| [v3/](v3/) | Flet rebuild with a uniform tool framework | `python v3/run.py` | **Early access** — first release `v3.0.0-early-access`; see [v3/README.md](v3/README.md) |
 | [v4/](v4/) | **Source Backport**, a C#/.NET 10 desktop app for Source 2 to Source 1 asset porting | `v4/Start.cmd` | Native workspace, hotspot editor, appearance presets, add-on SDK, background jobs, asset browsing, utility tools, VRF exports, and shared MCP/CLI agent access. See [v4/README.md](v4/README.md) |
 
 The trees share no code. Unless stated otherwise, everything below refers to **v2**.
@@ -80,6 +80,8 @@ There are three ways to use the Source 2 Porting Kit:
 ### Option 1 — Download a Release (Recommended)
 
 The easiest way to get started. Download the latest `.exe` from the [Releases](https://github.com/riggs9162/Source-2-Porting-Kit/releases) page and run it — no Python installation required.
+
+The v3 early access build is published as a pre-release. It includes the one-click **Porting Workflow**, which turns pasted Source 2 model URLs into a finished GMod addon of props, ragdolls and optional playermodels. Its settings, history and logs are stored beside the `.exe`, so give it its own folder. The latest stable release remains v2.
 
 ### Option 2 — Run from Source
 
@@ -109,6 +111,8 @@ python build_exe.py
 ```
 
 The output will be placed in `v2/dist/`.
+
+To build v3, install `v3/requirements.txt` plus `pyinstaller` and `flet-cli`, then run `python v3/build_exe.py`. The executable is written to `v3/dist/`, with the desktop window client bundled inside it.
 
 > **Note:** Some audio tools require [FFmpeg](https://ffmpeg.org/) to be available on your system PATH.
 

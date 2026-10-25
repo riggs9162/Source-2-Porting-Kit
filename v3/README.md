@@ -25,6 +25,26 @@ so Browse and Save controls ask for local paths in this mode. Paste the full
 file or folder path; outputs are written locally, not downloaded by the browser.
 Use Desktop for native file dialogs. `--port` selects a browser server port.
 
+## Early access executable
+
+`v3.0.0-early-access` is the first v3 release. Download it from the
+repository's Releases page, place it in its own folder and run it. Settings,
+run history and logs are written beside the executable. The first launch
+unpacks the desktop window client into `%USERPROFILE%\.flet`.
+
+To build it yourself, install `requirements.txt` plus `pyinstaller` and
+`flet-cli`, then run:
+
+```console
+python v3/build_exe.py            # one self-contained .exe in v3/dist/
+python v3/build_exe.py --onedir   # a folder build with faster startup
+python v3/build_exe.py --console  # keep a console window for log output
+```
+
+The executable bundles the Flet desktop and browser clients, so it needs no
+download. Source2Viewer-CLI, StudioMDL and FFmpeg remain separate programs,
+configured under Preferences. The CLI and MCP server run from source.
+
 ## What this is
 
 The point of v3 is that **every tool page behaves the same**. A tool declares a
