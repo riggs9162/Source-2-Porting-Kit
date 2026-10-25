@@ -338,29 +338,14 @@ def port_native_model(
                          *[overlay_skin_material(surface, index) for surface in surfaces]]) + " }"
                      for index, entry in enumerate(model_set.skins))
         lines.append("}")
-    lod_smds = []
-    for index, (distance, source) in enumerate(lod_sources or [], start=1):
-        from s2kit.pipelines.dmx_mesh import write_dmx_reference
+    from s2kit.pipelines.dmx_mesh import write_lod_references
 
-        destination = out_dir / f"{glb_path.stem}_lod{index}.smd"
-        triangles = write_dmx_reference(source, destination,
-                                        out_dir / f"{glb_path.stem}.smd", skin.joint_names)
-        lod_smds.append((distance, destination))
-        result.files.append(destination)
-        log(f"LOD {index}: {triangles} triangles from {source.name}")
-    if lod_smds:
-        from s2kit.pipelines.dmx_mesh import partition_lod_meshes
-
-        partition_lines, partition_files = partition_lod_meshes(
-            out_dir / f"{glb_path.stem}.smd", lod_smds)
-        if partition_lines:
-            lines = [line for line in lines if not line.startswith("$body ")]
-            lines.extend(partition_lines)
-            result.files.extend(partition_files)
-        else:
-            for distance, destination in lod_smds:
-                lines.extend([f"$lod {distance:g}", "{",
-                              f'    replacemodel "{glb_path.stem}.smd" "{destination.name}"', "}"])
+    lod_lines, lod_files, partitioned = write_lod_references(
+        out_dir / f"{glb_path.stem}.smd", lod_sources or [], skin.joint_names, log)
+    if partitioned:
+        lines = [line for line in lines if not line.startswith("$body ")]
+    lines.extend(lod_lines)
+    result.files.extend(lod_files)
     result.attachments = len(metadata.attachments)
     result.hitboxes = len(metadata.hitboxes)
     bind_path = out_dir / "bind.smd"

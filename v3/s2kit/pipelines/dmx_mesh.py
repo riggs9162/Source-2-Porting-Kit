@@ -20,9 +20,19 @@ def smd_vertex_line(values, links) -> str:
     return "\t".join(fields) + "\n"
 
 
+def _reference_bone_count(header: str) -> int:
+    """Count the bones a reference SMD's nodes block declares."""
+    nodes = header.split("nodes\n", 1)[1].split("end\n", 1)[0]
+    return sum(1 for line in nodes.splitlines() if line.strip())
+
+
 def write_dmx_reference(dmx_path: Path, smd_path: Path, reference: Path,
                         bone_names: list[str]) -> int:
-    """Reuse the verified native skeleton and export the DMX mesh in Source inches."""
+    """Reuse the verified native skeleton and export the DMX mesh in Source inches.
+
+    An unweighted DMX - a static prop's LOD - binds every vertex to the
+    reference's only bone, and is refused against a multi-bone skeleton.
+    """
     data = valve_datamodel.load(str(dmx_path))
     models = [element for element in data.elements if element.type == "DmeModel"]
     meshes = [element for element in data.elements if element.type == "DmeMesh"]
@@ -36,12 +46,20 @@ def write_dmx_reference(dmx_path: Path, smd_path: Path, reference: Path,
     positions = np.asarray(state["position$0"])
     normals = np.asarray(state["normal$0"])
     uv = np.asarray(state["texcoord$0"])
-    weights = np.asarray(state["blendweights$0"]).reshape(-1, count)
-    indices = np.asarray(state["blendindices$0"]).reshape(-1, count)
-    bone_lookup = {name: index for index, name in enumerate(bone_names)}
-    mapped = {index: bone_lookup[element.name] for index, element in enumerate(joints)
-              if element.name in bone_lookup}
     header = reference.read_text(encoding="utf-8").split("triangles\n", 1)[0]
+    rigid = count == 0
+    if rigid and _reference_bone_count(header) != 1:
+        raise ValueError("An unweighted LOD DMX needs a single-bone reference skeleton")
+    if rigid:
+        weights = np.ones((len(positions), 1))
+        indices = np.zeros((len(positions), 1), dtype=np.int64)
+        mapped = {0: 0}
+    else:
+        weights = np.asarray(state["blendweights$0"]).reshape(-1, count)
+        indices = np.asarray(state["blendindices$0"]).reshape(-1, count)
+        bone_lookup = {name: index for index, name in enumerate(bone_names)}
+        mapped = {index: bone_lookup[element.name] for index, element in enumerate(joints)
+                  if element.name in bone_lookup}
     triangles = 0
     with smd_path.open("w", encoding="utf-8", newline="\n") as output:
         output.write(header + "triangles\n")
@@ -140,3 +158,32 @@ def partition_lod_meshes(reference: Path, lods: list[tuple[float, Path]],
         if lod_index:
             qc.append("}")
     return qc, outputs
+
+
+def write_lod_references(reference: Path, lod_sources: list[tuple[float, Path]],
+                         bone_names: list[str], log=None) -> tuple[list[str], list[Path], bool]:
+    """Write authored LOD meshes beside a reference SMD and return their QC.
+
+    Returns the QC lines, every file written and whether large meshes were
+    partitioned; partitioned lines declare their own bodyparts and replace
+    every `$body` line of the model.
+    """
+    log = log or (lambda _message: None)
+    reference = Path(reference)
+    lod_smds, files = [], []
+    for index, (distance, source) in enumerate(lod_sources, start=1):
+        destination = reference.with_name(f"{reference.stem}_lod{index}.smd")
+        triangles = write_dmx_reference(source, destination, reference, bone_names)
+        lod_smds.append((distance, destination))
+        files.append(destination)
+        log(f"LOD {index}: {triangles} triangles from {source.name}")
+    if not lod_smds:
+        return [], files, False
+    partition_lines, partition_files = partition_lod_meshes(reference, lod_smds)
+    if partition_lines:
+        return partition_lines, [*files, *partition_files], True
+    lines = []
+    for distance, destination in lod_smds:
+        lines.extend([f"$lod {distance:g}", "{",
+                      f'    replacemodel "{reference.name}" "{destination.name}"', "}"])
+    return lines, files, False
