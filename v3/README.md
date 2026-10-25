@@ -27,22 +27,34 @@ Use Desktop for native file dialogs. `--port` selects a browser server port.
 
 ## Early access executable
 
-`v3.0.0-early-access` is the first v3 release. Download it from the
-repository's Releases page, place it in its own folder and run it. Settings,
-run history and logs are written beside the executable. The first launch
-unpacks the desktop window client into `%USERPROFILE%\.flet`.
+v3 ships as an early access executable on the repository's Releases page,
+starting with `v3.0.0-early-access`. Place it in its own folder and run it.
+Settings, run history and logs are written beside the executable. The first
+launch unpacks the window client into
+`%LOCALAPPDATA%\Source 2 Porting Kit\client`.
+
+The window client is compiled for the kit rather than taken from Flet. Flet's
+stock client links every Flet extension, and its geolocator plugin creates
+Windows location objects at startup, so Windows lists the app as using your
+location even though the kit never asks for it. The kit's client keeps only
+the audio extension it uses.
 
 To build it yourself, install `requirements.txt` plus `pyinstaller` and
-`flet-cli`, then run:
+`flet-cli`. Compiling the client also needs git, the Visual Studio
+"Desktop development with C++" workload, and Windows Developer Mode, which
+Flutter needs for symlinks. The Flutter release Flet pins is installed into
+`~/flutter` on first use, and the compiled client is reused until the Flet
+version changes.
 
 ```console
-python v3/build_exe.py            # one self-contained .exe in v3/dist/
-python v3/build_exe.py --onedir   # a folder build with faster startup
-python v3/build_exe.py --console  # keep a console window for log output
+python v3/build_exe.py                   # one self-contained .exe in v3/dist/
+python v3/build_exe.py --onedir          # a folder build with faster startup
+python v3/build_exe.py --console         # keep a console window for log output
+python v3/build_exe.py --rebuild-client  # compile the window client again
 ```
 
-The executable bundles the Flet desktop and browser clients, so it needs no
-download. Source2Viewer-CLI, StudioMDL and FFmpeg remain separate programs,
+Running from source uses the compiled client in `v3/build/flet-client` once it
+exists. Source2Viewer-CLI, StudioMDL and FFmpeg remain separate programs,
 configured under Preferences. The CLI and MCP server run from source.
 
 ## What this is
