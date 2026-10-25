@@ -160,12 +160,20 @@ def material_provenance(entry: VmatEntry, *, resource: str = "") -> dict:
                 channel_conversion="authored semantic maps")
 
 
+def _archive_paths(resource: PurePosixPath) -> list[PurePosixPath]:
+    """List where a normalized material resource can live: beside its model or under materials/."""
+    if resource.parts and resource.parts[0].casefold() == "materials":
+        return [resource]
+    return [resource, PurePosixPath("materials") / resource]
+
+
 def _command(source: Path, resource: PurePosixPath, executable: Path, output: Path) -> list[str]:
     """Export only the selected VMAT so sibling materials cannot overwrite its decoded maps."""
     command = [str(executable), "-i", str(source), "-o", str(output), "-d", "--threads", "1", "-e", "vmat_c"]
     if source.suffix.lower() == ".vpk":
-        return [*command, "-f", resource.as_posix()]
-    matches = {parent / Path(resource) for parent in source.parents if (parent / Path(resource)).is_file()}
+        return [*command, "-f", ",".join(path.as_posix() for path in _archive_paths(resource))]
+    matches = {parent / Path(path) for parent in source.parents for path in _archive_paths(resource)
+               if (parent / Path(path)).is_file()}
     if len(matches) != 1:
         raise ValueError(f"Cannot resolve one original compiled material beside {source}: {resource}")
     command[2] = str(next(iter(matches)))
@@ -178,7 +186,8 @@ def _cache_files(directory: Path, resource: PurePosixPath, raw_hash: str,
     vmats = list(directory.rglob("*.vmat"))
     if len(vmats) != 1 or vmats[0].stem != resource.stem:
         raise ValueError(f"Isolated material export selected unexpected VMATs: {resource}")
-    if archive_input and vmats[0].relative_to(directory).as_posix() != resource.with_suffix(".vmat").as_posix():
+    if archive_input and vmats[0].relative_to(directory).as_posix() not in {
+            path.with_suffix(".vmat").as_posix() for path in _archive_paths(resource)}:
         raise ValueError(f"Isolated archive export selected another resource path: {resource}")
     if _digest(vmats[0]) != raw_hash:
         raise ValueError(f"Isolated VMAT bytes differ from the selected extracted material: {resource}")
