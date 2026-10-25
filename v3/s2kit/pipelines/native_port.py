@@ -142,8 +142,11 @@ def additive_composed(glb_path: Path) -> bool:
 
 
 def _kinematic_root(document: dict, skin) -> str:
-    """Choose the authored collision bone containing the most other physics bones."""
-    names = document["m_boneNames"]
+    """Choose the authored collision bone containing the most other physics bones.
+
+    Parts named with an empty bone follow the model origin, which is the skeleton root.
+    """
+    names = [name or skin.joints[skin.root_joint_idx].name for name in document["m_boneNames"]]
     parents = document.get("m_boneParents") or []
     if not parents:
         raise ValueError("Physics part-to-bone mapping is missing")
@@ -305,7 +308,7 @@ def port_native_model(
         physics_smd = out_dir / f"{glb_path.stem}_physics.smd"
         physics_result = write_kinematic_physics(
             phys_path, physics_smd, out_dir / f"{glb_path.stem}.smd",
-            skin.joint_names, compiler_root)
+            skin.joint_names, compiler_root, origin_bone=native_root)
         collision = "\n".join(physics_result.qc_lines) + "\n"
         result.physics = physics_result.report
         result.warnings.extend(physics_result.warnings)

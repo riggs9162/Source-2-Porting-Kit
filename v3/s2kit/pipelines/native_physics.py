@@ -78,8 +78,11 @@ def _physical_ancestor(joint: int, parents: dict[int, int], physical_bones: set[
     return None
 
 
-def _source_parts(document: dict[str, Any], bone_names: list[str], root_bone: str):
-    """Resolve the PHYS part-to-bone indirection and reject unsupported shapes."""
+def _source_parts(document: dict[str, Any], bone_names: list[str], root_bone: str, origin_bone: str = ""):
+    """Resolve the PHYS part-to-bone indirection and reject unsupported shapes.
+
+    A part named with an empty bone follows the model origin and binds to `origin_bone`.
+    """
     if document.get('m_joints') or document.get('m_constraints2'):
         raise NativePhysicsError('Jointed Source 2 physics needs explicit joint-limit conversion')
     if document.get('m_pFeModel'):
@@ -99,7 +102,7 @@ def _source_parts(document: dict[str, Any], bone_names: list[str], root_bone: st
         bone_index = int(parents[index])
         if bone_index < 0 or bone_index >= len(names):
             raise NativePhysicsError(f'PHYS part {index} has an invalid bone-name index')
-        bone = str(names[bone_index])
+        bone = str(names[bone_index]) or origin_bone
         _qc_name(bone)
         if bone not in lookup or bone.casefold() in used:
             raise NativePhysicsError(f'PHYS bone {bone!r} is missing from the skeleton or duplicated')
@@ -184,7 +187,8 @@ def _prepare_hull(data: dict[str, Any], label: str) -> tuple[trimesh.Trimesh, di
 
 
 def write_kinematic_physics(phys_path: Path, smd_path: Path, reference_path: Path,
-                            bone_names: list[str], root_bone: str) -> NativePhysicsResult:
+                            bone_names: list[str], root_bone: str,
+                            origin_bone: str = "") -> NativePhysicsResult:
     """Write rigidly weighted compound hulls without inventing source joints.
 
     Each source part maps through m_boneParents into m_boneNames; bind poses are
@@ -194,7 +198,8 @@ def write_kinematic_physics(phys_path: Path, smd_path: Path, reference_path: Pat
     so explicit constraints would reject otherwise valid bone-follower parts.
     Its zero-limit defaults apply where a compiled parent survives. This is a
     kinematic prop, not a usable ragdoll. The caller supplies a Source-inch
-    native reference and retains its bones.
+    native reference and retains its bones. Parts bound to the model origin
+    follow `origin_bone`, normally the skeleton root.
     """
     phys_path, smd_path, reference_path = map(Path, (phys_path, smd_path, reference_path))
     header, parents = _reference_header(reference_path, bone_names)
@@ -202,7 +207,7 @@ def write_kinematic_physics(phys_path: Path, smd_path: Path, reference_path: Pat
     if len(documents) != 1:
         raise NativePhysicsError('Expected one Source 2 PHYS aggregate')
     document = documents[0]
-    parts = _source_parts(document, bone_names, root_bone)
+    parts = _source_parts(document, bone_names, root_bone, origin_bone)
     physical_bones = {joint for _, _, joint, _, _ in parts}
     ancestors = {joint: _physical_ancestor(joint, parents, physical_bones)
                  for joint in physical_bones}
