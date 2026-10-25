@@ -19,7 +19,11 @@ public sealed record ToolDefinition(
     string Name,
     string Category,
     string Description,
-    IReadOnlyList<ToolParameter> Parameters);
+    IReadOnlyList<ToolParameter> Parameters)
+{
+    /// <summary>Controls the generated sidebar form without affecting CLI or MCP discovery.</summary>
+    public bool ShowInDesktop { get; init; } = true;
+}
 
 /// <summary>Runs through the shared queue in both the desktop app and command line.</summary>
 public interface ITool

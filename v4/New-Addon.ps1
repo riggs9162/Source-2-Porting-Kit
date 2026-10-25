@@ -3,7 +3,9 @@ param(
     [ValidatePattern('^[a-z][a-z0-9-]{0,63}$')]
     [string]$Id,
     [Parameter(Mandatory = $true)]
-    [string]$Name
+    [string]$Name,
+    [ValidateSet('Materials', 'Models', 'Sounds')]
+    [string]$Category = 'Materials'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -48,7 +50,7 @@ public sealed class Addon : IAddon
 
 public sealed class AddonTool : ITool
 {
-    public ToolDefinition Definition { get; } = new("New add-on tool", "Custom", "Edit this tool to add your processing workflow.", []);
+    public ToolDefinition Definition { get; } = new("New add-on tool", "__CATEGORY__", "Edit this tool to add your processing workflow.", []);
 
     public Task<ToolResult> RunAsync(ToolContext context, ToolArguments arguments, CancellationToken cancellationToken)
     {
@@ -61,5 +63,5 @@ public sealed class AddonTool : ITool
 New-Item -ItemType Directory -Path $directory | Out-Null
 [IO.File]::WriteAllText((Join-Path $directory 'addon.json'), ($manifest | ConvertTo-Json -Depth 5))
 [IO.File]::WriteAllText((Join-Path $directory "$className.csproj"), $project.Replace('__CLASS__', $className))
-[IO.File]::WriteAllText((Join-Path $directory 'Addon.cs'), $source.Replace('__CLASS__', $className))
+[IO.File]::WriteAllText((Join-Path $directory 'Addon.cs'), $source.Replace('__CLASS__', $className).Replace('__CATEGORY__', $Category))
 Write-Host "Created $directory. Run Build.ps1 and restart V4 to load it."

@@ -19,17 +19,15 @@ internal sealed class OverviewPage : UserControl
         var heading = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false };
         title = KitStyle.Label(KitStyle.Appearance.WorkspaceName, 24, true);
         heading.Controls.Add(title);
-        heading.Controls.Add(KitStyle.Label("Bring Source 2 assets into Source 1. Start with an archive, a resource, or a project."));
+        heading.Controls.Add(KitStyle.Label("Edit material trim sheets and hotspot rectangle maps."));
         layout.Controls.Add(heading);
         var work = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = Padding.Empty };
         work.ColumnStyles.Add(new(SizeType.Percent, 63));
         work.ColumnStyles.Add(new(SizeType.Percent, 37));
-        var actions = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4, Margin = new(0, 0, 20, 0) };
+        var actions = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, Margin = new(0, 0, 20, 0) };
         actions.RowStyles.Add(new(SizeType.Absolute, 40));
-        actions.RowStyles.Add(new(SizeType.Percent, 33.33F));
-        actions.RowStyles.Add(new(SizeType.Percent, 33.33F));
-        actions.RowStyles.Add(new(SizeType.Percent, 33.34F));
-        actions.Controls.Add(SectionLabel("START A PORT"));
+        actions.RowStyles.Add(new(SizeType.Absolute, 104));
+        actions.Controls.Add(SectionLabel("MATERIALS"));
         var pages = host.Contributions.GetAll<IDesktopPage>();
         var tools = host.Contributions.GetAll<ITool>();
         void Action(string id, string text, string detail, string number)
@@ -40,9 +38,7 @@ internal sealed class OverviewPage : UserControl
             button.Click += (_, _) => navigate(id);
             actions.Controls.Add(button);
         }
-        Action("asset-browser/browser", "Browse your assets", "Explore folders and VPK archives", "01");
-        Action("vrf/export", "Extract selected resources", "Prepare models, materials, and audio", "02");
-        Action("vrf/inspect", "Inspect a resource", "Read dependencies and compiled data", "03");
+        Action("hotspot/editor", "Hotspot editor", "Edit trim sheets and rectangle maps", "01");
         work.Controls.Add(actions);
         var projects = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown,
             WrapContents = false, Padding = new(18, 0, 0, 0) };

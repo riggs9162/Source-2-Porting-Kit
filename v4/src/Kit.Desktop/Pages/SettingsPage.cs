@@ -5,7 +5,6 @@ namespace PortingKit.Desktop;
 internal sealed class SettingsPage : UserControl
 {
     private readonly KitHost host;
-    private readonly Dictionary<string, TextBox> paths = [];
     private readonly NumericUpDown workers = new() { Minimum = 1, Maximum = 4, Width = 180 };
     private readonly NumericUpDown cache = new() { Minimum = 16, Maximum = 65536, Width = 180, Increment = 128 };
 
@@ -15,23 +14,7 @@ internal sealed class SettingsPage : UserControl
         Padding = new(24);
         AutoScroll = true;
         var layout = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false };
-        layout.Controls.Add(KitStyle.Label("Tool settings", 22, true));
-        layout.Controls.Add(KitStyle.Label("External tools"));
-        foreach (var (key, name) in new[] { ("vrf", "Source2Viewer-CLI"), ("studiomdl", "StudioMDL"), ("ffmpeg", "FFmpeg") })
-        {
-            layout.Controls.Add(KitStyle.Label(name, 10, true));
-            var row = new FlowLayoutPanel { Width = 740, Height = 44 };
-            var field = new TextBox { Width = 610, Text = host.Settings.Get("tools." + key, "") };
-            paths.Add(key, field);
-            row.Controls.Add(field);
-            row.Controls.Add(KitStyle.Button("Browse...", (_, _) =>
-            {
-                using var dialog = new OpenFileDialog { Filter = "Executables|*.exe|All files|*.*", CheckFileExists = true };
-                if (dialog.ShowDialog(this) == DialogResult.OK)
-                    field.Text = dialog.FileName;
-            }));
-            layout.Controls.Add(row);
-        }
+        layout.Controls.Add(KitStyle.Label("Settings", 22, true));
         var options = host.Settings.Get("runtime", host.Options);
         workers.Value = options.Workers;
         cache.Value = options.DiskCacheMegabytes;
@@ -62,8 +45,6 @@ internal sealed class SettingsPage : UserControl
     {
         try
         {
-            foreach (var (key, field) in paths)
-                await host.Settings.SetAsync("tools." + key, field.Text.Trim().Trim('"'));
             await host.Settings.SetAsync("runtime", new HostOptions((int)workers.Value, (int)cache.Value).Validate());
             MessageBox.Show(this, "Settings saved.", AppIdentity.Name);
         }

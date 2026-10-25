@@ -7,24 +7,24 @@ public sealed class HotspotTool(string operation) : ITool
     private static ToolParameter Input => new("input", "Rectangle or document file", ParameterKind.File, Required: true, Description: ".rect or editable .json document.");
     private static ToolParameter Width => new("width", "Texture width", ParameterKind.Integer, "1024", Minimum: 1, Maximum: 65535, Description: "Original texture pixels; used for .rect inputs.");
     private static ToolParameter Height => new("height", "Texture height", ParameterKind.Integer, "1024", Minimum: 1, Maximum: 65535, Description: "Original texture pixels; used for .rect inputs.");
-    public ToolDefinition Definition { get; } = Define(operation);
+    public ToolDefinition Definition { get; } = Define(operation) with { ShowInDesktop = false };
 
     private static ToolDefinition Define(string operation) => operation switch
     {
-        "inspect" => new("Inspect hotspot sheet", "Hotspots", "Reads either .rect dialect or editable JSON; reports validation, coverage, and approximate fit rankings.",
+        "inspect" => new("Inspect hotspot sheet", "Materials", "Reads either .rect dialect or editable JSON; reports validation, coverage, and approximate fit rankings.",
             [Input, Width, Height, new("face_width", "Preview face width", ParameterKind.Integer, "128", Minimum: 1, Maximum: 65535),
                 new("face_height", "Preview face height", ParameterKind.Integer, "128", Minimum: 1, Maximum: 65535), new("include_alt", "Include alternate rectangles", ParameterKind.Boolean, "false")]),
-        "generate" => new("Generate hotspot layout", "Hotspots", "Creates an editable JSON sheet and Hammer++ .rect in job outputs.",
+        "generate" => new("Generate hotspot layout", "Materials", "Creates an editable JSON sheet and Hammer++ .rect in job outputs.",
             [Width, Height, new("layout", "Layout", ParameterKind.Choice, "grid", Choices: ["grid", "trim-124", "trim-1248", "columns-24"]),
                 new("columns", "Columns", ParameterKind.Integer, "2", Minimum: 1, Maximum: 64), new("rows", "Rows", ParameterKind.Integer, "2", Minimum: 1, Maximum: 64)]),
-        "convert" => new("Write hotspot sheet", "Hotspots", "Writes validated .rect or JSON. Edit the JSON rectangles to create or modify a sheet from an agent. An explicit output path is backed up before replacement.",
+        "convert" => new("Write hotspot sheet", "Materials", "Writes validated .rect or JSON. Edit the JSON rectangles to create or modify a sheet from an agent. An explicit output path is backed up before replacement.",
             [Input, Width, Height, new("format", "Output format", ParameterKind.Choice, "hammerpp", Choices: ["hammerpp", "source2", "json"]),
                 new("flags", "Write Strata flags", ParameterKind.Boolean, "true"), new("repair_scale", "Fix oversized pixel regions", ParameterKind.Boolean, "false", Description: "Only repairs an exact 2x/4x/8x/16x mismatch to the supplied texture size."),
                 new("output", "Output file", ParameterKind.Text, Description: "Leave empty for the job's artifact folder.")]),
-        "detect" => new("Detect hotspot regions", "Hotspots", "Detects alpha islands or flat seams on a bounded native texture preview. Coordinates use the original dimensions; review the generated sheet before use.",
+        "detect" => new("Detect hotspot regions", "Materials", "Detects alpha islands or flat seams on a bounded native texture preview. Coordinates use the original dimensions; review the generated sheet before use.",
             [new("texture", "Texture or material VMT", ParameterKind.File, Required: true, Description: "VMT inputs resolve their base texture automatically."), new("minimum", "Minimum region pixels", ParameterKind.Integer, "16", Minimum: 1, Maximum: 4096),
                 new("snap", "Snap grid (0 disables)", ParameterKind.Integer, "0", Minimum: 0, Maximum: 1024)]),
-        "link-material" => new("Link hotspot material", "Hotspots", "Updates only the VMT's rectangle-map reference after validating the Hammer++ sheet against its base texture. Backs up the VMT.",
+        "link-material" => new("Link hotspot material", "Materials", "Updates only the VMT's rectangle-map reference after validating the Hammer++ sheet against its base texture. Backs up the VMT.",
             [new("material", "Material VMT", ParameterKind.File, Required: true), new("rect", "Hammer++ rectangle map", ParameterKind.File, Required: true)]),
         _ => throw new ArgumentException("Unknown hotspot operation.")
     };

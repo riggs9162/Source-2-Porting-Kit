@@ -72,15 +72,18 @@ internal sealed class MainWindow : Form
             }
             return node;
         }
+        foreach (var name in new[] { "Materials", "Models", "Sounds" })
+            Category(name);
         foreach (var page in host.Contributions.GetAll<IDesktopPage>().OrderBy(page => page.Value.Name))
             AddNavigation(page.Id, page.Value.Name, () => page.Value.Create(new(host, SelectPage)), Category(page.Value.Category));
-        foreach (var tool in host.Contributions.GetAll<ITool>().OrderBy(tool => tool.Value.Definition.Category).ThenBy(tool => tool.Value.Definition.Name))
+        foreach (var tool in host.Contributions.GetAll<ITool>().Where(tool => tool.Value.Definition.ShowInDesktop)
+            .OrderBy(tool => tool.Value.Definition.Category).ThenBy(tool => tool.Value.Definition.Name))
             AddNavigation(tool.Id, tool.Value.Definition.Name, () => new ToolPage(host, tool, () => SelectPage("jobs")),
                 Category(tool.Value.Definition.Category));
         var application = Category("Application");
         AddNavigation("addons", "Add-ons", () => new AddonsPage(host), application);
         AddNavigation("appearance", "Appearance", () => new AppearancePage(host), application);
-        AddNavigation("settings", "Tool settings", () => new SettingsPage(host), application);
+        AddNavigation("settings", "Settings", () => new SettingsPage(host), application);
         navigation.AfterSelect += (_, e) =>
         {
             if (e.Node?.Tag is Func<Control> create)

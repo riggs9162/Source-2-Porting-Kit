@@ -52,14 +52,14 @@ internal static class CliApplication
                 Print(await client.InvokeAsync("operations"));
                 return 0;
             }
-            if (command is "run" or "submit" or "validate" or "doctor")
+            if (command is "run" or "submit" or "validate")
             {
-                var tool = command == "doctor" ? "utilities/environment" : Shift(tokens);
+                var tool = Shift(tokens);
                 var arguments = tokens.Count > 0 && tokens[0] is "--json" or "--json-file"
                     ? await JsonInputAsync(tokens) : AgentProtocol.Element(ReadPairs(tokens));
                 var operation = command == "validate" ? "tools.validate" : "jobs.submit";
                 var result = await client.InvokeAsync(operation, new { tool_id = tool, arguments });
-                if (command is "run" or "doctor") return await RunJobAsync(client, result);
+                if (command == "run") return await RunJobAsync(client, result);
                 Print(result);
                 return 0;
             }
@@ -235,7 +235,6 @@ internal static class CliApplication
         validate TOOL [--key value ... | --json OBJECT | --json-file FILE]
         run TOOL [arguments]                 Wait for a result; Ctrl+C cancels the job
         submit TOOL [arguments]              Return a job ID; keep running in the backend
-        doctor                              Run the environment check
         jobs [list|get ID|wait ID|cancel ID] [--count N|--offset N|--wait-seconds N]
         logs [--job-id ID] [--count N]
         artifacts list ID [--path RELATIVE] | artifacts read ID --path RELATIVE [--utf8 true]

@@ -20,6 +20,10 @@ The previous V4 layout used a full-width wordmark, a plain tree, and a startup-l
 table. This version moves identity into the tool rail, uses clearer navigation
 groups, places workspace commands in a narrow toolbar, and starts on actionable
 tasks, project access, and recent results. Logs remain available with jobs.
+Tool groups are Materials, Models, and Sounds, in that order. Hotspot editor is
+the only current tool, under Materials. Empty groups remain visible; Particles
+can be added when particle tools are implemented. Editor support operations stay
+available to agents without extra sidebar forms.
 
 ## Palette and type
 
@@ -35,8 +39,8 @@ surface separation. Borders are thin and structural. Keep corners square.
 ## Interaction
 
 Use flat task rows, conventional forms, and tables for real tabular data. Keep
-the asset list dense and readable. Preserve native keyboard focus and accessible
-control names. Primary buttons indicate the next meaningful action. Appearance
+the hotspot rectangle list dense and readable. Preserve native keyboard focus
+and accessible control names. Primary buttons indicate the next meaningful action. Appearance
 changes update controls in place and persist locally.
 
 Avoid decorative gradients, glass, large background imagery, oversized headings,
@@ -46,7 +50,7 @@ use; appearance features do not create hidden preview sessions.
 
 ## Validation
 
-Inspect the rendered workshop, personalization form, generated tool forms, and
-asset browser. Check dark and light palettes, custom accents, larger text, compact
+Inspect the rendered workshop, personalization form, and Hotspot editor.
+Check dark and light palettes, custom accents, larger text, compact
 spacing, keyboard navigation, and persistence across launch. Local checks cover
 palette contrast, normalization, settings round trips, and repeated style passes.

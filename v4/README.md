@@ -5,10 +5,10 @@
 Source Backport is the V4 Windows desktop application built with C# and .NET 10. It has its own
 backend and directory-based add-ons. It does not load the Python applications.
 
-This first milestone provides the architecture, desktop shell, and working
-utility/asset tools. The native VRF map/model renderer, soundscape editor,
-material pipelines, and model/ragdoll conversion pipelines are not implemented
-in V4 yet. Those features belong in add-ons built on this foundation.
+V4 currently includes the Hotspot editor. The sidebar groups tools under
+**Materials**, **Models**, and **Sounds**. Hotspot editor is the only tool under
+Materials; Models and Sounds are empty until their tools are implemented.
+Particles may become a category when particle tools are added.
 
 ## Run
 
@@ -25,24 +25,18 @@ remain usable. Running `Build.ps1` directly stops at the first build error.
 
 The desktop, CLI, backend, and included add-ons use the libraries shipped with
 the .NET SDK. The optional MCP entry point uses the pinned official C# MCP SDK.
-Native asset export requires the
-separate Source2Viewer-CLI executable. Configure it in Tool settings or supply a tool
-override. StudioMDL and FFmpeg paths are also available for future add-ons.
 
 ## Included add-ons
 
 | Folder | Contributions |
 | --- | --- |
-| `addons/asset-browser/` | Native asset browser, folder and VPK providers, paged listing tool |
-| `addons/utilities/` | Environment report and streaming file inventory with optional SHA-256 |
-| `addons/vrf/` | Cancellable VRF export and resource-block inspection |
 | `addons/hotspot/` | Native hotspot editor, bounded VTF/image previews, Source 2/Hammer++ rectangle conversion, detection, and VMT linking |
 
 Open **Materials > Hotspot editor** to edit trim-sheet regions. It supports drawing,
 resizing, multi-selection, exact coordinates, undo/redo, grid personalization,
 layout presets, region detection, fit previews, and recovery drafts. Its processing
-operations are also available through the CLI and MCP. See the
-[hotspot guide](addons/hotspot/README.md) for formats, shortcuts, and agent examples.
+operations are available through the CLI and MCP without separate sidebar forms.
+See the [hotspot guide](addons/hotspot/README.md) for formats, shortcuts, and agent examples.
 
 ## Personalize your workshop
 
@@ -61,25 +55,12 @@ add-on IDs retain their V4 names for compatibility with existing scripts.
 The [visual rules](DESIGN.md) describe the identity; the [add-on guide](ADDONS.md)
 documents the shared styling API.
 
-The browser reads VPK v1/v2 directory metadata without retaining the entire index
-or decoding textures, audio, or geometry. It supports embedded and split-archive
-asset streams. Each page holds at most 100 rows. Large searches may scan the
-directory again; this deliberately trades repeated metadata reads for bounded
-retained memory. CRC/signature verification and nested VPK browsing are not
-provided by this initial provider.
-
-VRF exports require a path filter for VPK inputs, preventing an accidental
-whole-game export. Each export gets a new job output folder. This is a direct
-VRF export, not the complete V3 source-layout/material/physics pipeline.
-
 ## Architecture
 
 ```text
 v4/
   addons/                   # Independently built, automatically discovered folders
-    asset-browser/          # Manifest, project, providers, UI, tool, and documentation
-    utilities/
-    vrf/
+    hotspot/                # Editor, formats, texture previews, and agent operations
   src/
     Kit.Contracts/          # UI-independent add-on, tool, asset, and service APIs
     Kit.Core/               # Loader, jobs, hooks, settings, workspaces, cache, processes
@@ -117,10 +98,8 @@ under extreme logging pressure. The disk preview cache has a configurable budget
 and lease-based eviction: active files remain pinned until their consumers
 dispose the lease. This disk budget is not a cap on total application RAM/VRAM.
 
-Asset references are small provider/container/path records. Asset providers open
-streams on demand. `IPreviewSession` defines disposable ownership for future
-viewer resources. Native renderer integration and its map/texture memory budget
-still need their own measured prototype.
+The host retains asset-provider and preview-session contracts for future add-ons.
+No asset browser, asset providers, VRF export, or utility tools are included.
 
 ## Agent access: MCP and CLI
 
@@ -133,11 +112,9 @@ automatically in both interfaces.
 $cli = '.\src\Kit.Cli\bin\Release\net10.0-windows\s2kit.exe'
 & $cli list
 & $cli addons
-& $cli describe utilities/inventory
-& $cli doctor
-& $cli run utilities/inventory --directory 'A:\My assets' --hash true
+& $cli describe hotspot/generate
+& $cli run hotspot/generate --width 1024 --height 512 --layout trim-124
 & $cli jobs
-& $cli assets providers
 & $cli operations
 ```
 
@@ -157,5 +134,6 @@ are not created by headless access. `Backport.cmd` and `Mcp.cmd` are launchers.
 ```
 
 Edit the generated folder and restart V4. No central project or sidebar registry
-needs editing. See [ADDONS.md](ADDONS.md) for the contract, lifecycle, hooks,
+needs editing. Use Materials, Models, or Sounds for its tool category. See
+[ADDONS.md](ADDONS.md) for the contract, lifecycle, hooks,
 dependency rules, native workspaces, and deployment layout.

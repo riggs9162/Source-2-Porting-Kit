@@ -81,12 +81,14 @@ Image loads and detection run off the UI thread; dragging only repaints overlays
 Maximum original image area is 64 million pixels; maximum document dimension is
 65535 and maximum rectangle count is 4096. Input text is limited to 4 MiB. Other
 VTF variants and compiled Source 2 textures should be exported to PNG first using
-the VRF export add-on. This editor does not modify VTF image/resource data.
+an external tool such as Source 2 Viewer. This editor does not modify VTF
+image/resource data.
 
 ## CLI and MCP
 
 Every operation below is also discovered as a typed MCP tool. Use absolute paths.
 The same format, validation, texture, and detection code backs the desktop.
+These supporting operations do not appear as separate sidebar tools.
 
 ```powershell
 .\v4\Backport.cmd describe hotspot/inspect

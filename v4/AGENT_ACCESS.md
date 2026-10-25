@@ -13,7 +13,7 @@ From the repository root:
 & .\v4\Build.ps1 -AgentsOnly
 & .\v4\Backport.cmd status
 & .\v4\Backport.cmd list
-& .\v4\Backport.cmd describe vrf/export
+& .\v4\Backport.cmd describe hotspot/generate
 ```
 
 The wrappers build missing executables on first use. Rebuild after editing source;
@@ -62,17 +62,17 @@ their declared defaults and supplied inputs, without inheriting saved GUI drafts
 ## CLI workflow
 
 ```powershell
-& .\v4\Backport.cmd validate asset-browser/list --container 'C:\Game\pak01_dir.vpk' --count 20
-& .\v4\Backport.cmd submit asset-browser/list --container 'C:\Game\pak01_dir.vpk' --count 20
+& .\v4\Backport.cmd validate hotspot/generate --width 1024 --height 512 --layout trim-124
+& .\v4\Backport.cmd submit hotspot/generate --width 1024 --height 512 --layout trim-124
 & .\v4\Backport.cmd jobs get JOB_UUID
 & .\v4\Backport.cmd jobs wait JOB_UUID --wait-seconds 30
 & .\v4\Backport.cmd logs --job-id JOB_UUID --count 50
 & .\v4\Backport.cmd artifacts list JOB_UUID
-& .\v4\Backport.cmd artifacts read JOB_UUID --path assets.json --utf8 true
+& .\v4\Backport.cmd artifacts read JOB_UUID --path sheet.json --utf8 true
 ```
 
 Replace `JOB_UUID` with the actual returned ID. `run TOOL` is a submit-and-wait
-shortcut. `doctor` runs the included environment report. A completed job includes
+shortcut. A completed job includes
 its summary, result data, artifact references, and any failure message.
 
 Every successful response is JSON on stdout. Errors are `{ "error": { "code",
@@ -88,18 +88,20 @@ quoting issues, especially for nested objects or settings:
 
 ```powershell
 & .\v4\Backport.cmd call settings.set --json-file request.json
-& .\v4\Backport.cmd run utilities/inventory --json-file inputs.json
-Get-Content -Raw inputs.json | & .\v4\Backport.cmd validate utilities/inventory --json-file -
+& .\v4\Backport.cmd run hotspot/generate --json-file inputs.json
+Get-Content -Raw inputs.json | & .\v4\Backport.cmd validate hotspot/generate --json-file -
 ```
 
 For example, a `settings.set` request can contain:
 
 ```json
-{ "key": "tools.vrf", "value": "C:\\Tools\\VRF\\Source2Viewer-CLI.exe" }
+{ "key": "runtime", "value": { "workers": 1, "diskCacheMegabytes": 512 } }
 ```
 
-Host-writable settings are `tools.vrf`, `tools.studiomdl`, `tools.ffmpeg`, `runtime`,
-and `appearance`. Use `addon_id` to read or write a loaded add-on's own settings.
+Use `runtime` and `appearance` for host settings. The host also reserves
+`tools.vrf`, `tools.studiomdl`, and `tools.ffmpeg` for future add-ons; the current
+Hotspot editor does not use external executables. Use `addon_id` to read or write
+a loaded add-on's own settings.
 These calls use the same in-memory store as that add-on. Add-on settings may be
 read only when a page opens or at startup; the response conservatively marks them
 as requiring a restart. Runtime concurrency/cache budgets also require restart.
@@ -109,6 +111,10 @@ same defaults as the desktop; supply the full record when preserving every choic
 Other commands include `addons enable|disable ID`, `workspace create|open DIR`,
 `workspace get`, `assets providers|list|read`, and `cache stats|clear`. Run `help`
 for shortcuts, or inspect `operations` for precise fields and limits.
+Only the Hotspot editor add-on is included. Its five supporting operations remain
+available through CLI/MCP but have no separate desktop sidebar forms. The host
+retains asset-provider operations for future add-ons; `assets providers` is empty
+in the current distribution.
 
 ## MCP connection
 
@@ -145,10 +151,9 @@ Jobs use the existing bounded queue, cancellation, process-tree cleanup, durable
 history, and output folders. Backend requests have a 45-second execution deadline;
 use jobs for longer work. Up to eight local requests execute concurrently.
 
-Folder/VPK lists hold at most 200 entries per page. Reads return at most 64 KiB,
+Asset-provider lists hold at most 200 entries per page. Reads return at most 64 KiB,
 with `nextOffset` and `hasMore` for subsequent chunks. Base64 is authoritative;
-optional UTF-8 text can split a multibyte character at a chunk boundary. VPK reads
-seek through preload and archive segments without loading the entire asset.
+optional UTF-8 text can split a multibyte character at a chunk boundary.
 Artifact paths are relative to that job's output folder and reject traversal,
 links, and alternate stream names. File reads do not open editors or decode assets.
 Responses larger than 4 MB return `response_too_large`; request a smaller page or

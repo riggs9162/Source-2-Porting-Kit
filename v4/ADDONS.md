@@ -4,6 +4,9 @@ An add-on owns one directory under `v4/addons/`. Keep its manifest, C# project,
 UI, processing logic, parsers, assets, and documentation inside that directory.
 Only code shared by unrelated add-ons belongs in the host or SDK.
 
+`New-Addon.ps1 -Id my-converter -Name 'My converter' -Category Models` creates a
+starter in the requested category. The default category is Materials.
+
 The model follows Helix's directory discovery, metadata, local state, hooks,
 registration, and lifecycle. It uses explicit C# contracts instead of Lua globals
 or filename realms. Add-ons are trusted local code with the application's full
@@ -107,6 +110,13 @@ before entering the queue. Unknown keys are rejected. Integer ranges, booleans,
 required values, and choices are enforced centrally. Filesystem and format-specific
 validation belongs to the tool.
 
+Use **Materials**, **Models**, or **Sounds** as the tool or desktop-page category.
+These groups remain visible even when empty. Add Particles when particle tools
+are implemented. For operations already covered by a custom editor, set
+`ToolDefinition.ShowInDesktop` to `false` to omit their generated sidebar forms.
+They remain discoverable and runnable through CLI and MCP. The Hotspot editor
+uses this setting for its five supporting operations.
+
 `RunAsync` receives `ToolContext`, normalized `ToolArguments`, and a cancellation
 token. Use `context.Report` for progress and `context.Log` for job output. Write
 durable results to `context.OutputDirectory` or a user-selected project output,
@@ -123,7 +133,7 @@ must not silently launch dozens of converters.
 Use `Kit.DesktopSdk` only when the tool needs a custom workspace. Set the project
 target to `net10.0-windows` and `UseWindowsForms` to true. Reference the contracts
 and desktop SDK with `Private="false"` and set `EnableDynamicLoading` to true.
-The included asset browser is a complete example.
+The included Hotspot editor is a complete example.
 
 Implement `IDesktopPage` and register it through the same context:
 
