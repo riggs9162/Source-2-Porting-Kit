@@ -16,7 +16,7 @@ import numpy as np
 from s2kit.pipelines.dmx_mesh import smd_vertex_line
 from s2kit.pipelines.gltf_accessors import decode_accessor
 from s2kit.pipelines.gltf_animation import SOURCE2_BASIS, derive_bind_pose_local
-from s2kit.pipelines.model_fidelity import load_model_fidelity, resource_token
+from s2kit.pipelines.model_fidelity import addon_material_token, load_model_fidelity, resource_token
 from s2kit.pipelines.porting import check_cancelled
 from s2kit.pipelines.smd_animation_export import SmdAnimationExporter
 
@@ -46,9 +46,10 @@ def _filename(value: str) -> str:
 
 
 def target_material_token(value: str) -> str:
-    """Escape authored material identities that Source 1 otherwise treats as missing geometry."""
+    """Place a material beneath the addon's `models/<namespace>/` folder, escaping identities
+    that Source 1 otherwise treats as missing geometry."""
     token = resource_token(value)
-    return "__s2kit_reserved/" + token if token.casefold() == "debug/debugempty" else token
+    return "__s2kit_reserved/" + token if token.casefold() == "debug/debugempty" else addon_material_token(token)
 
 
 def _map_primitive_materials(primitives: list[dict]) -> None:
@@ -1036,7 +1037,7 @@ def write_appearance(gltf: dict, buffer: bytes, skin, coord, out_dir: Path, *,
         raise ValueError("Compiler-safe material aliases collide with an authored source resource")
     result.report["material_adaptations"] = [dict(source=source, target=target,
         reason="Source 1 discards geometry with this reserved token; original texture and slot preserved")
-        for source, target in result.report["material_map"].items() if source != target]
+        for source, target in result.report["material_map"].items() if target != addon_material_token(source)]
     result.report["lod_material_adaptations"] = [dict(target=target, source=source,
         reason="Choice-local stable LOD0 carrier; identical original VMT bytes and explicit per-LOD/skin replacements")
         for target, source in result.report["material_aliases"].items()]

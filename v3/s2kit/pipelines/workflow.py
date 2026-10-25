@@ -364,7 +364,10 @@ def execute_task(task: Task, options: WorkflowOptions, records: dict,
         return result.files
     if task.kind == "material":
         entry = vmat.VmatParser(texture_root=root).parse(source, root=root)
-        material_path = (Path("models") / options.namespace / entry.rel_dir).as_posix()
+        rel_dir = entry.rel_dir.parts
+        if rel_dir[:1] and rel_dir[0].lower() == "models":
+            rel_dir = rel_dir[1:]
+        material_path = Path("models", options.namespace, *rel_dir).as_posix()
         settings = materials.MaterialOptions(emit_normal=options.emit_normal,
                                               translucent=entry.translucent, alphatest=entry.alphatest,
                                               tintable=entry.tintable)

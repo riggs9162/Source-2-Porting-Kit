@@ -8,7 +8,7 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
-from s2kit.pipelines.model_fidelity import resource_token
+from s2kit.pipelines.model_fidelity import addon_material_token, resource_token
 from s2kit.pipelines.porting import check_cancelled
 
 
@@ -235,14 +235,17 @@ def port_prop(glb_path: Path, out_dir: Path, *, modelname: str, cdmaterials: str
     if unresolved:
         raise ValueError("Materials without an exported VMAT resource: " + ", ".join(unresolved))
     tokens = sorted({resources[name.casefold()] for name in used})
-    material_paths = sorted({_search_path(cdmaterials, token) for token in tokens})
+    targets = {token: addon_material_token(token) for token in tokens}
+    if len(set(targets.values())) != len(targets):
+        raise ValueError("Material resources collide once their models/ root is dropped: " + ", ".join(tokens))
+    material_paths = sorted({_search_path(cdmaterials, target) for target in targets.values()})
     _rewrite_qc(qc, modelname, material_paths, lod_lines, partitioned)
     if fidelity.get("groups"):
         warnings.append("Source bodygroups are combined into one body; every mesh group choice renders together.")
     report = {
         "version": 1, "kind": "prop", "variant": "animated" if animated else "static",
         "source": str(glb_path), "modelname": modelname,
-        "material_map": {token: token for token in tokens},
+        "material_map": targets,
         "material_search_paths": material_paths,
         "skins": [dict(name=skin.name, materials=list(skin.materials)) for skin in model_set.skins],
         "lod_count": len(lod_sources), "physics": physics,

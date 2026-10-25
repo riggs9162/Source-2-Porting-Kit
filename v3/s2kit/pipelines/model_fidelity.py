@@ -32,6 +32,12 @@ def resource_token(value: str) -> str:
     return path.as_posix()
 
 
+def addon_material_token(value: str) -> str:
+    """Drop a material's own `models/` root; the addon's `models/<namespace>/` folder already starts the path."""
+    path = PurePosixPath(resource_token(value))
+    return PurePosixPath(*path.parts[1:]).as_posix() if len(path.parts) > 1 and path.parts[0] == "models" else path.as_posix()
+
+
 def _one_document(text: str, name: str) -> dict:
     """Require one root document for the DATA and CTRL block types."""
     documents = parse_kv3_documents(text)
