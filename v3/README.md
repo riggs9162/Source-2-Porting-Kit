@@ -130,20 +130,38 @@ or a headless CLI.
 
 ## Ported tools
 
-### One-click ragdoll addons
+### One-click model addons
 
-Open **Porting Workflow**, leave **GMod ragdoll addon** selected, and paste
+Open **Porting Workflow**, leave **GMod model addon** selected, and paste
 Source 2 Viewer VPK model URLs one per line. Choose a project folder outside
 the source installation and a lowercase output namespace. Set 32-bit StudioMDL CE and
 its compile game folder here or in Preferences, then press **Port**. These
 settings and the batch inputs are saved.
 
-Exact collision serialization uses the compiler's VPhysics library and a small
+**Model type** defaults to **Detect for each model**, so one batch can mix
+props and characters. A skinned model whose PHYS block joins its bodies with
+joints, or a character with authored AO proxy capsules and no PHYS bodies,
+becomes a ragdoll. Everything else becomes a prop:
+
+| Source | Result |
+| --- | --- |
+| Unskinned mesh | `$staticprop` with the source collision, the authored PHYS mass, skins and authored lower LOD meshes |
+| Skinned mesh | Dynamic prop with the native skeleton, every authored clip, attachments, hitboxes, LODs and bone-following collision |
+
+Choose **Props** or **Ragdolls** to force one path. Props always keep their
+authored animations; an automatic batch exports a skinned prop a second time
+to include them. Prop materials mirror the source resource tree under
+`materials/models/<namespace>/`, and the same compiled-model audit that checks
+ragdolls checks their materials, skins, LODs and triangle coverage. Source
+bodygroups on props are combined into one body, and the prop report says so.
+Playermodel stages are skipped for props.
+
+Exact ragdoll collision serialization uses the compiler's VPhysics library and a small
 local helper built with the Windows .NET Framework C# compiler. Enable .NET
 Framework 4.8 if that compiler is unavailable. The completed GMod addon contains
 the finalized collision data and needs neither helper nor compiler at runtime.
 
-The default produces native ragdolls. **Include original Alyx animations**,
+Ragdolls are native by default. **Include original Alyx animations on ragdolls**,
 **Also create humanoid playermodels**, and **Install completed addon into GMod**
 are independent options, initially off. The player option builds a separate
 `_pm` companion with the source character's dimensions, a complete retargeted

@@ -50,11 +50,13 @@ Exit codes are **0** success, **1** failed or partial execution, **2** invalid
 input or unavailable dependencies, and **130** cancellation. Ctrl+C or `jobs
 cancel` cooperatively stops a CLI run and retains completed workflow stages.
 
-This example `port.json` builds a ragdoll addon with installation off:
+This example `port.json` builds a model addon with installation off. `model_type`
+is `auto` (the default), `prop` or `ragdoll`:
 
 ```json
 {
   "model_mode": "ragdoll",
+  "model_type": "auto",
   "input_kind": "urls",
   "source_urls": "vpk:S:/SteamLibrary/steamapps/common/Half-Life Alyx/game/hlvr/pak01_dir.vpk:models/creatures/headcrab_classic/headcrab_classic.vmdl_c",
   "project": "A:/ports/headcrab",
