@@ -26,7 +26,8 @@ public sealed record ProcessRequest(
     string Executable,
     IReadOnlyList<string> Arguments,
     string? WorkingDirectory = null,
-    TimeSpan? Timeout = null);
+    TimeSpan? Timeout = null,
+    IReadOnlyList<string>? UnsetEnvironment = null);
 
 public sealed record ProcessLine(bool IsError, string Text);
 public sealed record ProcessResult(int ExitCode, TimeSpan Duration, IReadOnlyList<string> Tail);

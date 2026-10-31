@@ -22,6 +22,8 @@ public sealed class ProcessRunner : IProcessRunner
         };
         foreach (var argument in request.Arguments)
             process.StartInfo.ArgumentList.Add(argument);
+        foreach (var name in request.UnsetEnvironment ?? [])
+            process.StartInfo.Environment.Remove(name);
         var tail = new Queue<string>();
         var gate = new object();
         Exception? outputError = null;
