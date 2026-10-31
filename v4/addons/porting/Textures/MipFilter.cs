@@ -15,7 +15,7 @@ public static class MipFilter
     private const float Inverse255 = 3.9215689e-03f;
     private const float Small = 1f / (1 << 20) / (1 << 20) / (1 << 20) / (1 << 20) / (1 << 20) / (1 << 20);
 
-    private enum Kernel { Point, Mitchell, CatmullRom }
+    private enum Kernel { Mitchell, CatmullRom }
 
     private sealed record Axis(int[] First, int[] Count, float[] Weights, int Stride);
 
@@ -28,28 +28,10 @@ public static class MipFilter
         var options = new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, threads) };
         var output = new byte[outWidth * outHeight * 4];
         var rowLength = inWidth * Working;
-        var decoded = new float[inHeight * rowLength];
-        Parallel.For(0, inHeight, options, y =>
+        Parallel.For(0, outHeight, options, () => new Worker(vertical.Stride, rowLength, outWidth), (y, _, worker) =>
         {
-            var input = y * inWidth * 4;
-            var row = y * rowLength;
-            for (var x = 0; x < inWidth; x++)
-            {
-                var from = input + x * 4;
-                var to = row + x * Working;
-                var alpha = rgba[from + 3] * Inverse255;
-                decoded[to] = rgba[from] * Inverse255;
-                decoded[to + 1] = rgba[from + 1] * Inverse255;
-                decoded[to + 2] = rgba[from + 2] * Inverse255;
-                decoded[to + 3] = alpha;
-                decoded[to + 4] = decoded[to] * alpha;
-                decoded[to + 5] = decoded[to + 1] * alpha;
-                decoded[to + 6] = decoded[to + 2] * alpha;
-            }
-        });
-        Parallel.For(0, outHeight, options, () => (new float[rowLength], new float[outWidth * Working]), (y, _, buffers) =>
-        {
-            var (gathered, line) = buffers;
+            var gathered = worker.Gathered;
+            var line = worker.Line;
             var first = vertical.First[y];
             var count = vertical.Count[y];
             var weights = y * vertical.Stride;
@@ -57,10 +39,9 @@ public static class MipFilter
             for (var k = 0; k < count; k++)
             {
                 var weight = vertical.Weights[weights + k];
-                var source = (first + k) * rowLength;
-                for (var i = 0; i < rowLength; i++) gathered[i] += weight * decoded[source + i];
+                var source = worker.Row(rgba, first + k, inWidth);
+                for (var i = 0; i < rowLength; i++) gathered[i] += weight * source[i];
             }
-            Array.Clear(line);
             for (var x = 0; x < outWidth; x++)
             {
                 var start = horizontal.First[x];
@@ -99,9 +80,41 @@ public static class MipFilter
                 }
                 output[pixel + x * 4 + 3] = Encode(alpha);
             }
-            return buffers;
+            return worker;
         }, _ => { });
         return output;
+    }
+
+    /// <summary>One thread's buffers: the few decoded source rows its current output row needs, which keeps a 4K level out of memory as floats.</summary>
+    private sealed class Worker(int rows, int rowLength, int outWidth)
+    {
+        private readonly float[][] decoded = Enumerable.Range(0, rows).Select(_ => new float[rowLength]).ToArray();
+        private readonly int[] held = Enumerable.Repeat(-1, rows).ToArray();
+        public float[] Gathered { get; } = new float[rowLength];
+        public float[] Line { get; } = new float[outWidth * Working];
+
+        public float[] Row(byte[] rgba, int y, int width)
+        {
+            var slot = y % held.Length;
+            var row = decoded[slot];
+            if (held[slot] == y) return row;
+            held[slot] = y;
+            var input = y * width * 4;
+            for (var x = 0; x < width; x++)
+            {
+                var from = input + x * 4;
+                var to = x * Working;
+                var alpha = rgba[from + 3] * Inverse255;
+                row[to] = rgba[from] * Inverse255;
+                row[to + 1] = rgba[from + 1] * Inverse255;
+                row[to + 2] = rgba[from + 2] * Inverse255;
+                row[to + 3] = alpha;
+                row[to + 4] = row[to] * alpha;
+                row[to + 5] = row[to + 1] * alpha;
+                row[to + 6] = row[to + 2] * alpha;
+            }
+            return row;
+        }
     }
 
     private static byte Encode(float value)
