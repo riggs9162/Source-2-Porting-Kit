@@ -59,12 +59,16 @@ public static class Json
             _ => fallback
         };
 
+    /// <summary>Reads any numeric value, including one built in memory from an integer, which a typed read refuses.</summary>
+    private static double Number(JsonValue value) =>
+        value.TryGetValue<double>(out var number) ? number : double.Parse(value.ToJsonString(), NumberStyles.Float, CultureInfo.InvariantCulture);
+
     public static double Dbl(this JsonNode? node, double fallback = 0.0)
     {
         if (node is not JsonValue value) return fallback;
         switch (value.GetValueKind())
         {
-            case JsonValueKind.Number: return value.GetValue<double>();
+            case JsonValueKind.Number: return Number(value);
             case JsonValueKind.True: return 1.0;
             case JsonValueKind.False: return 0.0;
             case JsonValueKind.String:
@@ -83,6 +87,7 @@ public static class Json
         if (node is not JsonValue value) return fallback;
         if (value.TryGetValue<long>(out var signed)) return signed;
         if (value.TryGetValue<ulong>(out var unsigned)) return unchecked((long)unsigned);
+        if (value.GetValueKind() == JsonValueKind.Number && long.TryParse(value.ToJsonString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed)) return parsed;
         return (long)value.Dbl(fallback);
     }
 
@@ -98,7 +103,7 @@ public static class Json
         {
             JsonValueKind.True => true,
             JsonValueKind.False => false,
-            JsonValueKind.Number => value.GetValue<double>() != 0,
+            JsonValueKind.Number => Number(value) != 0,
             JsonValueKind.String => value.GetValue<string>().Length > 0,
             _ => false
         },
