@@ -59,13 +59,17 @@ public static class Json
             _ => fallback
         };
 
+    /// <summary>Reads any number as a double. A KV3 whole number is held as an integer, and asking one for a double
+    /// directly throws, so the text form is the path that works for every numeric type.</summary>
+    private static double Number(JsonValue value) =>
+        value.TryGetValue<double>(out var number) ? number : double.Parse(value.ToJsonString(), CultureInfo.InvariantCulture);
+
     public static double Dbl(this JsonNode? node, double fallback = 0.0)
     {
         if (node is not JsonValue value) return fallback;
         switch (value.GetValueKind())
         {
-            case JsonValueKind.Number:
-                return value.TryGetValue<double>(out var real) ? real : double.Parse(value.ToJsonString(), NumberStyles.Float, CultureInfo.InvariantCulture);
+            case JsonValueKind.Number: return Number(value);
             case JsonValueKind.True: return 1.0;
             case JsonValueKind.False: return 0.0;
             case JsonValueKind.String:
@@ -99,7 +103,7 @@ public static class Json
         {
             JsonValueKind.True => true,
             JsonValueKind.False => false,
-            JsonValueKind.Number => value.Dbl() != 0,
+            JsonValueKind.Number => Number(value) != 0,
             JsonValueKind.String => value.GetValue<string>().Length > 0,
             _ => false
         },
