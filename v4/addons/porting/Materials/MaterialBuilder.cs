@@ -109,6 +109,15 @@ public sealed class MaterialOptions
     public string PhongTintMode { get; set; } = "selective";
     public double ColoredMetalRelief { get; set; } = MaterialDefaults.ColoredMetalRelief;
 
+    /// <summary>The longest edge Hammer and vbsp should believe a brush texture has. Zero uses its real size.</summary>
+    /// <remarks>A brush face stores its scale and shifts in texture pixels, and both tools take a material's size from its preview image
+    /// rather than the texture the game draws, so a larger texture stretches everything in Hammer and in every new compile. A
+    /// compiled map stores the size it was built with, which is why old maps survive a texture upgrade until they are recompiled.
+    /// %tooltexture points the preview at a texture of the original size. It starts with % so the game never reads it, and vbsp then
+    /// records that size in the BSP while the game draws the full resolution. $basetexturetransform looks like the answer and is not:
+    /// it also multiplies the UVs of maps already compiled, shrinking every texture in them.</remarks>
+    public int ToolSize { get; set; }
+
     /// <summary>Ship a normal map at all. Off drops $bumpmap and $phong with it.</summary>
     /// <remarks>That is the combination a prop_static needs: every branch before the CS:GO engine throws away VRAD's baked per-vertex lighting on a model whose material carries $bumpmap, $normalmap or $phong, and lights it from a single point instead.</remarks>
     public bool EmitNormal { get; set; } = true;
@@ -365,6 +374,19 @@ public static class MaterialBuilder
         context.Log($"  wrote {Path.GetFileName(target)}");
     }
 
+    /// <summary>The size a texture would have had at the tool size, or null when it already does.</summary>
+    /// <remarks>Worked out per texture with the clamp that sized it, so a 256 source a 512 limit never touched needs nothing, and only
+    /// brush materials ask: a model's UVs are normalized and never depend on texture size.</remarks>
+    private static (int Height, int Width)? ToolDimensions(MaterialSource source, MaterialOptions options, int width, int height)
+    {
+        if (options.ToolSize <= 0 || options.Shader != "LightmappedGeneric") return null;
+        (int Width, int Height)? native = source.Color?.Image is { } image ? (image.Width, image.Height)
+            : source.Color?.Path is { } path ? (SourceImage.ProbeFile(path).Width, SourceImage.ProbeFile(path).Height) : null;
+        if (native is not var (nativeWidth, nativeHeight)) return null;
+        var (toolHeight, toolWidth) = Textures.ScaledSize(nativeHeight, nativeWidth, options.ToolSize) ?? (nativeHeight, nativeWidth);
+        return toolWidth == width && toolHeight == height ? null : (toolHeight, toolWidth);
+    }
+
     private static MaterialResult BuildFake(MaterialSource source, string outputDir, string name, string materialPath, MaterialOptions options, PortContext context)
     {
         var result = new MaterialResult(name, materialPath, outputDir);
@@ -389,6 +411,7 @@ public static class MaterialBuilder
         ByteImage? basetexture = null, normal = null, phong = null, envmask = null, selfillum = null;
         var tintable = options.Tintable;
         var bakeDetail = false;
+        var toolDimensions = ToolDimensions(source, options, maps.Width, maps.Height);
         if (options.BakeNormalDetail)
         {
             string detailNote;
@@ -471,6 +494,8 @@ public static class MaterialBuilder
         {
             Directory.CreateDirectory(outputDir);
             Encode(ApplyOutputCap(basetexture, "color", options, context), Path.Combine(outputDir, name + "_color.vtf"), result, options, context, flags: Textures.FlagSrgb);
+            if (toolDimensions is var (toolHeight, toolWidth))
+                Encode(Textures.ToBytes(Textures.Fit(Textures.ToFloat(basetexture), toolHeight, toolWidth)!), Path.Combine(outputDir, name + "_tool.vtf"), result, options, context, flags: Textures.FlagSrgb);
             if (normal is not null) Encode(ApplyOutputCap(normal, "normal", options, context), Path.Combine(outputDir, name + "_normal.vtf"), result, options, context, flags: Textures.FlagNormal);
             if (phong is not null) Encode(ApplyOutputCap(phong, "phong", options, context), Path.Combine(outputDir, name + "_phong.vtf"), result, options, context);
             if (selfillum is not null)
@@ -486,7 +511,7 @@ public static class MaterialBuilder
             if (tintable && extra.GetValueOrDefault("$selfillum") == "1")
                 result.Notes.Add("$selfillum breaks the $blendtintbybasealpha combo - switch the glow mode to Emissive Blend to keep the prop colourable");
             result.Vmt = Vmt.FakePbr(name, materialPath, options.Shader, options.Branch, options.Envmap, result.Stats, emitBumpmap && (normal is not null || !compute), emitPhong, emitEnvmap,
-                envmask is not null || !compute, options.Surfaceprop, tintable, tintMode, extra);
+                envmask is not null || !compute, options.Surfaceprop, tintable, tintMode, extra, toolDimensions is not null);
             result.Notes.AddRange(result.Vmt.Notes);
             if (source.GlassMaxOpacity is not null)
                 result.Notes.Add("Source 2 glass Fresnel opacity is approximated by its maximum opacity; Source 1 VertexLitGeneric has no matching opacity curve");

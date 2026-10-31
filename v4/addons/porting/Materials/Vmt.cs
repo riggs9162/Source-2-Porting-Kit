@@ -34,7 +34,7 @@ public static partial class Vmt
     /// <summary>Parameters grouped into the comment sections a generated VMT is written in.</summary>
     private static readonly (string Title, string[] Keys)[] Sections =
     [
-        ("Textures", ["$basetexture", "$bumpmap", "$phongexponenttexture", "$texture1", "$texture2", "$texture3"]),
+        ("Textures", ["$basetexture", "%tooltexture", "$bumpmap", "$phongexponenttexture", "$texture1", "$texture2", "$texture3"]),
         ("Shader", ["$emissionscale", "$blendemissionbycolor", "$parallaxscale", "$alphablend", "$cull"]),
         ("Phong", ["$phong", "$phongboost", "$phongexponentfactor", "$phongtint", "$phongalbedotint", "$phongfresnelranges"]),
         ("Environment map", ["$envmap", "$envmapmask", "$envmaptint", "$envmapcontrast", "$envmapsaturation", "$envmapfresnel", "$normalmapalphaenvmapmask", "$envmaplightscale"]),
@@ -115,7 +115,7 @@ public static partial class Vmt
     /// </remarks>
     public static VmtResult FakePbr(string materialName, string materialPath, string shader = "VertexLitGeneric", string branch = "gmod", string envmap = "env_cubemap",
         MaterialStats? stats = null, bool emitBumpmap = true, bool emitPhong = true, bool emitEnvmap = true, bool hasEnvmapMask = true, string surfaceprop = "",
-        bool tintable = false, string tintModeUsed = "off", OrderedDictionary<string, string>? extra = null)
+        bool tintable = false, string tintModeUsed = "off", OrderedDictionary<string, string>? extra = null, bool toolTexture = false)
     {
         var capabilities = Capabilities(branch);
         var vertexLit = shader == "VertexLitGeneric";
@@ -126,6 +126,7 @@ public static partial class Vmt
         var roughDielectric = stats?.IsRoughDielectric ?? false;
         var smoothness = Math.Clamp(1.0 - averageRoughness, 0.0, 1.0);
         var parameters = new OrderedDictionary<string, string> { ["$basetexture"] = $"{materialPath}/{materialName}_color" };
+        if (toolTexture) parameters["%tooltexture"] = $"{materialPath}/{materialName}_tool";
         if (emitBumpmap) parameters["$bumpmap"] = $"{materialPath}/{materialName}_normal";
         if (emitBumpmap && emitPhong && (vertexLit || (lightmapped && capabilities.Contains("lightmapped_phong"))))
         {

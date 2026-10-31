@@ -89,6 +89,12 @@ treats anything under `materials/models/` as a model material. For brush materia
 a namespace ending in the resource's own folder uses that folder once:
 `my_addon/tiles` with `materials/tiles/foo` gives `materials/my_addon/tiles/foo`.
 
+A brush face stores its scale and shifts in texture pixels, and Hammer and vbsp both
+take a material's size from its preview image. Porting at a higher resolution
+therefore stretches everything in Hammer and in any new compile. **Hammer and compile
+size** fixes that: set it to the size your maps were built with and each VMT gains a
+`%tooltexture` of that size, while the game keeps drawing the full-resolution texture.
+
 Reflections on a bumped brush are masked by the normal map's alpha, because the
 engine discards `$envmapmask` whenever `$bumpmap` is set. The port bakes the
 reflection mask there, and writes a separate `_envmask` file only for materials

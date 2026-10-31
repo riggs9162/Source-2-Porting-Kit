@@ -25,6 +25,7 @@ public sealed class MaterialPortTool : ITool
             new("namespace", "Namespace", ParameterKind.Text, "ports", Description: "Folder inside materials, for example my_addon/props."),
             new("surface", "Surface", ParameterKind.Choice, "auto", Description: "Auto treats anything under materials/models as a model material and the rest as brush.", Choices: ["auto", "model", "brush"]),
             new("resolution", "Maximum resolution", ParameterKind.Choice, "original", Choices: ["512", "1024", "2048", "4096", "original"]),
+            new("tool_size", "Hammer and compile size", ParameterKind.Choice, "off", Description: "Set this to the resolution your maps were built with. Hammer and vbsp then treat each texture as that size, so a higher maximum resolution keeps every brush face's scale and shifts, even after a new compile.", Choices: ["off", "512", "1024", "2048", "4096"]),
             new("emit_normal", "Ship a normal map", ParameterKind.Boolean, "true", Description: "Off drops $bumpmap and $phong, which is what a prop_static needs to keep its baked lighting."),
             new("vrf", "Source2Viewer-CLI", ParameterKind.File, Description: "Leave empty to use the tools.vrf setting, then PATH.")
         ]);
@@ -33,7 +34,7 @@ public sealed class MaterialPortTool : ITool
 
     private sealed record Prepared(string Vmat, string Resource, string Root, string TextureRoot, string? Archive, string? RawRoot);
 
-    private sealed class Run(ToolContext tool, PortContext port, string output, string space, string surface, int clamp, bool emitNormal, string? explicitVrf)
+    private sealed class Run(ToolContext tool, PortContext port, string output, string space, string surface, int clamp, int toolSize, bool emitNormal, string? explicitVrf)
     {
         public ToolContext Tool { get; } = tool;
         public PortContext Port { get; } = port;
@@ -41,6 +42,7 @@ public sealed class MaterialPortTool : ITool
         public string Namespace { get; } = space;
         public string Surface { get; } = surface;
         public int Clamp { get; } = clamp;
+        public int ToolSize { get; } = toolSize;
         public bool EmitNormal { get; } = emitNormal;
         private string? executable;
 
@@ -57,8 +59,9 @@ public sealed class MaterialPortTool : ITool
         var output = Path.GetFullPath(arguments.Text("output"));
         var resolution = arguments.Text("resolution");
         var clamp = resolution == "original" ? 0 : int.Parse(resolution, System.Globalization.CultureInfo.InvariantCulture);
+        var toolSize = arguments.Text("tool_size") is var size && size == "off" ? 0 : int.Parse(size, System.Globalization.CultureInfo.InvariantCulture);
         var port = new PortContext(context.Host.Processes, (message, level) => context.Log(message, level == LogLevel.Info ? LogLevel.Debug : level), cancellationToken);
-        var run = new Run(context, port, output, space, arguments.Text("surface"), clamp, arguments.Boolean("emit_normal"), arguments.Text("vrf"));
+        var run = new Run(context, port, output, space, arguments.Text("surface"), clamp, toolSize, arguments.Boolean("emit_normal"), arguments.Text("vrf"));
         var audits = new JsonArray();
         var brushes = new JsonArray();
         var artifacts = new List<Artifact>();
@@ -321,7 +324,7 @@ public sealed class MaterialPortTool : ITool
             var surfaceprop = BrushMaterials.Source1Surfaceprop(entry.Surfaceprop);
             var options = new MaterialOptions
             {
-                ClampSize = run.Clamp, Branch = "gmod", Shader = "LightmappedGeneric", Surfaceprop = surfaceprop, Decal = entry.Decal, EmitNormal = run.EmitNormal && entry.Has("normal"),
+                ClampSize = run.Clamp, ToolSize = run.ToolSize, Branch = "gmod", Shader = "LightmappedGeneric", Surfaceprop = surfaceprop, Decal = entry.Decal, EmitNormal = run.EmitNormal && entry.Has("normal"),
                 Translucent = entry.Translucent, Alphatest = entry.Alphatest, Tintable = false, NormalGreen = "flip", GlowMode = "selfillum", PhongTintMode = "off"
             };
             var materialPath = Resources.UnderNamespace(run.Namespace, entry.RelDir);
