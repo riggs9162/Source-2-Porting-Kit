@@ -2,6 +2,8 @@ namespace PortingKit.Addons.Porting;
 
 /// <summary>The 8-bit RGBA scaler the VTF writer used for its mip chain: Mitchell down, Catmull-Rom up, in gamma space.</summary>
 /// <remarks>
+/// Vertical runs before horizontal, and horizontal keeps separate running totals for even and odd coefficients, because those are
+/// the original's order of single-precision additions and any other order rounds a few pixels differently.
 /// Alpha-aware in one specific way that shapes every Phong mask's mips. Each pixel is filtered both plain and premultiplied.
 /// Where the filtered alpha is above a vanishing threshold the colour comes from the premultiplied result, otherwise from the
 /// plain one, so fully transparent regions keep their colour while a pixel touching any opaque neighbour takes only that
@@ -24,15 +26,17 @@ public static class MipFilter
         var horizontal = Build(inWidth, outWidth);
         var vertical = Build(inHeight, outHeight);
         var options = new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, threads) };
-        var rows = new float[inHeight * outWidth * Working];
+        var output = new byte[outWidth * outHeight * 4];
+        var rowLength = inWidth * Working;
+        var decoded = new float[inHeight * rowLength];
         Parallel.For(0, inHeight, options, y =>
         {
-            var decoded = new float[inWidth * Working];
             var input = y * inWidth * 4;
+            var row = y * rowLength;
             for (var x = 0; x < inWidth; x++)
             {
                 var from = input + x * 4;
-                var to = x * Working;
+                var to = row + x * Working;
                 var alpha = rgba[from + 3] * Inverse255;
                 decoded[to] = rgba[from] * Inverse255;
                 decoded[to + 1] = rgba[from + 1] * Inverse255;
@@ -42,56 +46,61 @@ public static class MipFilter
                 decoded[to + 5] = decoded[to + 1] * alpha;
                 decoded[to + 6] = decoded[to + 2] * alpha;
             }
-            var offset = y * outWidth * Working;
-            for (var x = 0; x < outWidth; x++)
-            {
-                var first = horizontal.First[x];
-                var count = horizontal.Count[x];
-                var weights = x * horizontal.Stride;
-                var target = offset + x * Working;
-                for (var c = 0; c < Working; c++)
-                {
-                    var total = 0f;
-                    for (var k = 0; k < count; k++) total += horizontal.Weights[weights + k] * decoded[(first + k) * Working + c];
-                    rows[target + c] = total;
-                }
-            }
         });
-        var output = new byte[outWidth * outHeight * 4];
-        var rowLength = outWidth * Working;
-        Parallel.For(0, outHeight, options, y =>
+        Parallel.For(0, outHeight, options, () => (new float[rowLength], new float[outWidth * Working]), (y, _, buffers) =>
         {
+            var (gathered, line) = buffers;
             var first = vertical.First[y];
             var count = vertical.Count[y];
             var weights = y * vertical.Stride;
-            var line = new float[rowLength];
+            Array.Clear(gathered);
             for (var k = 0; k < count; k++)
             {
                 var weight = vertical.Weights[weights + k];
                 var source = (first + k) * rowLength;
-                for (var i = 0; i < rowLength; i++) line[i] += weight * rows[source + i];
+                for (var i = 0; i < rowLength; i++) gathered[i] += weight * decoded[source + i];
             }
-            var target = y * outWidth * 4;
+            Array.Clear(line);
+            for (var x = 0; x < outWidth; x++)
+            {
+                var start = horizontal.First[x];
+                var length = horizontal.Count[x];
+                var coefficients = x * horizontal.Stride;
+                var target = x * Working;
+                for (var c = 0; c < Working; c++)
+                {
+                    float even = 0f, odd = 0f;
+                    for (var k = 0; k < length; k++)
+                    {
+                        var term = horizontal.Weights[coefficients + k] * gathered[(start + k) * Working + c];
+                        if ((k & 1) == 0) even += term;
+                        else odd += term;
+                    }
+                    line[target + c] = even + odd;
+                }
+            }
+            var pixel = y * outWidth * 4;
             for (var x = 0; x < outWidth; x++)
             {
                 var at = x * Working;
                 var alpha = line[at + 3];
                 if (alpha < Small)
                 {
-                    output[target + x * 4] = Encode(line[at]);
-                    output[target + x * 4 + 1] = Encode(line[at + 1]);
-                    output[target + x * 4 + 2] = Encode(line[at + 2]);
+                    output[pixel + x * 4] = Encode(line[at]);
+                    output[pixel + x * 4 + 1] = Encode(line[at + 1]);
+                    output[pixel + x * 4 + 2] = Encode(line[at + 2]);
                 }
                 else
                 {
                     var inverse = 1f / alpha;
-                    output[target + x * 4] = Encode(line[at + 4] * inverse);
-                    output[target + x * 4 + 1] = Encode(line[at + 5] * inverse);
-                    output[target + x * 4 + 2] = Encode(line[at + 6] * inverse);
+                    output[pixel + x * 4] = Encode(line[at + 4] * inverse);
+                    output[pixel + x * 4 + 1] = Encode(line[at + 5] * inverse);
+                    output[pixel + x * 4 + 2] = Encode(line[at + 6] * inverse);
                 }
-                output[target + x * 4 + 3] = Encode(alpha);
+                output[pixel + x * 4 + 3] = Encode(alpha);
             }
-        });
+            return buffers;
+        }, _ => { });
         return output;
     }
 
