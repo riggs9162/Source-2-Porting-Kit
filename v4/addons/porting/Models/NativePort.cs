@@ -70,6 +70,15 @@ public static partial class NativePort
 
     private static bool IsInteger(JsonNode? node) => node is JsonValue value && value.GetValueKind() == JsonValueKind.Number && value.TryGetValue<long>(out _);
 
+    /// <summary>A JSON value as Python prints it, for messages that quote a rejected value.</summary>
+    private static string Shown(JsonNode? node) => node switch
+    {
+        null => "None",
+        JsonValue value when value.GetValueKind() == JsonValueKind.True => "True",
+        JsonValue value when value.GetValueKind() == JsonValueKind.False => "False",
+        _ => node.ToJsonString()
+    };
+
     /// <summary>Validates explicit Source 1 event translations before placing them in QC.</summary>
     public static List<string> SequenceEventQc(JsonArray events, int frameCount)
     {
@@ -80,9 +89,9 @@ public static partial class NativePort
             var number = item.Get("event");
             var options = item.Has("options") ? item.Get("options") : JsonValue.Create("");
             if (!IsInteger(frame) || frame.Lng() < 0 || frame.Lng() >= frameCount)
-                throw new InvalidDataException($"Animation event frame is outside this clip: {frame?.ToJsonString() ?? "None"}");
+                throw new InvalidDataException($"Animation event frame is outside this clip: {Shown(frame)}");
             if (!IsInteger(number) || number.Lng() is < 1 or > 65535)
-                throw new InvalidDataException($"Invalid Source 1 animation event number: {number?.ToJsonString() ?? "None"}");
+                throw new InvalidDataException($"Invalid Source 1 animation event number: {Shown(number)}");
             if (options is not JsonValue text || text.GetValueKind() != JsonValueKind.String || text.Str().AsSpan().IndexOfAny("\"\\\r\n\0") >= 0)
                 throw new InvalidDataException("Animation event options cannot be represented safely in QC");
             if (Encoding.UTF8.GetByteCount(text.Str()) > 63) throw new InvalidDataException("Source 1 animation event options must fit in 63 UTF-8 bytes");
@@ -383,12 +392,14 @@ public static partial class NativePort
 internal static class NativeRagdoll
 {
     /// <summary>Fits separate rigid convex bodies to the strongest weights of the selected bones.</summary>
-    private static Dictionary<int, ConvexHull> GeneratedHulls(GltfDocument document, GltfSkin skin, CoordinateMode coordinates, IReadOnlyList<string> selected)
+    /// <remarks>Bodies come out in the iteration order of a Python set of bone indices. That order reaches the QC,
+    /// as the order of the joint constraints, so it is kept.</remarks>
+    private static List<(int Bone, ConvexHull Hull)> GeneratedHulls(GltfDocument document, GltfSkin skin, CoordinateMode coordinates, IReadOnlyList<string> selected)
     {
-        var names = skin.JointNames;
+        var names = skin.JointNames.ToList();
         var missing = selected.Except(names).Order(StringComparer.Ordinal).ToList();
         if (missing.Count > 0) throw new InvalidDataException($"Unknown ragdoll bones: [{string.Join(", ", missing.Select(PythonText.Repr))}]");
-        var chosen = selected.Select(name => names.ToList().IndexOf(name)).ToHashSet();
+        var chosen = PythonIntSet.Order(selected.Select(name => names.IndexOf(name)));
         if (!chosen.Contains(skin.RootIndex) || chosen.Count < 2 || chosen.Count > 32)
             throw new InvalidDataException("Generated ragdolls need the skeleton root and 2 to 32 selected bones");
         var mapping = new int[names.Count];
@@ -412,16 +423,17 @@ internal static class NativeRagdoll
                 var position = primitive.Vertices[vertex] * coordinates.Scale;
                 cloud.Add(coordinates.SwapAxes ? basis.Direction(position) : position);
             }
-        var hulls = new Dictionary<int, ConvexHull>();
-        foreach (var (index, cloud) in points)
+        var hulls = new List<(int Bone, ConvexHull Hull)>();
+        foreach (var index in chosen)
         {
+            var cloud = points[index];
             if (cloud.Count < 4) throw new InvalidDataException($"Too little geometry for ragdoll bone {names[index]}");
             var unique = cloud.Select(point => new V3(Math.Round(point.X, 5), Math.Round(point.Y, 5), Math.Round(point.Z, 5))).Distinct().Order(Comparer<V3>.Create(Compare)).ToList();
             var hull = ConvexHull.Build(unique);
             var extents = hull.Extents;
             if (Math.Min(extents.X, Math.Min(extents.Y, extents.Z)) < 0.5 || hull.Volume < 0.1)
                 throw new InvalidDataException($"Ragdoll bone {names[index]} has a degenerate hull; select its parent");
-            hulls[index] = hull;
+            hulls.Add((index, hull));
         }
         return hulls;
     }
@@ -435,7 +447,7 @@ internal static class NativeRagdoll
     }
 
     /// <summary>Writes one rigid weight per collision vertex, preserving the render skeleton.</summary>
-    private static void WriteHulls(string path, GltfSkin skin, CoordinateMode coordinates, Dictionary<int, ConvexHull> hulls)
+    private static void WriteHulls(string path, GltfSkin skin, CoordinateMode coordinates, List<(int Bone, ConvexHull Hull)> hulls)
     {
         var vertices = new List<V3>();
         var faces = new List<int>();
@@ -457,14 +469,14 @@ internal static class NativeRagdoll
     }
 
     /// <summary>Conservative generated articulation with fixed limits and disabled self collision.</summary>
-    private static List<string> Block(GltfSkin skin, Dictionary<int, ConvexHull> hulls, string filename, double mass, double limit)
+    private static List<string> Block(GltfSkin skin, List<(int Bone, ConvexHull Hull)> hulls, string filename, double mass, double limit)
     {
         var lines = new List<string>
         {
             $"$collisionjoints \"{filename}\"", "{", $"    $mass {Fmt.G(mass)}", "    $inertia 2", "    $damping 0.05", "    $rotdamping 1.5",
             $"    $rootbone \"{skin.Joints[skin.RootIndex].Name}\"", "    $noselfcollisions"
         };
-        foreach (var index in hulls.Keys)
+        foreach (var (index, _) in hulls)
         {
             if (index == skin.RootIndex) continue;
             foreach (var axis in "xyz") lines.Add($"    $jointconstrain \"{skin.Joints[index].Name}\" {axis} limit {Fmt.G(-limit)} {Fmt.G(limit)} 1");
