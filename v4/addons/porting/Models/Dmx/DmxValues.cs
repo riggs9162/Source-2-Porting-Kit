@@ -155,10 +155,15 @@ internal static class DmxTypes
 
     public static bool TryKind(string name, out DmxKind kind) => Names.TryGetValue(name, out kind);
 
-    /// <summary>A float's shortest round-trip text, always with a decimal point as Python prints it.</summary>
+    /// <summary>A stored float's shortest round-trip text, always with a decimal point as Python prints it.</summary>
+    /// <remarks>DMX floats are 32-bit, so the text goes through single precision. Printing the widened double
+    /// instead does not survive the round trip at exact powers of two.</remarks>
     public static string FloatText(double value)
     {
-        var text = value.ToString("R", CultureInfo.InvariantCulture);
+        var text = ((float)value).ToString("R", CultureInfo.InvariantCulture);
         return double.IsFinite(value) && !text.Contains('.') && !text.Contains('E') ? text + ".0" : text;
     }
+
+    /// <summary>Parses a stored float, which is single precision whatever the text's length.</summary>
+    public static float ParseFloat(string text) => float.Parse(text, CultureInfo.InvariantCulture);
 }

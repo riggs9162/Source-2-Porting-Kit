@@ -102,14 +102,14 @@ internal static class DmxKeyValues2
 
         private static object? Scalar(DmxKind kind, string value)
         {
-            double[] Numbers() => value.Split(' ', StringSplitOptions.RemoveEmptyEntries).Select(item => double.Parse(item, CultureInfo.InvariantCulture)).ToArray();
+            double[] Numbers() => value.Split(' ', StringSplitOptions.RemoveEmptyEntries).Select(item => (double)DmxTypes.ParseFloat(item)).ToArray();
             return kind switch
             {
                 DmxKind.String => value,
                 DmxKind.Int => int.Parse(value, CultureInfo.InvariantCulture),
                 DmxKind.UInt8 => byte.Parse(value, CultureInfo.InvariantCulture),
                 DmxKind.UInt64 => value.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? ulong.Parse(value.AsSpan(2), NumberStyles.HexNumber, CultureInfo.InvariantCulture) : ulong.Parse(value, CultureInfo.InvariantCulture),
-                DmxKind.Float => (float)double.Parse(value, CultureInfo.InvariantCulture),
+                DmxKind.Float => DmxTypes.ParseFloat(value),
                 DmxKind.Bool => int.Parse(value, CultureInfo.InvariantCulture) != 0,
                 DmxKind.Time => new DmxTime(double.Parse(value, CultureInfo.InvariantCulture)),
                 DmxKind.Vector2 => Numbers() is [var x, var y] ? new V2(x, y) : throw new InvalidDataException("Expected 2 values"),
@@ -266,7 +266,7 @@ internal static class DmxKeyValues2
             float number => DmxTypes.FloatText(number),
             byte[] bytes => Convert.ToHexStringLower(bytes),
             DmxElement element => element.Id.ToString(),
-            DmxTime time => DmxTypes.FloatText(time.Seconds),
+            DmxTime time => time.Seconds.ToString("R", CultureInfo.InvariantCulture),
             DmxColor color => $"{color.R} {color.G} {color.B} {color.A}",
             V2 two => $"{DmxTypes.FloatText(two.X)} {DmxTypes.FloatText(two.Y)}",
             V3 three => $"{DmxTypes.FloatText(three.X)} {DmxTypes.FloatText(three.Y)} {DmxTypes.FloatText(three.Z)}",
