@@ -195,15 +195,15 @@ public static partial class RagdollFlex
     /// <summary>Reads a generated reference SMD without welding or changing corner order.</summary>
     private static (List<ReferenceBone> Bones, List<ReferenceCorner> Corners, List<string> Materials) ReadReference(string path)
     {
-        var text = PythonText.Read(path);
+        var text = NativePhysics.ReadText(path);
         var bones = new List<ReferenceBone>();
-        foreach (var line in PythonText.SplitLines(Block(text, "nodes\n")))
+        foreach (var line in PathText.SplitLines(Block(text, "nodes\n")))
         {
             var match = NodeLine().Match(line);
             if (!match.Success || int.Parse(match.Groups[1].ValueSpan, CultureInfo.InvariantCulture) != bones.Count) throw new InvalidDataException("Reference SMD requires ordered bone indices");
             bones.Add(new(match.Groups[2].Value, int.Parse(match.Groups[3].ValueSpan, CultureInfo.InvariantCulture)));
         }
-        foreach (var line in PythonText.SplitLines(Block(text, "skeleton\n")))
+        foreach (var line in PathText.SplitLines(Block(text, "skeleton\n")))
         {
             if (line.StartsWith("time ", StringComparison.Ordinal) || line.Trim().Length == 0) continue;
             var values = Fields(line);
@@ -211,7 +211,7 @@ public static partial class RagdollFlex
             bone.Position = new V3(Number(values[1]), Number(values[2]), Number(values[3]));
             bone.Rotation = new(Number(values[4]), Number(values[5]), Number(values[6]));
         }
-        var body = PythonText.SplitLines(Block(text, "triangles\n"));
+        var body = PathText.SplitLines(Block(text, "triangles\n"));
         var corners = new List<ReferenceCorner>(body.Count / 4 * 3);
         var materials = new List<string>(body.Count / 4);
         for (var offset = 0; offset < body.Count; offset += 4)
