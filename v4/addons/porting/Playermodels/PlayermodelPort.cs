@@ -186,7 +186,7 @@ public static partial class PlayermodelPort
                 foreach (var candidate in candidates)
                 {
                     var offset = donor[names[candidate]].Translation - reference.Translation;
-                    var score = offset.Dot(axis) / Math.Max(offset.Length, 1e-9);
+                    var score = SkeletonRetarget.Dot(offset, axis) / Math.Max(SkeletonRetarget.Norm(offset), 1e-9);
                     if (score <= best) continue;
                     best = score;
                     child = candidate;
@@ -215,7 +215,7 @@ public static partial class PlayermodelPort
         var finalWorld = SkeletonRetarget.SkinWorldMatrices(target);
         var world = new Dictionary<int, M4>(finalWorld.Length);
         for (var index = 0; index < finalWorld.Length; index++) world[index] = finalWorld[index];
-        var worst = order.Max(old => (finalWorld[indexMap[old]].Translation - positions[old]).Length);
+        var worst = order.Max(old => SkeletonRetarget.Norm(finalWorld[indexMap[old]].Translation - positions[old]));
         if (worst > 1e-5) throw new InvalidDataException($"Playermodel changed an original joint position by {Fmt.G(worst)} units");
         var report = new JsonObject
         {
@@ -267,13 +267,13 @@ public static partial class PlayermodelPort
             string reason;
             if (nativeEndpoint is { } tip)
             {
-                translation = M3.Of(parentWorld).Transposed().Apply(worlds[tip].Translation - parentWorld.Translation);
+                translation = M3.Of(parentWorld).ApplyTransposed(worlds[tip].Translation - parentWorld.Translation);
                 reason = "authored_digit_endpoint";
             }
             else
             {
-                var referenceLength = new V3(bindFrame[parentIndex * 6], bindFrame[parentIndex * 6 + 1], bindFrame[parentIndex * 6 + 2]).Length;
-                var ownLength = skin.Joints[targetParent].RestTranslation.Length;
+                var referenceLength = SkeletonRetarget.Norm(new(bindFrame[parentIndex * 6], bindFrame[parentIndex * 6 + 1], bindFrame[parentIndex * 6 + 2]));
+                var ownLength = SkeletonRetarget.Norm(skin.Joints[targetParent].RestTranslation);
                 translation *= referenceLength > 1e-6 ? ownLength / referenceLength : 1.0;
                 reason = "unweighted_animation_channel";
             }
@@ -414,7 +414,7 @@ public static partial class PlayermodelPort
                 if (parent is { } owner)
                 {
                     rotations[frame] = sourceRotations[owner][frame] * local;
-                    positions[frame] = sourcePositions[owner][frame] + sourceRotations[owner][frame].Apply(translation);
+                    positions[frame] = sourcePositions[owner][frame] + sourceRotations[owner][frame].ApplyInStack(translation);
                 }
                 else
                 {
@@ -426,7 +426,7 @@ public static partial class PlayermodelPort
             sourcePositions[index] = positions;
         }
         var placedRotations = Array.ConvertAll(sourceRotations, rotations => Array.ConvertAll(rotations, rotation => rig.Rotation * rotation));
-        var placedPositions = Array.ConvertAll(sourcePositions, positions => Array.ConvertAll(positions, position => rig.Rotation.Apply(position * rig.UnitScale)));
+        var placedPositions = Array.ConvertAll(sourcePositions, positions => Array.ConvertAll(positions, position => rig.Rotation.ApplyToRow(position * rig.UnitScale)));
         var original = SkeletonRetarget.SkinWorldMatrices(source);
         var byTarget = new Dictionary<int, int>();
         foreach (var (old, target) in rig.Indices) byTarget[target] = old;
@@ -452,7 +452,7 @@ public static partial class PlayermodelPort
                 {
                     var delta = placedRotations[old][frame] * bindInverse;
                     rotations[frame] = delta * world;
-                    positions[frame] = placedPositions[old][frame] + delta.Apply(offset);
+                    positions[frame] = placedPositions[old][frame] + delta.ApplyInStack(offset);
                 }
             }
             else
@@ -462,7 +462,7 @@ public static partial class PlayermodelPort
                     if (parent is { } owner)
                     {
                         rotations[frame] = targetRotations[owner][frame] * local;
-                        positions[frame] = targetPositions[owner][frame] + targetRotations[owner][frame].Apply(joint.RestTranslation);
+                        positions[frame] = targetPositions[owner][frame] + targetRotations[owner][frame].ApplyInStack(joint.RestTranslation);
                     }
                     else
                     {
@@ -477,9 +477,8 @@ public static partial class PlayermodelPort
                 var (position, rotation) = (positions[frame], rotations[frame]);
                 if (parent is { } owner)
                 {
-                    var inverse = targetRotations[owner][frame].Transposed();
-                    position = inverse.Apply(position - targetPositions[owner][frame]);
-                    rotation = inverse * rotation;
+                    position = targetRotations[owner][frame].ApplyTransposedInStack(position - targetPositions[owner][frame]);
+                    rotation = targetRotations[owner][frame].Transposed() * rotation;
                 }
                 var euler = RotationMath.AsEuler(RotationMath.FromMatrix(rotation));
                 var row = result[frame];
@@ -574,14 +573,14 @@ public static partial class PlayermodelPort
                 var upper = skin.Joints[middle].Parent!.Value;
                 V3 start = worlds[upper].Translation, elbow = worlds[middle].Translation, end = worlds[index].Translation;
                 var axis = end - start;
-                axis /= Math.Max(axis.Length, 1e-12);
-                var bend = elbow - start - axis * (elbow - start).Dot(axis);
+                axis /= Math.Max(SkeletonRetarget.Norm(axis), 1e-12);
+                var bend = elbow - start - axis * SkeletonRetarget.Dot(elbow - start, axis);
                 V3 knee;
-                if (bend.Length < 1e-4) knee = new(0.707, chain == "foot" ? -0.707 : 0.707, 0.0);
+                if (SkeletonRetarget.Norm(bend) < 1e-4) knee = new(0.707, chain == "foot" ? -0.707 : 0.707, 0.0);
                 else
                 {
-                    knee = M3.Of(worlds[upper]).Transposed().Apply(bend);
-                    knee /= knee.Length;
+                    knee = M3.Of(worlds[upper]).ApplyTransposed(bend);
+                    knee /= SkeletonRetarget.Norm(knee);
                 }
                 lines.Add($"$ikchain \"{side.ToLowerInvariant()}{chain}\" \"{skin.Joints[index].Name}\" knee {Fmt.F6(knee.X)} {Fmt.F6(knee.Y)} {Fmt.F6(knee.Z)}");
             }
@@ -598,8 +597,8 @@ public static partial class PlayermodelPort
         foreach (var primitive in primitives)
         {
             context.Check();
-            var vertices = Array.ConvertAll(primitive.Vertices, vertex => rig.Rotation.Apply(vertex * rig.UnitScale));
-            var normals = Array.ConvertAll(primitive.Normals ?? throw new InvalidDataException("Playermodel primitive has no normals"), rig.Rotation.Apply);
+            var vertices = Array.ConvertAll(primitive.Vertices, vertex => rig.Rotation.ApplyToRow(vertex * rig.UnitScale));
+            var normals = Array.ConvertAll(primitive.Normals ?? throw new InvalidDataException("Playermodel primitive has no normals"), rig.Rotation.ApplyToRow);
             var texcoords = primitive.Texcoords ?? throw new InvalidDataException("Playermodel primitive has no texture coordinates");
             for (var corner = 0; corner < primitive.Indices.Length; corner++)
             {
@@ -695,12 +694,12 @@ public static partial class PlayermodelPort
     private static void TransformPrimitive(AppearancePrimitive primitive, PlayerRig rig)
     {
         var (rotation, scale) = (rig.Rotation, rig.UnitScale);
-        for (var index = 0; index < primitive.Vertices.Length; index++) primitive.Vertices[index] = rotation.Apply(primitive.Vertices[index] * scale);
-        for (var index = 0; index < primitive.Normals.Length; index++) primitive.Normals[index] = rotation.Apply(primitive.Normals[index]);
+        for (var index = 0; index < primitive.Vertices.Length; index++) primitive.Vertices[index] = rotation.ApplyToRow(primitive.Vertices[index] * scale);
+        for (var index = 0; index < primitive.Normals.Length; index++) primitive.Normals[index] = rotation.ApplyToRow(primitive.Normals[index]);
         foreach (var target in primitive.Targets.Values)
         {
-            target.Position = target.Position?.Map(value => rotation.Apply(value * scale));
-            target.Normal = target.Normal?.Map(rotation.Apply);
+            target.Position = target.Position?.Map(value => rotation.ApplyToRow(value * scale));
+            target.Normal = target.Normal?.Map(rotation.ApplyToRow);
         }
     }
 

@@ -90,7 +90,7 @@ public static class SkeletonRetarget
         double Error(double degrees)
         {
             var turn = YawMatrix(degrees);
-            return PairwiseSum(share.Select((value, index) => value * (t[index] - turn.Apply(o[index])).Length).ToArray());
+            return PairwiseSum(share.Select((value, index) => value * (t[index] - turn.ApplyToRow(o[index])).Length).ToArray());
         }
         var yaw = 0.0;
         var best = Error(0.0);
@@ -106,7 +106,7 @@ public static class SkeletonRetarget
         var alongTerms = new double[share.Length * 3];
         for (var index = 0; index < share.Length; index++)
         {
-            var turned = rotation.Apply(o[index]);
+            var turned = rotation.ApplyToRow(o[index]);
             for (var axis = 0; axis < 3; axis++)
             {
                 spreadTerms[index * 3 + axis] = share[index] * turned[axis] * turned[axis];
@@ -139,22 +139,28 @@ public static class SkeletonRetarget
         return worlds;
     }
 
+    /// <summary>A dot product as the array library's kernel sums it, fused in ascending order.</summary>
+    public static double Dot(V3 a, V3 b) => Math.FusedMultiplyAdd(a.Z, b.Z, Math.FusedMultiplyAdd(a.Y, b.Y, Math.FusedMultiplyAdd(a.X, b.X, 0.0)));
+
+    /// <summary>A vector's length from <see cref="Dot"/>.</summary>
+    public static double Norm(V3 vector) => Math.Sqrt(Dot(vector, vector));
+
     /// <summary>The minimal rotation carrying one direction onto another.</summary>
     /// <remarks>Antiparallel directions have no unique answer, so any perpendicular axis serves as a half turn.</remarks>
     public static M3 Swing(V3 fromDirection, V3 toDirection)
     {
-        double na = fromDirection.Length, nb = toDirection.Length;
+        double na = Norm(fromDirection), nb = Norm(toDirection);
         if (na < 1e-12 || nb < 1e-12) return M3.Identity;
         V3 a = fromDirection / na, b = toDirection / nb;
         var axis = a.Cross(b);
-        var sine = axis.Length;
-        var cosine = a.Dot(b);
+        var sine = Norm(axis);
+        var cosine = Dot(a, b);
         if (sine < 1e-12)
         {
             if (cosine > 0.0) return M3.Identity;
             var seed = Math.Abs(a.X) < 0.9 ? new V3(1.0, 0.0, 0.0) : new V3(0.0, 1.0, 0.0);
             axis = a.Cross(seed);
-            axis /= axis.Length;
+            axis /= Norm(axis);
             sine = 0.0;
             cosine = -1.0;
         }

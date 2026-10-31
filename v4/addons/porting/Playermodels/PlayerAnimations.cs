@@ -393,7 +393,7 @@ public static partial class PlayerAnimations
                 else
                 {
                     worldRotations[frame] = rotations[parent][frame] * local;
-                    worldPositions[frame] = positions[parent][frame] + rotations[parent][frame].Apply(translation);
+                    worldPositions[frame] = positions[parent][frame] + rotations[parent][frame].ApplyInStack(translation);
                 }
             }
             rotations[index] = worldRotations;
