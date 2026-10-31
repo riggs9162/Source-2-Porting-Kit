@@ -24,7 +24,7 @@ internal sealed class ToolPage : UserControl
         {
             var value = draft.GetValueOrDefault(parameter.Key, parameter.Default);
             layout.Controls.Add(KitStyle.Label(parameter.Label + (parameter.Required ? " *" : ""), 10, true));
-            var row = new TableLayoutPanel { Width = 720, Height = KitStyle.Scale(42), ColumnCount = 2, Margin = new(0, 0, 0, 12) };
+            var row = new TableLayoutPanel { Width = 720, Height = KitStyle.Scale(parameter.Kind == ParameterKind.Lines ? 132 : 42), ColumnCount = 2, Margin = new(0, 0, 0, 12) };
             row.ColumnStyles.Add(new(SizeType.Percent, 100));
             row.ColumnStyles.Add(new(SizeType.Absolute, parameter.Kind is ParameterKind.File or ParameterKind.Directory ? KitStyle.Scale(110) : 0));
             Control field = parameter.Kind switch
@@ -33,6 +33,7 @@ internal sealed class ToolPage : UserControl
                 ParameterKind.Integer => new NumericUpDown { Minimum = parameter.Minimum, Maximum = parameter.Maximum,
                     Value = int.TryParse(value, out var number) ? Math.Clamp(number, parameter.Minimum, parameter.Maximum) : parameter.Minimum },
                 ParameterKind.Choice => new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList },
+                ParameterKind.Lines => new TextBox { Text = value, Multiline = true, AcceptsReturn = true, ScrollBars = ScrollBars.Vertical },
                 _ => new TextBox { Text = value }
             };
             if (field is ComboBox combo)

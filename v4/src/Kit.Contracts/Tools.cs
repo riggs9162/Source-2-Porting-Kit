@@ -2,7 +2,7 @@ using System.Text.Json;
 
 namespace PortingKit;
 
-public enum ParameterKind { Text, File, Directory, Integer, Boolean, Choice }
+public enum ParameterKind { Text, File, Directory, Integer, Boolean, Choice, Lines }
 
 public sealed record ToolParameter(
     string Key,
