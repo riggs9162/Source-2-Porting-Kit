@@ -21,7 +21,7 @@ namespace PortingKit.Addons.Porting;
 /// <para>Flat input has no hull. Qhull refuses it and trimesh retries with joggling, which produces a zero-volume
 /// mesh that every caller then discards, so null is the same answer.</para>
 /// </remarks>
-public static class ConvexHull
+public static class QuickHull
 {
     private const double VisibleDistance = 2.2e-15;
     private const double OutsideDistance = 4.4e-15;

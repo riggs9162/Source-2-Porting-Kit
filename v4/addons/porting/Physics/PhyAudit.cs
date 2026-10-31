@@ -360,7 +360,7 @@ public static partial class PhyAudit
             var compiledClouds = found.Convexes;
             var volume = 0.0;
             foreach (var cloud in compiledClouds)
-                volume += ConvexHull.Of(cloud) is { } hull ? Math.Abs(MeshOps.Volume(hull)) : 0.0;
+                volume += QuickHull.Of(cloud) is { } hull ? Math.Abs(MeshOps.Volume(hull)) : 0.0;
             var volumeError = Math.Abs(volume / wanted.Get("export_volume_in3").Dbl() - 1.0);
             var (sourceLow, sourceHigh) = MeshOps.Bounds(sourcePoints);
             var (compiledLow, compiledHigh) = MeshOps.Bounds(compiledClouds.SelectMany(cloud => cloud));

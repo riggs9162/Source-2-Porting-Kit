@@ -193,7 +193,7 @@ public static class StaticCollision
         foreach (var component in components)
         {
             if (component.Vertices.Length < 4) continue;
-            var hull = ConvexHull.Of(component.Vertices);
+            var hull = QuickHull.Of(component.Vertices);
             if (hull is null || hull.FaceCount == 0) continue;
             var volume = Math.Abs(MeshOps.Volume(hull));
             if (volume <= 1e-9) continue;
@@ -206,7 +206,7 @@ public static class StaticCollision
     }
 
     /// <summary>The solid studiomdl would build around these points, or null if they are flat.</summary>
-    public static TriMesh? HullOfPoints(IEnumerable<V3> points) => ConvexHull.OfDistinct(points);
+    public static TriMesh? HullOfPoints(IEnumerable<V3> points) => QuickHull.OfDistinct(points);
 
     /// <summary>The direction a piece is thinnest in and how thin it is there, or a null direction when it has none.</summary>
     /// <remarks>Face normals are the candidates: the minimum width of a convex solid is reached along one of them or

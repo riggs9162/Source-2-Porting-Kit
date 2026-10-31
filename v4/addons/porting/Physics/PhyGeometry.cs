@@ -128,7 +128,7 @@ public static class PhyGeometry
     /// <summary>Encodes a closed convex triangulation in the SDK CPolyhedron array layout with clockwise outward faces.</summary>
     public static (byte[] Encoded, TriMesh Hull) Polyhedron(IReadOnlyList<V3> points)
     {
-        var hull = ConvexHull.Of(points);
+        var hull = QuickHull.Of(points);
         if (hull is null || !MeshOps.IsWatertight(hull) || !IsConvex(hull) || !hull.Vertices.All(vertex => vertex.IsFinite) || MeshOps.Volume(hull) <= 0)
             throw new GeometryFinalizationException("Prepared physics shape is not a finite closed positive-volume convex hull");
         var normals = MeshOps.FaceNormals(hull);
@@ -318,7 +318,7 @@ public static class PhyGeometry
         {
             var (source, target) = (expected[index], actual[assignment[index]]);
             var (error, mapping) = ShapeError(source, target);
-            var targetVolume = ConvexHull.Of(target.Vertices) is { } hull ? Math.Abs(MeshOps.Volume(hull)) : 0.0;
+            var targetVolume = QuickHull.Of(target.Vertices) is { } hull ? Math.Abs(MeshOps.Volume(hull)) : 0.0;
             var sourceVolume = MeshOps.Volume(source);
             var volumeError = Math.Abs(targetVolume / sourceVolume - 1);
             if (error > maximumError || volumeError > maximumVolumeError)
