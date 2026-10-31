@@ -324,7 +324,7 @@ public sealed class MaterialPortTool : ITool
                 ClampSize = run.Clamp, Branch = "gmod", Shader = "LightmappedGeneric", Surfaceprop = surfaceprop, Decal = entry.Decal, EmitNormal = run.EmitNormal && entry.Has("normal"),
                 Translucent = entry.Translucent, Alphatest = entry.Alphatest, Tintable = false, NormalGreen = "flip", GlowMode = "selfillum", PhongTintMode = "off"
             };
-            var materialPath = entry.RelDir.Length > 0 ? $"{run.Namespace}/{entry.RelDir}" : run.Namespace;
+            var materialPath = Resources.UnderNamespace(run.Namespace, entry.RelDir);
             var folder = Path.Combine(run.Output, "materials", materialPath);
             var result = MaterialBuilder.Build(entry.ToSource(includeTint: false), folder, entry.Name, materialPath, options, run.Port.For(entry.Name));
             var missing = entry.Warnings.Where(warning => warning.StartsWith("missing:", StringComparison.Ordinal) || warning.StartsWith("ambiguous:", StringComparison.Ordinal)).ToList();

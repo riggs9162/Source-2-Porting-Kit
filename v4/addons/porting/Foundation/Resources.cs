@@ -54,6 +54,21 @@ public static partial class Resources
         return string.Join('/', parts).ToLowerInvariant();
     }
 
+    /// <summary>Places a resource folder beneath a namespace, using any folder they share only once.</summary>
+    /// <remarks>Someone porting <c>materials/tiles</c> naturally names the namespace <c>my_addon/tiles</c>, and joining
+    /// the two blindly would give <c>my_addon/tiles/tiles</c>. The longest overlap between the end of the namespace
+    /// and the start of the folder is collapsed. Model materials must not use this: a compiled model looks them up at
+    /// its exact <c>$cdmaterials</c> path.</remarks>
+    public static string UnderNamespace(string space, string folder)
+    {
+        var parts = space.Split('/');
+        var rest = folder.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        for (var overlap = Math.Min(parts.Length, rest.Length); overlap > 0; overlap--)
+            if (parts.TakeLast(overlap).SequenceEqual(rest.Take(overlap), StringComparer.OrdinalIgnoreCase))
+                return string.Join('/', parts.Concat(rest.Skip(overlap)));
+        return string.Join('/', parts.Concat(rest));
+    }
+
     /// <summary>Explains why a normalized namespace cannot be used, or returns an empty string.</summary>
     public static string NamespaceProblem(string value)
     {

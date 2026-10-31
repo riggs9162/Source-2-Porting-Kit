@@ -85,7 +85,9 @@ rather than a model, using `vpk:<vpk path>:<resource>.vmat_c`, a loose material,
 an exported folder. **Surface** decides the shader: brush materials use
 `LightmappedGeneric` with stock surface properties, every blend layer as its own
 material, and decals and glass kept; model materials use `VertexLitGeneric`. **Auto**
-treats anything under `materials/models/` as a model material.
+treats anything under `materials/models/` as a model material. For brush materials,
+a namespace ending in the resource's own folder uses that folder once:
+`my_addon/tiles` with `materials/tiles/foo` gives `materials/my_addon/tiles/foo`.
 
 Open **Materials > Hotspot editor** to edit trim-sheet regions. It supports drawing,
 resizing, multi-selection, exact coordinates, undo/redo, grid personalization,
