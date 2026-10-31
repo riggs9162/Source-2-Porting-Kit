@@ -729,7 +729,7 @@ public static partial class PlayermodelPort
         var sources = PlayerAnimations.EnsureAnimationSources(animationCache, Path.Combine(outDir, ".cache"), context);
         var coord = CoordinateMode.For(document);
         var rig = BuildPlayerRig(source, coord, PlayerAnimations.SourceBind(sources, profile), alignYaw);
-        metadataPath ??= Path.ChangeExtension(glb, ".metadata.json");
+        if (string.IsNullOrEmpty(metadataPath)) metadataPath = Path.ChangeExtension(glb, ".metadata.json");
         var (hitboxLines, hitboxAudit) = SourceHitboxes(rig, source, metadataPath);
         Directory.CreateDirectory(outDir);
         var files = new List<string>();

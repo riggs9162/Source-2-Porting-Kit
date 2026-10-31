@@ -232,6 +232,16 @@ public static partial class PlayerAnimations
         var raw = DownloadAsync(context).GetAwaiter().GetResult();
         var digest = Convert.ToHexStringLower(SHA256.HashData(raw));
         if (digest != SourceArchiveSha256) throw new InvalidDataException("Published animation source archive failed its SHA-256 verification");
+        Install(raw, digest, folder, destination, context);
+        context?.Log("Published player animation sources cached", LogLevel.Success);
+        return destination;
+    }
+
+    /// <summary>Unpacks a verified archive beside the cache and only then moves it into place.</summary>
+    /// <remarks>A half-written copy therefore never looks finished. Only the file kinds the graph reads are taken, and an entry
+    /// that would land outside the staging folder refuses the whole archive.</remarks>
+    private static void Install(byte[] raw, string digest, string folder, string destination, PortContext? context)
+    {
         var staging = Path.GetFullPath(Path.Combine(folder, SourceRevision + ".partial"));
         Directory.CreateDirectory(staging);
         using (var archive = new ZipArchive(new MemoryStream(raw), ZipArchiveMode.Read))
@@ -254,8 +264,6 @@ public static partial class PlayerAnimations
         PythonText.Write(Path.Combine(staging, ProvenanceName), PythonJson.Indented(record));
         if (Path.Exists(destination)) throw new InvalidDataException($"Incomplete animation cache already exists: {PathText.Native(destination)}");
         Directory.Move(staging, destination);
-        context?.Log("Published player animation sources cached", LogLevel.Success);
-        return destination;
     }
 
     /// <summary>The length of the number a span starts with, or zero when it starts with something else.</summary>
