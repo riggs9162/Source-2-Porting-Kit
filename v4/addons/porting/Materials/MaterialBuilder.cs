@@ -450,6 +450,11 @@ public static class MaterialBuilder
                 }
             }
             else result.Dropped.Add(("envmask", "no metallic signal"));
+            if (options.Shader == "LightmappedGeneric" && normal is not null && envmask is not null && !options.Transparent && result.Stats?.IsRoughDielectric != true)
+            {
+                context.Log("Packing envmap mask into the bumpmap alpha");
+                normal = PbrMaps.PackEnvmapMask(normal, envmask);
+            }
             if (maps.Selfillum is not null)
             {
                 selfillum = PbrMaps.BakeSelfillum(maps.Selfillum);
@@ -468,7 +473,6 @@ public static class MaterialBuilder
             Encode(ApplyOutputCap(basetexture, "color", options, context), Path.Combine(outputDir, name + "_color.vtf"), result, options, context, flags: Textures.FlagSrgb);
             if (normal is not null) Encode(ApplyOutputCap(normal, "normal", options, context), Path.Combine(outputDir, name + "_normal.vtf"), result, options, context, flags: Textures.FlagNormal);
             if (phong is not null) Encode(ApplyOutputCap(phong, "phong", options, context), Path.Combine(outputDir, name + "_phong.vtf"), result, options, context);
-            if (envmask is not null) Encode(ApplyOutputCap(envmask, "envmask", options, context), Path.Combine(outputDir, name + "_envmask.vtf"), result, options, context);
             if (selfillum is not null)
             {
                 Encode(ApplyOutputCap(selfillum, "selfillum", options, context), Path.Combine(outputDir, name + "_selfillum.vtf"), result, options, context, flags: Textures.FlagSrgb);
@@ -490,6 +494,11 @@ public static class MaterialBuilder
                 result.Notes.Add("Source 2 self-illumination uses its authored phase, waveform, flow speed and tint through the native EmissiveBlend pass");
             result.Written.Add(result.Vmt.Write(Path.Combine(outputDir, name + ".vmt")));
             context.Log($"  wrote {name}.vmt");
+        }
+        if (options.GenerateVtf && basetexture is not null && envmask is not null)
+        {
+            if (!options.GenerateVmt || result.Vmt!.Params.ContainsKey("$envmapmask")) Encode(ApplyOutputCap(envmask, "envmask", options, context), Path.Combine(outputDir, name + "_envmask.vtf"), result, options, context);
+            else result.Dropped.Add(("envmask", "nothing in the material reads a separate mask"));
         }
         foreach (var (what, why) in result.Dropped) context.Log($"  skipped {what}: {why}");
         return result;

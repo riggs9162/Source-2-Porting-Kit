@@ -407,6 +407,23 @@ public static partial class PbrMaps
         return output;
     }
 
+    /// <summary>Carries a reflection mask in a bumpmap's alpha, the only place the engine reads one beside a bumpmap.</summary>
+    /// <remarks>Both stock lit shaders discard $envmapmask whenever $bumpmap is set, which Garry's Mod confirms at runtime, so a
+    /// separate mask file on a bumped brush is never loaded. The alpha is one channel, so the mask's colour becomes its luminance.</remarks>
+    public static ByteImage PackEnvmapMask(ByteImage normal, ByteImage envmask)
+    {
+        var output = new ByteImage(normal.Height, normal.Width, 4);
+        Array.Copy(normal.Data, output.Data, output.Data.Length);
+        for (var y = 0; y < normal.Height; y++)
+            for (var x = 0; x < normal.Width; x++)
+            {
+                var at = (y * envmask.Height / normal.Height * envmask.Width + x * envmask.Width / normal.Width) * envmask.Channels;
+                var value = 0.2126f * envmask.Data[at] + 0.7152f * envmask.Data[at + 1] + 0.0722f * envmask.Data[at + 2];
+                output.Data[(y * normal.Width + x) * 4 + 3] = (byte)Math.Clamp((int)MathF.Round(value), 0, 255);
+            }
+        return output;
+    }
+
     /// <summary>The <c>_phong</c> exponent texture: R exponent, G metallic, B zero, A one.</summary>
     /// <remarks>
     /// R is (1 - roughness) ^ gamma scaled by the Phong strength, so a lower strength yields a softer response rather than only a dimmer

@@ -89,6 +89,12 @@ treats anything under `materials/models/` as a model material. For brush materia
 a namespace ending in the resource's own folder uses that folder once:
 `my_addon/tiles` with `materials/tiles/foo` gives `materials/my_addon/tiles/foo`.
 
+Reflections on a bumped brush are masked by the normal map's alpha, because the
+engine discards `$envmapmask` whenever `$bumpmap` is set. The port bakes the
+reflection mask there, and writes a separate `_envmask` file only for materials
+without a normal map, which can read it. The mask carries the reflection's strength,
+so brush VMTs need no `$envmaptint` or the other envmap controls.
+
 Open **Materials > Hotspot editor** to edit trim-sheet regions. It supports drawing,
 resizing, multi-selection, exact coordinates, undo/redo, grid personalization,
 layout presets, region detection, fit previews, and recovery drafts. Its processing

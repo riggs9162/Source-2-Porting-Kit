@@ -24,7 +24,7 @@ public sealed record VmtResult(string Text, string Shader, OrderedDictionary<str
 /// </remarks>
 public static partial class Vmt
 {
-    private static readonly HashSet<string> Modern = ["phong_albedo_tint", "phong_exponent_factor", "envmap_fresnel_float", "envmap_lightscale", "blend_tint_by_base_alpha", "lightmapped_phong"];
+    private static readonly HashSet<string> Modern = ["phong_albedo_tint", "phong_exponent_factor", "envmap_fresnel_float", "blend_tint_by_base_alpha", "lightmapped_phong"];
 
     private static readonly Dictionary<string, HashSet<string>> BranchCapabilities = new()
     {
@@ -105,6 +105,10 @@ public static partial class Vmt
     /// <para><paramref name="emitBumpmap"/> takes Phong down with it: Phong shades against the bumpmap's normal and is ignored without
     /// one. That is also the shape a prop_static wants, since every branch before the CS:GO engine discards VRAD's baked per-vertex
     /// lighting on a model carrying $bumpmap, $normalmap or $phong on any skin. $envmap survives, needing no tangent normal.</para>
+    /// <para>Brush reflections take only $envmap and their mask. The mask already carries the reflection's full strength, and the engine
+    /// reads $envmaptint in gamma space, so 0.16 is really 0.018 and multiplying it in leaves about a thousandth of the cubemap.
+    /// $envmaplightscale dims reflections by the lightmap, which blacks them out in a dark room, and Garry's Mod's brush shader has
+    /// no $envmapfresnel. $envmapcontrast and $envmapsaturation only restated their defaults.</para>
     /// <para><paramref name="tintable"/> enables the colourable-prop block; the mask must already be baked into basetexture alpha, and
     /// the entity's render colour then tints only the masked regions with no proxy. It is skipped when the branch lacks the
     /// parameter, the shader is not VertexLitGeneric, or $selfillum, $translucent or $alphatest would break the shader combo.</para>
@@ -135,16 +139,18 @@ public static partial class Vmt
         }
         if (emitEnvmap && !roughDielectric)
         {
-            var tint = Math.Clamp(0.04 + 0.3 * Math.Pow(smoothness, 2), 0.04, 0.34);
             parameters["$envmap"] = envmap;
-            parameters["$envmaptint"] = Vec3([tint, tint, tint]);
-            parameters["$envmapcontrast"] = "0";
-            parameters["$envmapsaturation"] = "1";
+            if (!lightmapped)
+            {
+                var tint = Math.Clamp(0.04 + 0.3 * Math.Pow(smoothness, 2), 0.04, 0.34);
+                parameters["$envmaptint"] = Vec3([tint, tint, tint]);
+                parameters["$envmapcontrast"] = "0";
+                parameters["$envmapsaturation"] = "1";
+            }
             if (emitBumpmap) parameters["$normalmapalphaenvmapmask"] = "1";
-            if (hasEnvmapMask && !(vertexLit && emitBumpmap)) parameters["$envmapmask"] = $"{materialPath}/{materialName}_envmask";
-            else if (hasEnvmapMask) notes.Add("envmap mask uses bumpmap alpha; separate mask texture is inactive");
-            if (capabilities.Contains("envmap_fresnel_float")) parameters["$envmapfresnel"] = "1.0";
-            if (lightmapped && capabilities.Contains("envmap_lightscale")) parameters["$envmaplightscale"] = "1";
+            if (hasEnvmapMask && !emitBumpmap) parameters["$envmapmask"] = $"{materialPath}/{materialName}_envmask";
+            else if (hasEnvmapMask) notes.Add(lightmapped ? "envmap mask packed into the bumpmap alpha; the shader discards $envmapmask beside a $bumpmap" : "envmap mask uses bumpmap alpha");
+            if (!lightmapped && capabilities.Contains("envmap_fresnel_float")) parameters["$envmapfresnel"] = "1.0";
         }
         else if (emitEnvmap && roughDielectric) notes.Add("envmap skipped: rough dielectric, nothing would reflect");
         if (vertexLit)
