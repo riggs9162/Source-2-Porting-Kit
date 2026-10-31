@@ -65,9 +65,7 @@ public static class Json
         switch (value.GetValueKind())
         {
             case JsonValueKind.Number:
-                if (value.TryGetValue<double>(out var real)) return real;
-                if (value.TryGetValue<long>(out var signed)) return signed;
-                return value.TryGetValue<ulong>(out var unsigned) ? unsigned : fallback;
+                return value.TryGetValue<double>(out var real) ? real : double.Parse(value.ToJsonString(), NumberStyles.Float, CultureInfo.InvariantCulture);
             case JsonValueKind.True: return 1.0;
             case JsonValueKind.False: return 0.0;
             case JsonValueKind.String:
