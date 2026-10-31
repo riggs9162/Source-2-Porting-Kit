@@ -26,6 +26,7 @@ public static partial class VrfExporter
             context.Log($"VRF exited with code {code}");
             return code;
         }
+        HoistLooseMaterials(staging, context);
         if (options.Mode == "models")
         {
             if (options.FlattenMaterialsRoot) context.Log("Flatten-to-root enabled: stray images will be swept into materialsrc/ root (stray-image option overridden)");

@@ -105,6 +105,32 @@ public static partial class VrfExporter
         return moved;
     }
 
+    /// <summary>Moves a material stored directly under <c>models/</c> into the parallel material tree, with its images.</summary>
+    /// <remarks>A few materials, such as <c>models/effects/box_empty</c>, are authored outside any <c>materials</c>
+    /// folder. Left alone they land in <c>modelsrc</c>, where no later stage looks, and the textures only they reference
+    /// are purged as unreferenced, so a model naming one on any skin cannot build. This runs before the stray-image
+    /// purge, which would otherwise take the images of a material sitting beside a model.</remarks>
+    public static int HoistLooseMaterials(string staging, PortContext context)
+    {
+        var root = Path.Combine(staging, "models");
+        if (!Directory.Exists(root)) return 0;
+        var moved = 0;
+        foreach (var vmat in Directory.GetFiles(root, "*.vmat", SearchOption.AllDirectories))
+        {
+            var folder = Path.GetRelativePath(staging, Path.GetDirectoryName(vmat)!);
+            if (folder.Split(Path.DirectorySeparatorChar).Any(part => part.Equals("materials", StringComparison.OrdinalIgnoreCase) || part.Equals("material", StringComparison.OrdinalIgnoreCase))) continue;
+            var target = Path.Combine(staging, "materials", folder);
+            Directory.CreateDirectory(target);
+            var stem = Path.GetFileNameWithoutExtension(vmat);
+            foreach (var image in Directory.GetFiles(Path.GetDirectoryName(vmat)!, stem + "_*").Where(path => HasSuffix(path, ImageSuffixes)))
+                File.Move(image, Path.Combine(target, Path.GetFileName(image)), true);
+            File.Move(vmat, Path.Combine(target, Path.GetFileName(vmat)), true);
+            moved++;
+        }
+        if (moved > 0) context.Log($"Hoisted {moved} material(s) stored under models/ to top-level materials/");
+        return moved;
+    }
+
     /// <summary>Moves each <c>models/&lt;rest&gt;/materials</c> tree up to <c>materials/models/&lt;rest&gt;</c>.</summary>
     /// <remarks>Half-Life: Alyx ships materials inside each model's own folder rather than the parallel tree, and the
     /// viewer extracts them where they live. Without this hoist they would land in <c>modelsrc</c>, or be deleted as
