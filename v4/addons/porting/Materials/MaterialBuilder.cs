@@ -142,6 +142,12 @@ public sealed class MaterialOptions
     /// better use of the same disk space on a flat surface.</remarks>
     public NormalStorage NormalStorage { get; set; } = NormalStorage.Compressed;
 
+    /// <summary>How many times every map repeats inside its texture, for a blend layer that tiles faster than the layer it blends with.</summary>
+    public (int Across, int Down) Repeat { get; set; } = (1, 1);
+
+    /// <summary>The longest edge a repeated texture may grow to.</summary>
+    public int RepeatEdge { get; set; }
+
     /// <summary>Ship a normal map at all. Off drops $bumpmap and $phong with it.</summary>
     /// <remarks>That is the combination a prop_static needs: every branch before the CS:GO engine throws away VRAD's baked per-vertex lighting on a model whose material carries $bumpmap, $normalmap or $phong, and lights it from a single point instead.</remarks>
     public bool EmitNormal { get; set; } = true;
@@ -370,8 +376,10 @@ public static class MaterialBuilder
             height = Math.Max(1, (int)Math.Round(height * scale));
             width = Math.Max(1, (int)Math.Round(width * scale));
         }
-        return new(Textures.Fit(color, height, width)!, Textures.Fit(normal, height, width)!, width, height, Textures.Fit(ao, height, width), Textures.Fit(roughness, height, width),
-            Textures.Fit(metallic, height, width), Textures.Fit(translucency, height, width), Textures.Fit(selfillum, height, width), Textures.Fit(tintmask, height, width), Textures.Fit(heightmap, height, width));
+        var (across, down) = options.Repeat;
+        if (across > 1 || down > 1) (height, width) = Textures.RepeatedSize(height, width, across, down, options.RepeatEdge);
+        FloatImage? Sized(FloatImage? map) => Textures.Repeat(map, across, down, height, width);
+        return new(Sized(color)!, Sized(normal)!, width, height, Sized(ao), Sized(roughness), Sized(metallic), Sized(translucency), Sized(selfillum), Sized(tintmask), Sized(heightmap));
     }
 
     private static FloatImage Tinted(FloatImage color, double[] tint)
@@ -443,6 +451,7 @@ public static class MaterialBuilder
         var emitBumpmap = options.EmitNormal && !(flatNormal && !emitPhong);
         if (!emitBumpmap) result.Dropped.Add(("bumpmap", !options.EmitNormal ? "the material is shipping without one" : "the normal map is flat"));
         ByteImage? basetexture = null, normal = null, phong = null, envmask = null, selfillum = null;
+        var maskInNormal = false;
         var tintable = options.Tintable;
         var bakeDetail = false;
         var toolDimensions = ToolDimensions(source, options, maps.Width, maps.Height);
@@ -512,6 +521,7 @@ public static class MaterialBuilder
             {
                 context.Log("Packing envmap mask into the bumpmap alpha");
                 normal = PbrMaps.PackEnvmapMask(normal, envmask);
+                maskInNormal = true;
             }
             if (maps.Selfillum is not null)
             {
@@ -559,7 +569,7 @@ public static class MaterialBuilder
         }
         if (options.GenerateVtf && basetexture is not null && envmask is not null)
         {
-            if (!options.GenerateVmt || result.Vmt!.Params.ContainsKey("$envmapmask")) Encode(ApplyOutputCap(envmask, "envmask", options, context), Path.Combine(outputDir, name + "_envmask.vtf"), result, options, context);
+            if (options.GenerateVmt ? result.Vmt!.Params.ContainsKey("$envmapmask") : !maskInNormal) Encode(ApplyOutputCap(envmask, "envmask", options, context), Path.Combine(outputDir, name + "_envmask.vtf"), result, options, context);
             else result.Dropped.Add(("envmask", "nothing in the material reads a separate mask"));
         }
         foreach (var (what, why) in result.Dropped) context.Log($"  skipped {what}: {why}");

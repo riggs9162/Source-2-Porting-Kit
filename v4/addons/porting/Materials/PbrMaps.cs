@@ -424,6 +424,20 @@ public static partial class PbrMaps
         return output;
     }
 
+    /// <summary>The <c>$blendmodulatetexture</c> of a painted blend: R softness, G the blend mask.</summary>
+    /// <remarks>Both engines compute smoothstep(mask - softness, mask + softness, painted value), so the authored mask copies across untouched. The shader reads this texture as linear, as Source 2 reads its own mask.</remarks>
+    public static ByteImage BakeBlendMask(FloatImage mask, double softness)
+    {
+        var output = new ByteImage(mask.Height, mask.Width, 3);
+        var red = Quantize((float)softness);
+        for (var i = 0; i < mask.Height * mask.Width; i++)
+        {
+            output.Data[i * 3] = red;
+            output.Data[i * 3 + 1] = Quantize(Math.Clamp(mask.Data[i * mask.Channels], 0f, 1f));
+        }
+        return output;
+    }
+
     /// <summary>The <c>_phong</c> exponent texture: R exponent, G metallic, B zero, A one.</summary>
     /// <remarks>
     /// R is (1 - roughness) ^ gamma scaled by the Phong strength, so a lower strength yields a softer response rather than only a dimmer

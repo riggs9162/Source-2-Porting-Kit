@@ -1,3 +1,5 @@
+using System.Numerics;
+
 namespace PortingKit.Addons.Porting;
 
 /// <summary>Texture decode, transfer functions and VTF encoding: the pixel plumbing every material tool sits on.</summary>
@@ -166,6 +168,27 @@ public static class Textures
         var rgb = Resampler.Resize(RgbOf(source), width, height, Resampler.Filter.Lanczos);
         var alpha = Resampler.Resize(source.Channel(3), width, height, Resampler.Filter.Lanczos);
         return ToFloat(Merge(rgb, alpha));
+    }
+
+    /// <summary>The power-of-two size of an image repeated inside one texture, fitted to <paramref name="maxEdge"/>.</summary>
+    public static (int Height, int Width) RepeatedSize(int height, int width, int across, int down, int maxEdge)
+    {
+        var (fullHeight, fullWidth) = (height * down, width * across);
+        var (fitHeight, fitWidth) = ScaledSize(fullHeight, fullWidth, maxEdge) ?? (fullHeight, fullWidth);
+        return (1 << BitOperations.Log2((uint)fitHeight), 1 << BitOperations.Log2((uint)fitWidth));
+    }
+
+    /// <summary>Lays copies of an image side by side, at exactly the given overall size.</summary>
+    /// <remarks>Each copy is resized before it is repeated, so a large repeat count never holds the full-size result in memory.</remarks>
+    public static FloatImage? Repeat(FloatImage? data, int across, int down, int height, int width)
+    {
+        if (data is null || (across == 1 && down == 1)) return Fit(data, height, width);
+        var cell = Fit(data, Math.Max(1, height / down), Math.Max(1, width / across))!;
+        var output = new FloatImage(cell.Height * down, cell.Width * across, cell.Channels);
+        var row = cell.Width * cell.Channels;
+        for (var y = 0; y < output.Height; y++)
+            for (var x = 0; x < across; x++) Array.Copy(cell.Data, y % cell.Height * row, output.Data, y * row * across + x * row, row);
+        return Fit(output, height, width);
     }
 
     /// <summary>Promotes a one or three-channel image to RGBA.</summary>

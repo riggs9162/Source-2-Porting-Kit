@@ -9,6 +9,7 @@ namespace PortingKit.Addons.Porting;
 /// to stock names, every authored blend layer exported as its own material, projected decals keeping decal intent, and a separate
 /// emission texture carried by the unlit additive detail pass so it never takes the opacity alpha. Every resource exports into its own
 /// folder, because decoded maps from different materials otherwise collide under shared filenames.</para>
+/// <para>A material painted between two layers also gets a <c>_blend</c> material that shows both on a displacement. See <see cref="BlendMaterial"/>.</para>
 /// <para>Model materials follow the model workflow: VertexLitGeneric with Phong, one material per resource, and files under
 /// <c>materials/models/&lt;namespace&gt;</c>, because that is the folder the compiled model's <c>$cdmaterials</c> points at.</para>
 /// </remarks>
@@ -312,6 +313,7 @@ public sealed class MaterialPortTool : ITool
         var started = DateTime.UtcNow;
         var entries = VmatParser.ParseLayers(prepared.Vmat, prepared.Root, prepared.TextureRoot);
         var layers = new JsonArray();
+        var built = new List<MaterialResult>();
         var written = 0;
         var failed = false;
         foreach (var entry in entries)
@@ -324,14 +326,11 @@ public sealed class MaterialPortTool : ITool
                 continue;
             }
             var surfaceprop = BrushMaterials.Source1Surfaceprop(entry.Surfaceprop);
-            var options = new MaterialOptions
-            {
-                ClampSize = run.Clamp, ToolSize = run.ToolSize, NormalStorage = run.NormalStorage, Branch = "gmod", Shader = "LightmappedGeneric", Surfaceprop = surfaceprop, Decal = entry.Decal, EmitNormal = run.EmitNormal && entry.Has("normal"),
-                Translucent = entry.Translucent, Alphatest = entry.Alphatest, Tintable = false, NormalGreen = "flip", GlowMode = "selfillum", PhongTintMode = "off"
-            };
+            var options = BrushOptions(entry, surfaceprop, run);
             var materialPath = Resources.UnderNamespace(run.Namespace, entry.RelDir);
             var folder = Path.Combine(run.Output, "materials", materialPath);
             var result = MaterialBuilder.Build(entry.ToSource(includeTint: false), folder, entry.Name, materialPath, options, run.Port.For(entry.Name));
+            built.Add(result);
             var missing = entry.Warnings.Where(warning => warning.StartsWith("missing:", StringComparison.Ordinal) || warning.StartsWith("ambiguous:", StringComparison.Ordinal)).ToList();
             var adapted = entry.Warnings.Where(warning => warning.StartsWith("adapted:", StringComparison.Ordinal)).ToList();
             if (entry.Shader.Contains("parallax")) adapted.Add("Source 2 parallax is represented by base colour and tangent normals");
@@ -360,8 +359,46 @@ public sealed class MaterialPortTool : ITool
             });
         }
         if (failed) failures++;
-        brushes.Add(new JsonObject { ["resource"] = prepared.Resource, ["status"] = failed ? "failed" : "complete", ["seconds"] = Math.Round((DateTime.UtcNow - started).TotalSeconds, 2), ["layers"] = layers });
+        var record = new JsonObject { ["resource"] = prepared.Resource, ["status"] = failed ? "failed" : "complete", ["seconds"] = Math.Round((DateTime.UtcNow - started).TotalSeconds, 2), ["layers"] = layers };
+        if (!failed && BlendMaterial.Supports(entries) && VmatParser.ParseBlend(prepared.Vmat, prepared.TextureRoot) is { } blend) written += PortBlend(blend, entries[1], built, run, record);
+        brushes.Add(record);
         return written;
+    }
+
+    private static MaterialOptions BrushOptions(VmatEntry entry, string surfaceprop, Run run) => new()
+    {
+        ClampSize = run.Clamp, ToolSize = run.ToolSize, NormalStorage = run.NormalStorage, Branch = "gmod", Shader = "LightmappedGeneric", Surfaceprop = surfaceprop, Decal = entry.Decal, EmitNormal = run.EmitNormal && entry.Has("normal"),
+        Translucent = entry.Translucent, Alphatest = entry.Alphatest, Tintable = false, NormalGreen = "flip", GlowMode = "selfillum", PhongTintMode = "off"
+    };
+
+    /// <summary>Builds the material that blends two already built layers, repeating the second one first when it tiles faster.</summary>
+    /// <remarks>The repeat goes in textures of its own, because the plain second layer may already sit on brushes in compiled maps.</remarks>
+    private static int PortBlend(VmatBlend blend, VmatEntry second, List<MaterialResult> built, Run run, JsonObject record)
+    {
+        var (first, plain) = (built[0], built[1]);
+        var surfaceprop = BrushMaterials.Source1Surfaceprop(second.Surfaceprop);
+        MaterialResult? repeated = null;
+        if (blend.Repeat is not (1, 1))
+        {
+            var name = first.Name + "_blend_b";
+            var options = BrushOptions(second, surfaceprop, run);
+            options.ToolSize = 0;
+            options.GenerateVmt = false;
+            options.Repeat = blend.Repeat;
+            options.RepeatEdge = BlendMaterial.RepeatEdge(plain, run.Clamp);
+            repeated = MaterialBuilder.Build(second.ToSource(includeTint: false), first.OutputDir, name, first.MaterialPath, options, run.Port.For(name));
+        }
+        var result = BlendMaterial.Build(blend, first, plain, repeated, run.Clamp, surfaceprop, run.Port.For(first.Name + "_blend"));
+        var written = result.Written.Concat(repeated?.Written ?? []).ToList();
+        var files = new JsonArray();
+        foreach (var path in written)
+            files.Add(new JsonObject { ["path"] = Path.GetRelativePath(run.Output, path).Replace('\\', '/'), ["sha256"] = Digest.File(path), ["bytes"] = new FileInfo(path).Length });
+        record["blend"] = new JsonObject
+        {
+            ["material"] = $"{result.MaterialPath}/{result.Name}", ["shader"] = result.Vmt!.Shader, ["mask"] = blend.Mask, ["softness"] = BlendMaterial.Softness,
+            ["layer_b_repeat"] = new JsonArray(blend.Repeat.Across, blend.Repeat.Down), ["adaptations"] = Strings(result.Notes), ["files"] = files
+        };
+        return written.Count;
     }
 
     /// <summary>Converts one model material the way the model workflow does, recording its source provenance.</summary>

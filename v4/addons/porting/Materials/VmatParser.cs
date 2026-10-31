@@ -311,6 +311,7 @@ public static partial class VmatParser
         var text = ReadText(vmatPath);
         var documents = VmatLayers.LayerDocuments(text);
         if (documents.Count == 0) return [ParseText(vmatPath, text, root, textureRoot, true)];
+        var painted = VmatLayers.PaintedBlend(text) is not null;
         var entries = new List<VmatEntry>();
         for (var index = 0; index < documents.Count; index++)
         {
@@ -318,10 +319,20 @@ public static partial class VmatParser
             var entry = ParseText(vmatPath, document, root, textureRoot, false);
             entry.Layer = layer;
             if (index > 0) entry.Name += "_layer_" + layer.ToLowerInvariant();
-            entry.Warnings.Add("adapted: exported authored layer " + layer + " independently; dynamic blending and triplanar mapping are not reproduced");
+            entry.Warnings.Add("adapted: exported authored layer " + layer + (painted ? " as a plain material beside the painted blend" : " independently; dynamic blending and triplanar mapping are not reproduced"));
             entries.Add(entry);
         }
         return entries;
+    }
+
+    /// <summary>Reads a painted blend's mask and tiling, or null when the material is not one.</summary>
+    public static VmatBlend? ParseBlend(string vmatPath, string? textureRoot = null)
+    {
+        if (VmatLayers.PaintedBlend(ReadText(vmatPath)) is not { } blend) return null;
+        var raw = blend.Mask?.Trim();
+        if (raw is null) return blend;
+        if (raw.StartsWith('[') || raw.StartsWith('{')) return blend with { Mask = null, MaskConstant = ParseRgba(raw)?[0] };
+        return blend with { Mask = Resolve(raw, vmatPath, textureRoot, blend.Notes) };
     }
 
     private static string RelativeDirectory(string path, string? root)

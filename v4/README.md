@@ -95,9 +95,22 @@ rather than a model, using `vpk:<vpk path>:<resource>.vmat_c`, a loose material,
 an exported folder. **Surface** decides the shader: brush materials use
 `LightmappedGeneric` with stock surface properties, every blend layer as its own
 material, and decals and glass kept; model materials use `VertexLitGeneric`. **Auto**
-treats anything under `materials/models/` as a model material. For brush materials,
-a namespace ending in the resource's own folder uses that folder once:
-`my_addon/tiles` with `materials/tiles/foo` gives `materials/my_addon/tiles/foo`.
+treats anything under `materials/models/` as a model material. A namespace ending in
+the resource's own folder uses that folder once: `my_addon/tiles` with
+`materials/tiles/foo` gives `materials/my_addon/tiles/foo`.
+
+A material Alyx blends by paint, such as `vr_simple_2way_blend` or a blend to a
+triplanar layer, also gets `<name>_blend.vmt`, a `WorldVertexTransition` holding both
+layers. Put it on a displacement and paint alpha: 0 shows the first layer and 255 the
+second, and the Alyx blend mask decides where the edge falls exactly as it does there.
+A plain brush cannot be painted, so vbsp shows the first layer on one. `<name>` and
+`<name>_layer_b` stay plain materials for the brushes around a blend. Source 1 gives
+both layers one set of UVs, so a second layer that tiles faster is repeated inside its
+own texture, and one that tiles slower keeps the first layer's scale. Source 2 paints
+softness per vertex, while a displacement has only one painted value, so every blend
+uses the sharpest softness Alyx allows. With a **Hammer and compile size** the first
+layer's colour on a blend stops at that size, because a blend cannot layer a full-size
+texture over a small one; its normal map and the second layer keep their resolution.
 
 A brush face stores its scale and shifts in texture pixels, so porting at a higher
 resolution stretches everything in Hammer and in any new compile. **Hammer and compile
