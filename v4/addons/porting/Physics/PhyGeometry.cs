@@ -35,20 +35,8 @@ public static class PhyGeometry
         var assembly = Assembly.GetExecutingAssembly();
         var name = assembly.GetManifestResourceNames().FirstOrDefault(item => item.EndsWith(ResourceSuffix, StringComparison.Ordinal))
             ?? throw new GeometryFinalizationException("The packaged native helper source is missing; reinstall the porting kit");
-        using var stream = assembly.GetManifestResourceStream(name)!;
-        using var reader = new ResourceReader(stream);
-        reader.GetResourceData(ResourceKey, out _, out var data);
-        var length = 0;
-        var at = 0;
-        var shift = 0;
-        while (true)
-        {
-            var part = data[at++];
-            length |= (part & 0x7F) << shift;
-            if ((part & 0x80) == 0) break;
-            shift += 7;
-        }
-        return data.AsSpan(at, length).ToArray();
+        var text = new ResourceManager(name[..^".resources".Length], assembly).GetString(ResourceKey);
+        return Encoding.UTF8.GetBytes(text ?? throw new GeometryFinalizationException("The packaged native helper source is empty; reinstall the porting kit"));
     }
 
     /// <summary>Recognizes complete x86 Windows PE files used by the bridge and compiler library.</summary>
@@ -60,6 +48,14 @@ public static class PhyGeometry
         var header = (long)BinaryPrimitives.ReadUInt32LittleEndian(binary.AsSpan(60));
         return header + 24 <= binary.Length && binary.AsSpan((int)header, 4).SequenceEqual("PE\0\0"u8) &&
             BinaryPrimitives.ReadUInt16LittleEndian(binary.AsSpan((int)header + 4)) == 0x14C;
+    }
+
+    /// <summary>Makes a unique working folder inside a cache, so that finished files move into place on one volume.</summary>
+    private static string Scratch(string parent, string prefix)
+    {
+        var path = Path.Combine(parent, prefix + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(path);
+        return path;
     }
 
     /// <summary>Runs an isolated helper with cancellation and a bounded lifetime while collecting small diagnostics.</summary>
@@ -107,7 +103,7 @@ public static class PhyGeometry
         if (!IsX86Binary(executable))
         {
             File.WriteAllBytes(sourcePath, source);
-            var scratch = Directory.CreateTempSubdirectory(Path.Combine(directory, "csharp-")).FullName;
+            var scratch = Scratch(directory, "csharp-");
             try
             {
                 var candidate = Path.Combine(scratch, "convex_serializer.exe");
@@ -395,7 +391,7 @@ public static class PhyGeometry
         var (executable, library, provenance) = Helper(compilerPath, cacheDirectory, context);
         var cache = Path.GetFullPath(cacheDirectory);
         Directory.CreateDirectory(cache);
-        var work = Directory.CreateTempSubdirectory(Path.Combine(cache, "native-geometry-")).FullName;
+        var work = Scratch(cache, "native-geometry-");
         byte[] replacement;
         var reports = new List<JsonObject>();
         try
