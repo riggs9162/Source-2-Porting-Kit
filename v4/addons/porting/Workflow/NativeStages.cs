@@ -3,21 +3,32 @@ using System.Text.Json.Nodes;
 namespace PortingKit.Addons.Porting;
 
 /// <summary>Runs the real porting stages for a workflow.</summary>
-/// <remarks>A regular model and its optional static form are separate outputs: their sources, material folders and
-/// compiled files never share a path, so a stage failing on one cannot touch or block the other.</remarks>
+/// <remarks>A regular model and its optional static and player forms are separate outputs: their sources and compiled
+/// files never share a path, so a stage failing on one cannot touch or block another. The player form reuses the
+/// regular model's materials, because it draws the same surfaces.</remarks>
 public sealed class NativeStages(ISettings settings) : IWorkflowStages
 {
     private const string MaterialsImplementation = "workflow-materials-1";
 
-    private static string SourcesFor(WorkflowOptions options, PortAsset asset, bool staticVariant)
+    private static string SourcesFor(WorkflowOptions options, PortAsset asset, ModelVariant variant)
     {
         var sources = WorkflowPaths.Sources(options, asset);
-        return staticVariant ? Path.Combine(sources, "static") : sources;
+        return variant switch
+        {
+            ModelVariant.Static => Path.Combine(sources, "static"),
+            ModelVariant.Player => Path.Combine(sources, "playermodel"),
+            _ => sources
+        };
     }
 
-    private static string MaterialRoot(WorkflowOptions options, bool staticVariant) => $"models/{options.Namespace}{(staticVariant ? "_static" : "")}";
+    private static string MaterialRoot(WorkflowOptions options, ModelVariant variant) => $"models/{options.Namespace}{(variant == ModelVariant.Static ? "_static" : "")}";
 
-    private static string Modelname(WorkflowOptions options, PortAsset asset, bool staticVariant) => $"{options.Namespace}/{asset.Relative}{(staticVariant ? "_static" : "")}.mdl";
+    private static string Modelname(WorkflowOptions options, PortAsset asset, ModelVariant variant) => variant switch
+    {
+        ModelVariant.Static => $"{options.Namespace}/{asset.Relative}_static.mdl",
+        ModelVariant.Player => $"{options.Namespace}/{asset.Relative}_pm.mdl",
+        _ => $"{options.Namespace}/{asset.Relative}.mdl"
+    };
 
     /// <summary>Resolves pasted links, exact compiled models, or exported model sets.</summary>
     public IReadOnlyList<PortAsset> Discover(WorkflowOptions options)
@@ -89,6 +100,13 @@ public sealed class NativeStages(ISettings settings) : IWorkflowStages
     public bool StaticEligible(WorkflowOptions options, PortAsset asset) =>
         Descriptor(WorkflowPaths.Sources(options, asset)).Get("kind").Str() == "prop" && PropPort.StaticEligible(RenderSource(options, asset));
 
+    /// <summary>Whether this asset may produce a playermodel: a ragdoll with a complete humanoid skeleton.</summary>
+    public bool PlayerEligible(WorkflowOptions options, PortAsset asset)
+    {
+        if (Descriptor(WorkflowPaths.Sources(options, asset)).Get("kind").Str() != "ragdoll") return false;
+        return GltfSkin.Parse(GltfDocument.Read(RenderSource(options, asset))) is { } skin && PlayermodelPort.IsHumanoidSkin(skin);
+    }
+
     public async Task<IReadOnlyList<string>> CalibrateAsync(WorkflowOptions options, PortContext context)
     {
         var project = WorkflowPaths.Project(options);
@@ -128,24 +146,28 @@ public sealed class NativeStages(ISettings settings) : IWorkflowStages
     }
 
     /// <summary>Writes prop or ragdoll sources and keeps their complete conversion audit.</summary>
-    public Task<IReadOnlyList<string>> ConvertAsync(WorkflowOptions options, PortAsset asset, bool staticVariant, PortContext context) => Task.Run<IReadOnlyList<string>>(() =>
+    public Task<IReadOnlyList<string>> ConvertAsync(WorkflowOptions options, PortAsset asset, ModelVariant variant, PortContext context) => Task.Run<IReadOnlyList<string>>(() =>
     {
         var source = RenderSource(options, asset);
-        var destination = SourcesFor(options, asset, staticVariant);
-        var modelname = Modelname(options, asset, staticVariant);
-        var cdmaterials = MaterialRoot(options, staticVariant) + "/";
-        var kind = staticVariant ? "prop" : ModelKind(options, asset);
+        var destination = SourcesFor(options, asset, variant);
+        var modelname = Modelname(options, asset, variant);
+        var cdmaterials = MaterialRoot(options, variant) + "/";
+        var kind = variant switch { ModelVariant.Static => "prop", ModelVariant.Player => "ragdoll", _ => ModelKind(options, asset) };
         var calibration = Path.Combine(WorkflowPaths.Project(options), "calibration", "compiler_calibration.json");
         var friction = File.Exists(calibration) ? Json.Load(calibration).Get("friction_compile_scale").Dbl(1.0) : 1.0;
         string qc;
+        string? animationQc = null;
         List<string> files, warnings;
         JsonObject report;
-        if (kind == "prop") (qc, files, report, warnings) = PropPort.Port(source, destination, modelname, cdmaterials, context, staticVariant);
+        if (variant == ModelVariant.Player)
+            (qc, animationQc, files, report, warnings) = PlayermodelPort.Port(source, destination, modelname, cdmaterials, options.AnimationCache.Length > 0 ? options.AnimationCache : null, friction, options.IncludeSourceAnimations, context);
+        else if (kind == "prop") (qc, files, report, warnings) = PropPort.Port(source, destination, modelname, cdmaterials, context, variant == ModelVariant.Static);
         else (qc, files, report, warnings) = RagdollPort.Port(source, destination, modelname, cdmaterials, options.IncludeSourceAnimations, friction, context);
         var descriptor = Path.Combine(destination, "build.json");
         Json.Save(descriptor, new JsonObject
         {
-            ["modelname"] = modelname, ["qcs"] = new JsonArray(qc), ["source"] = source, ["kind"] = kind, ["static_variant"] = staticVariant,
+            ["modelname"] = modelname, ["qcs"] = new JsonArray((animationQc is null ? [qc] : new[] { animationQc, qc }).Select(path => (JsonNode?)path).ToArray()),
+            ["source"] = source, ["kind"] = kind, ["static_variant"] = variant == ModelVariant.Static, ["playermodel"] = variant == ModelVariant.Player,
             ["report"] = report.DeepClone(), ["warnings"] = new JsonArray(warnings.Select(warning => (JsonNode?)warning).ToArray())
         });
         return [.. files, descriptor];
@@ -183,10 +205,11 @@ public sealed class NativeStages(ISettings settings) : IWorkflowStages
     /// texture and no $bumpmap, $normalmap or $phong reaches any skin, because any one of them discards the
     /// vertex lighting VRAD baked. Cubemap reflections, masks, metal darkening, opacity, tint and emission all
     /// stay. Its folder is separate, so the two lighting setups can never overwrite each other.</remarks>
-    public async Task<IReadOnlyList<string>> MaterialsAsync(WorkflowOptions options, PortAsset asset, bool staticVariant, PortContext context)
+    public async Task<IReadOnlyList<string>> MaterialsAsync(WorkflowOptions options, PortAsset asset, ModelVariant variant, PortContext context)
     {
+        var staticVariant = variant == ModelVariant.Static;
         var root = MaterialSources(options, asset);
-        var destination = SourcesFor(options, asset, staticVariant);
+        var destination = SourcesFor(options, asset, variant);
         var payload = WorkflowPaths.Payload(options, asset);
         var report = Descriptor(destination).Get("report");
         var required = report.Get("material_map").Obj();
@@ -197,7 +220,7 @@ public sealed class NativeStages(ISettings settings) : IWorkflowStages
             if (!required.ContainsKey(Resources.Token(source.Str()))) throw new InvalidDataException($"Unmapped material source for compiler alias {alias}: {source.Str()}");
         }
         var selected = SelectMaterials(root, required);
-        var folder = MaterialRoot(options, staticVariant);
+        var folder = MaterialRoot(options, variant);
         var written = new List<string>();
         var audits = new JsonArray();
         var compiled = asset.CompiledInput && options.MaterialSource.Length == 0;
@@ -275,9 +298,9 @@ public sealed class NativeStages(ISettings settings) : IWorkflowStages
     }
 
     /// <summary>Compiles, checks and stages exactly this model's runtime files.</summary>
-    public async Task<IReadOnlyList<string>> CompileAsync(WorkflowOptions options, PortAsset asset, bool staticVariant, PortContext context)
+    public async Task<IReadOnlyList<string>> CompileAsync(WorkflowOptions options, PortAsset asset, ModelVariant variant, PortContext context)
     {
-        var destination = SourcesFor(options, asset, staticVariant);
+        var destination = SourcesFor(options, asset, variant);
         var payload = WorkflowPaths.Payload(options, asset);
         var descriptor = Descriptor(destination);
         var game = Studiomdl.CompilerGame(WorkflowPaths.Project(options), options.Game, payload);
@@ -310,11 +333,18 @@ public sealed class NativeStages(ISettings settings) : IWorkflowStages
             }
         }
         written.AddRange(CompiledStage.CopyDrivers(descriptor, payload));
+        JsonObject? playerAudit = null;
+        if (variant == ModelVariant.Player)
+        {
+            var qcs = descriptor.Get("qcs").Arr();
+            playerAudit = PlayerAnimations.AuditCompiledPlayerModel(Studiomdl.ModelPathFor(qcs[^1].Str(), game)!, Studiomdl.ModelPathFor(qcs[0].Str(), game)!);
+        }
         var reportPath = Path.Combine(destination, "compiled-report.json");
         Json.Save(reportPath, new JsonObject
         {
             ["checksum_validation"] = "passed", ["modelname"] = descriptor.Get("modelname").Str(), ["engine_validation"] = "not_run",
-            ["files"] = new JsonArray(written.Select(path => (JsonNode?)path).ToArray()), ["physics_audits"] = physicsAudits, ["model_audits"] = modelAudits
+            ["files"] = new JsonArray(written.Select(path => (JsonNode?)path).ToArray()), ["physics_audits"] = physicsAudits, ["model_audits"] = modelAudits,
+            ["player_animation_audit"] = playerAudit
         });
         written.Add(reportPath);
         return written;

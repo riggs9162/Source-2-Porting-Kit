@@ -7,11 +7,12 @@ public interface IWorkflowStages
 {
     IReadOnlyList<PortAsset> Discover(WorkflowOptions options);
     bool StaticEligible(WorkflowOptions options, PortAsset asset);
+    bool PlayerEligible(WorkflowOptions options, PortAsset asset);
     Task<IReadOnlyList<string>> CalibrateAsync(WorkflowOptions options, PortContext context);
     Task<IReadOnlyList<string>> ExtractAsync(WorkflowOptions options, PortAsset asset, PortContext context);
-    Task<IReadOnlyList<string>> ConvertAsync(WorkflowOptions options, PortAsset asset, bool staticVariant, PortContext context);
-    Task<IReadOnlyList<string>> MaterialsAsync(WorkflowOptions options, PortAsset asset, bool staticVariant, PortContext context);
-    Task<IReadOnlyList<string>> CompileAsync(WorkflowOptions options, PortAsset asset, bool staticVariant, PortContext context);
+    Task<IReadOnlyList<string>> ConvertAsync(WorkflowOptions options, PortAsset asset, ModelVariant variant, PortContext context);
+    Task<IReadOnlyList<string>> MaterialsAsync(WorkflowOptions options, PortAsset asset, ModelVariant variant, PortContext context);
+    Task<IReadOnlyList<string>> CompileAsync(WorkflowOptions options, PortAsset asset, ModelVariant variant, PortContext context);
 }
 
 /// <summary>Where one asset's extraction, editable sources and isolated addon payload live.</summary>
@@ -62,7 +63,7 @@ public static class PortWorkflow
         static string Location(string value) => value.Length == 0 ? "" : Path.GetFullPath(value).ToLowerInvariant();
         return string.Join('|', options.Sources, Location(options.Project), options.Namespace, options.ModelType, Location(options.MaterialSource),
             Location(options.VrfExecutable), Location(options.Compiler), Location(options.Game), options.IncludeSourceAnimations, options.EmitNormal, options.Resolution,
-            options.StaticVariant, options.StaticResolution, options.Install, Location(options.GmodAddons));
+            options.StaticVariant, options.StaticResolution, options.CreatePlayermodels, options.Install, Location(options.GmodAddons));
     }
 
     /// <summary>Stamps selected archives and companions by size and time, without walking an entire game.</summary>
@@ -133,10 +134,15 @@ public static class PortWorkflow
             queue.Add(($"native:{asset.Key}", "native", asset, [.. prerequisite, "calibrate"]));
             queue.Add(($"materials:{asset.Key}", "materials", asset, [$"native:{asset.Key}"]));
             queue.Add(($"compile:{asset.Key}", "compile", asset, [$"native:{asset.Key}", $"materials:{asset.Key}"]));
-            if (!options.StaticVariant) continue;
-            queue.Add(($"static:{asset.Key}", "static", asset, [$"native:{asset.Key}"]));
-            queue.Add(($"static_materials:{asset.Key}", "static_materials", asset, [$"static:{asset.Key}"]));
-            queue.Add(($"static_compile:{asset.Key}", "static_compile", asset, [$"static:{asset.Key}", $"static_materials:{asset.Key}"]));
+            if (options.StaticVariant)
+            {
+                queue.Add(($"static:{asset.Key}", "static", asset, [$"native:{asset.Key}"]));
+                queue.Add(($"static_materials:{asset.Key}", "static_materials", asset, [$"static:{asset.Key}"]));
+                queue.Add(($"static_compile:{asset.Key}", "static_compile", asset, [$"static:{asset.Key}", $"static_materials:{asset.Key}"]));
+            }
+            if (!options.CreatePlayermodels || options.ModelType == "prop") continue;
+            queue.Add(($"player:{asset.Key}", "player", asset, [$"native:{asset.Key}"]));
+            queue.Add(($"compile_pm:{asset.Key}", "compile_pm", asset, [$"player:{asset.Key}", $"materials:{asset.Key}"]));
         }
         queue.Add(("package", "package", null, []));
         if (options.Install) queue.Add(("install", "install", null, ["package"]));
@@ -240,6 +246,15 @@ public static class PortWorkflow
             record.Messages = [["Info", "Static props are built only from models with no physics or one rigid body"]];
             return;
         }
+        if (kind is "player" or "compile_pm" && state.Tasks[$"native:{asset!.Key}"].Status == "success" && !stages.PlayerEligible(options, asset))
+        {
+            record.Status = "skipped";
+            record.Error = "";
+            record.Rerun = false;
+            record.Outputs = [];
+            record.Messages = [["Info", "Playermodels are built only from humanoid characters"]];
+            return;
+        }
         record.Status = "running";
         record.Messages = [];
         record.Error = "";
@@ -263,12 +278,14 @@ public static class PortWorkflow
             {
                 "calibrate" => await stages.CalibrateAsync(options, scoped),
                 "extract" => await stages.ExtractAsync(options, asset!, scoped),
-                "native" => await stages.ConvertAsync(options, asset!, false, scoped),
-                "materials" => await stages.MaterialsAsync(options, asset!, false, scoped),
-                "compile" => await stages.CompileAsync(options, asset!, false, scoped),
-                "static" => await stages.ConvertAsync(options, asset!, true, scoped),
-                "static_materials" => await stages.MaterialsAsync(options, asset!, true, scoped),
-                "static_compile" => await stages.CompileAsync(options, asset!, true, scoped),
+                "native" => await stages.ConvertAsync(options, asset!, ModelVariant.Regular, scoped),
+                "materials" => await stages.MaterialsAsync(options, asset!, ModelVariant.Regular, scoped),
+                "compile" => await stages.CompileAsync(options, asset!, ModelVariant.Regular, scoped),
+                "static" => await stages.ConvertAsync(options, asset!, ModelVariant.Static, scoped),
+                "static_materials" => await stages.MaterialsAsync(options, asset!, ModelVariant.Static, scoped),
+                "static_compile" => await stages.CompileAsync(options, asset!, ModelVariant.Static, scoped),
+                "player" => await stages.ConvertAsync(options, asset!, ModelVariant.Player, scoped),
+                "compile_pm" => await stages.CompileAsync(options, asset!, ModelVariant.Player, scoped),
                 "package" => AddonPackager.Package(options, assets, state, scoped),
                 _ => AddonPackager.Install(options, scoped)
             };

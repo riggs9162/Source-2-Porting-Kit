@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.Json.Nodes;
 
 namespace PortingKit.Addons.Porting;
@@ -47,6 +48,16 @@ public static class AddonPackager
     private static string BuiltKind(WorkflowOptions options, PortAsset asset) =>
         Json.Load(Path.Combine(WorkflowPaths.Sources(options, asset), "build.json")).Get("kind").Str("ragdoll");
 
+    /// <summary>The Lua lines that put one playermodel in Garry's Mod's player list.</summary>
+    private static IEnumerable<string> PlayerRegistration(WorkflowOptions options, PortAsset asset)
+    {
+        var stem = Path.GetFileName(asset.Relative);
+        var words = stem.Split('_', StringSplitOptions.RemoveEmptyEntries).Select(word => char.ToUpperInvariant(word[0]) + word[1..].ToLowerInvariant());
+        var display = JsonSerializer.Serialize($"{string.Join(' ', words)} [{options.Namespace}]", Json.Options);
+        var model = JsonSerializer.Serialize($"models/{options.Namespace}/{asset.Relative}_pm.mdl", Json.Options);
+        return [$"player_manager.AddValidModel({display}, {model})", $"list.Set(\"PlayerOptionsModel\", {display}, {model})"];
+    }
+
     /// <summary>Builds the addon completely before replacing the previous package.</summary>
     /// <remarks>Only models whose conversion, materials and compile all succeeded go in, and a static form goes in
     /// only when its own materials and compile succeeded, so a failed static build never costs the regular model.
@@ -63,6 +74,7 @@ public static class AddonPackager
             Directory.CreateDirectory(staging);
             var copied = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             var written = new List<string>();
+            var registrations = new List<string>();
             foreach (var asset in successful)
             {
                 context.Check();
@@ -71,6 +83,12 @@ public static class AddonPackager
                 var stages = new List<string> { "materials", "compile" };
                 if (state.Tasks.GetValueOrDefault($"static_materials:{asset.Key}")?.Status == "success" && state.Tasks.GetValueOrDefault($"static_compile:{asset.Key}")?.Status == "success")
                     stages.AddRange(["static_materials", "static_compile"]);
+                var player = state.Tasks.GetValueOrDefault($"compile_pm:{asset.Key}")?.Status == "success";
+                if (player)
+                {
+                    stages.Add("compile_pm");
+                    registrations.AddRange(PlayerRegistration(options, asset));
+                }
                 foreach (var kind in stages)
                     foreach (var (name, digest) in state.Tasks[$"{kind}:{asset.Key}"].Outputs)
                     {
@@ -96,7 +114,14 @@ public static class AddonPackager
                     copied[name] = digest;
                     written.Add(target);
                 }
-                context.Log($"Packaged {asset.Relative}");
+                context.Log($"Packaged {asset.Relative}" + (player ? " and playermodel" : ""));
+            }
+            if (registrations.Count > 0)
+            {
+                var identity = Digest.Text(options.Namespace)[..16];
+                var script = Path.Combine(staging, "lua", "autorun", $"s2kit_{identity}_playermodels.lua");
+                Fmt.WriteText(script, "if ( SERVER ) then\n    AddCSLuaFile()\nend\n\n" + string.Join('\n', registrations) + "\n");
+                written.Add(script);
             }
             var kinds = successful.Select(asset => BuiltKind(options, asset)).Distinct().ToList();
             var contents = kinds is ["ragdoll"] ? "ragdolls" : kinds is ["prop"] ? "props" : "models";

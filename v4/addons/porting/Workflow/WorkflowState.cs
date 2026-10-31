@@ -3,6 +3,9 @@ using System.Text.Json;
 
 namespace PortingKit.Addons.Porting;
 
+/// <summary>Which of a model's separate outputs a stage builds.</summary>
+public enum ModelVariant { Regular, Static, Player }
+
 /// <summary>The settings recorded with a resumable project.</summary>
 public sealed record WorkflowOptions
 {
@@ -25,6 +28,12 @@ public sealed record WorkflowOptions
 
     /// <summary>Caps the static model's textures independently; zero keeps native size.</summary>
     public int StaticResolution { get; init; }
+
+    /// <summary>Adds a separate <c>_pm</c> playermodel for humanoid characters.</summary>
+    public bool CreatePlayermodels { get; init; }
+
+    /// <summary>Where the published player animation sources are cached.</summary>
+    public string AnimationCache { get; init; } = "";
 
     public bool Install { get; init; }
     public string GmodAddons { get; init; } = "";
@@ -115,7 +124,7 @@ public sealed class WorkflowState
         }
         text.Append("\n## Conversion audits\n\n");
         foreach (var record in Tasks.Values)
-            foreach (var output in record.Outputs.Keys.Where(name => Path.GetFileName(name) is "ragdoll-report.json" or "prop-report.json" or "compiled-report.json" or "material-report.json"))
+            foreach (var output in record.Outputs.Keys.Where(name => Path.GetFileName(name) is "ragdoll-report.json" or "prop-report.json" or "playermodel-report.json" or "compiled-report.json" or "material-report.json"))
                 text.Append($"- [{Path.GetFileName(output)}](<{output.Replace('\\', '/')}>)\n");
         text.Append("\n## Validation\n\n")
             .Append("- Compiled outputs are packaged only after file-consistency checks and available physics audits.\n")
