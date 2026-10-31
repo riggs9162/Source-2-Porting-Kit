@@ -1,0 +1,12 @@
+{
+  "id": "porting",
+  "name": "Source 2 porting",
+  "version": "1.0.0",
+  "description": "Ports Source 2 models and materials into Source 1 addons.",
+  "author": "Source Backport",
+  "apiVersion": 1,
+  "assembly": "bin/{configuration}/net10.0/Kit.Addons.Porting.dll",
+  "entryPoint": "PortingKit.Addons.Porting.PortingAddon",
+  "project": "Porting.csproj",
+  "dependencies": []
+}
