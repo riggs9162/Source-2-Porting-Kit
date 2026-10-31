@@ -157,7 +157,8 @@ internal static class MeshRepair
         /// <remarks>The original asks a filtered graph view for its first node. The view walks the graph's own
         /// order unless the component is under half the graph, when it walks the component's Python set, whose
         /// order comes from hash slots. Which face starts decides which side of a badly wound patch keeps its
-        /// winding, so the set's order is rebuilt rather than approximated.</remarks>
+        /// winding, so the set's order is rebuilt rather than approximated. The view holds a copy of the component's
+        /// set, which is why the order is applied twice.</remarks>
         public int Start(List<int> component)
         {
             if (2 * component.Count >= Nodes.Count)
@@ -165,7 +166,7 @@ internal static class MeshRepair
                 var members = new HashSet<int>(component);
                 return Nodes.First(members.Contains);
             }
-            return PythonIntSet.First(PythonIntSet.Rebuilt(component));
+            return PythonIntSet.Order(PythonIntSet.Order(component))[0];
         }
     }
 
@@ -384,11 +385,6 @@ internal static class PythonIntSet
         return table;
     }
 
-    private static IEnumerable<int> Iterate(Table table) => table.Slots.Where(value => value >= 0).Select(value => (int)value);
-
-    /// <summary>The set a filtered view holds: the component's set, copied once through iteration.</summary>
-    public static List<int> Rebuilt(List<int> inserted) => Iterate(Build(Iterate(Build(inserted)))).ToList();
-
-    /// <summary>The first element of an iteration order.</summary>
-    public static int First(List<int> ordered) => ordered[0];
+    /// <summary>The order a set built by adding these values, in turn, iterates in.</summary>
+    public static List<int> Order(IEnumerable<int> inserted) => Build(inserted).Slots.Where(value => value >= 0).Select(value => (int)value).ToList();
 }
