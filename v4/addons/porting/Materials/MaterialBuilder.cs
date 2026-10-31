@@ -72,6 +72,19 @@ public sealed class MaterialSource
     };
 }
 
+/// <summary>How a normal map is stored on disk.</summary>
+public enum NormalStorage
+{
+    /// <summary>DXT at full size. Model materials use this, because curved surfaces hide the blocks.</summary>
+    Compressed,
+
+    /// <summary>Uncompressed at half size, down to 512. Takes the same space as <see cref="Compressed"/> at full size.</summary>
+    Half,
+
+    /// <summary>Uncompressed at full size, four times the space.</summary>
+    Full
+}
+
 /// <summary>Everything that changes what a build produces.</summary>
 public sealed class MaterialOptions
 {
@@ -117,6 +130,13 @@ public sealed class MaterialOptions
     /// records that size in the BSP while the game draws the full resolution. $basetexturetransform looks like the answer and is not:
     /// it also multiplies the UVs of maps already compiled, shrinking every texture in them.</remarks>
     public int ToolSize { get; set; }
+
+    /// <summary>How the normal map is stored.</summary>
+    /// <remarks>DXT gives each 4x4 block two 5:6:5 colours, so a nearly flat normal moves in coarse steps, and a reflection turns twice as
+    /// far as the normal that drives it. On a smooth tile the cubemap therefore jumps at every block edge and breaks into hard squares,
+    /// and a lower resolution only makes the squares bigger. Uncompressed normals stay smooth at any size, so half size is the
+    /// better use of the same disk space on a flat surface.</remarks>
+    public NormalStorage NormalStorage { get; set; } = NormalStorage.Compressed;
 
     /// <summary>Ship a normal map at all. Off drops $bumpmap and $phong with it.</summary>
     /// <remarks>That is the combination a prop_static needs: every branch before the CS:GO engine throws away VRAD's baked per-vertex lighting on a model whose material carries $bumpmap, $normalmap or $phong, and lights it from a single point instead.</remarks>
@@ -209,6 +229,9 @@ public static class MaterialBuilder
 {
     /// <summary>Output keys that accept an individual resolution cap.</summary>
     public static readonly string[] OutputKeys = ["color", "normal", "phong", "envmask", "selfillum"];
+
+    /// <summary>The size <see cref="NormalStorage.Half"/> stops at. Below it, grooves and rivets start to lose their shape.</summary>
+    private const int SmallestHalvedNormal = 512;
 
     /// <summary>The longest-edge cap to decode at, from the tool cap and the output caps.</summary>
     /// <remarks>
@@ -374,6 +397,12 @@ public static class MaterialBuilder
         context.Log($"  wrote {Path.GetFileName(target)}");
     }
 
+    private static void EncodeNormal(ByteImage pixels, string target, MaterialResult result, MaterialOptions options, PortContext context)
+    {
+        if (options.NormalStorage == NormalStorage.Half) pixels = Textures.ClampBytes(pixels, Math.Max(SmallestHalvedNormal, Math.Max(pixels.Width, pixels.Height) / 2))!;
+        Encode(pixels, target, result, options, context, options.NormalStorage == NormalStorage.Compressed ? null : VtfFormat.BGRA8888, Textures.FlagNormal);
+    }
+
     /// <summary>The size a texture would have had at the tool size, or null when it already does.</summary>
     /// <remarks>Worked out per texture with the clamp that sized it, so a 256 source a 512 limit never touched needs nothing, and only
     /// brush materials ask: a model's UVs are normalized and never depend on texture size.</remarks>
@@ -496,7 +525,7 @@ public static class MaterialBuilder
             Encode(ApplyOutputCap(basetexture, "color", options, context), Path.Combine(outputDir, name + "_color.vtf"), result, options, context, flags: Textures.FlagSrgb);
             if (toolDimensions is var (toolHeight, toolWidth))
                 Encode(Textures.ToBytes(Textures.Fit(Textures.ToFloat(basetexture), toolHeight, toolWidth)!), Path.Combine(outputDir, name + "_tool.vtf"), result, options, context, flags: Textures.FlagSrgb);
-            if (normal is not null) Encode(ApplyOutputCap(normal, "normal", options, context), Path.Combine(outputDir, name + "_normal.vtf"), result, options, context, flags: Textures.FlagNormal);
+            if (normal is not null) EncodeNormal(ApplyOutputCap(normal, "normal", options, context), Path.Combine(outputDir, name + "_normal.vtf"), result, options, context);
             if (phong is not null) Encode(ApplyOutputCap(phong, "phong", options, context), Path.Combine(outputDir, name + "_phong.vtf"), result, options, context);
             if (selfillum is not null)
             {

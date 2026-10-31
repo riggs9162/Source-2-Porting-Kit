@@ -101,6 +101,13 @@ reflection mask there, and writes a separate `_envmask` file only for materials
 without a normal map, which can read it. The mask carries the reflection's strength,
 so brush VMTs need no `$envmaptint` or the other envmap controls.
 
+Compression moves a nearly flat normal in coarse steps, which breaks reflections on a
+smooth surface into square blocks. **Brush normal maps** therefore stay uncompressed.
+The default, `half`, stores them at half size down to 512, which takes the same space
+as compressed at full size and still bumps well. `full` keeps every pixel at four
+times the space, and `compressed` brings the blocks back. Reflections are otherwise as
+sharp as the map's cubemaps, because Source 1 has no roughness to blur them.
+
 Open **Materials > Hotspot editor** to edit trim-sheet regions. It supports drawing,
 resizing, multi-selection, exact coordinates, undo/redo, grid personalization,
 layout presets, region detection, fit previews, and recovery drafts. Its processing
