@@ -16,6 +16,10 @@ public sealed record ConversionOptions
     public bool GenerateQc { get; init; } = true;
     public bool ExportPhysics { get; init; } = true;
     public bool ExportAnimations { get; init; } = true;
+
+    /// <summary>Ignores any skeleton and writes the bind pose as one rigid mesh, which is what a separate static prop needs.</summary>
+    /// <remarks>Skinned vertices are already in model space at the bind pose, so dropping the skin moves nothing.</remarks>
+    public bool Rigid { get; init; }
     public double AnimationFps { get; init; } = 30.0;
     public bool AutoLoopDetect { get; init; } = true;
 
@@ -263,7 +267,7 @@ public static class GltfSmd
         var clips = new List<GltfClip>();
         int[]? vertexJoints = null;
         float[]? vertexWeights = null;
-        if (renderMesh.GltfData.Get("skins").Bool())
+        if (!options.Rigid && renderMesh.GltfData.Get("skins").Bool())
         {
             var document = GltfDocument.Read(modelSet.RenderPath);
             skin = GltfSkin.Parse(document);

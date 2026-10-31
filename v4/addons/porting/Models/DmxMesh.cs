@@ -16,8 +16,9 @@ public static class DmxMesh
     /// <summary>Reuses a verified native skeleton and exports one DMX mesh in Source inches.</summary>
     /// <remarks>An unweighted DMX, a static prop's LOD, binds every vertex to the reference's only bone, and is
     /// refused against a multi-bone skeleton.</remarks>
+    /// <param name="collapseWeights">Binds a weighted DMX to the only bone of a rigid reference, keeping its bind-pose positions.</param>
     /// <returns>The number of triangles written.</returns>
-    public static int WriteDmxReference(string dmxPath, string smdPath, string reference, IReadOnlyList<string> boneNames)
+    public static int WriteDmxReference(string dmxPath, string smdPath, string reference, IReadOnlyList<string> boneNames, bool collapseWeights = false)
     {
         var data = DmxDocument.Load(dmxPath);
         var models = data.OfType("DmeModel");
@@ -35,7 +36,7 @@ public static class DmxMesh
         var uvIndices = state.Array<int>("texcoord$0Indices");
         var referenceText = PythonText.Read(reference);
         var header = referenceText[..referenceText.IndexOf("triangles\n", StringComparison.Ordinal)];
-        var rigid = count == 0;
+        var rigid = count == 0 || collapseWeights;
         if (rigid && ReferenceBoneCount(header) != 1) throw new InvalidDataException("An unweighted LOD DMX needs a single-bone reference skeleton");
         var slots = rigid ? 1 : count;
         double[] weights;
@@ -196,7 +197,7 @@ public static class DmxMesh
     /// <returns>QC lines, every file written, and whether large meshes were partitioned. Partitioned lines declare
     /// their own bodyparts and replace every <c>$body</c> line of the model.</returns>
     public static (List<string> Lines, List<string> Files, bool Partitioned) WriteLodReferences(string reference, IReadOnlyList<(double Distance, string Source)> lodSources,
-        IReadOnlyList<string> boneNames, PortContext? context = null)
+        IReadOnlyList<string> boneNames, PortContext? context = null, bool collapseWeights = false)
     {
         var lodSmds = new List<(double Distance, string Source)>();
         var files = new List<string>();
@@ -205,7 +206,7 @@ public static class DmxMesh
         {
             var (distance, source) = lodSources[index];
             var destination = Path.Combine(Path.GetDirectoryName(reference) ?? "", $"{stem}_lod{index + 1}.smd");
-            var triangles = WriteDmxReference(source, destination, reference, boneNames);
+            var triangles = WriteDmxReference(source, destination, reference, boneNames, collapseWeights);
             lodSmds.Add((distance, destination));
             files.Add(destination);
             context?.Log($"LOD {index + 1}: {triangles} triangles from {Path.GetFileName(source)}");

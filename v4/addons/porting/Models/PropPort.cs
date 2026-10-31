@@ -52,6 +52,16 @@ public static partial class PropPort
         return "prop";
     }
 
+    /// <summary>Whether a model may also ship as a separate static prop.</summary>
+    /// <remarks>Only a model with no physics, or one rigid body, can stand still without losing behaviour. Multiple
+    /// articulated bodies, as on a ragdoll, have no static form.</remarks>
+    public static bool StaticEligible(string glbPath)
+    {
+        var documents = PhysicsDocuments(glbPath);
+        if (documents.Any(item => item.Get("m_joints").Bool() || item.Get("m_constraints2").Bool())) return false;
+        return documents.Sum(item => item.Get("m_parts").Arr().Count) <= 1;
+    }
+
     /// <summary>Totals the PHYS part masses, or nothing when any part leaves its mass to the engine.</summary>
     private static double? AuthoredMass(string glbPath)
     {
@@ -128,18 +138,18 @@ public static partial class PropPort
     }
 
     /// <summary>Writes a <c>$staticprop</c> with source collision, authored mass and authored LOD meshes.</summary>
-    private static Ported PortStatic(ModelSet modelSet, string outDir, string modelname, string cdmaterials, List<(double Distance, string Source)> lodSources, PortContext? context)
+    private static Ported PortStatic(ModelSet modelSet, string outDir, string modelname, string cdmaterials, List<(double Distance, string Source)> lodSources, bool rigid, PortContext? context)
     {
         var mass = AuthoredMass(modelSet.RenderPath);
         var options = new ConversionOptions
         {
-            ModelnamePrefix = PythonText.PosixParent(modelname), Cdmaterials = cdmaterials, ExportAnimations = false, PreserveFolders = false, ReplaceExisting = true,
+            ModelnamePrefix = PythonText.PosixParent(modelname), Cdmaterials = cdmaterials, ExportAnimations = false, Rigid = rigid, PreserveFolders = false, ReplaceExisting = true,
             AutoMass = mass is null, StaticMass = mass is { } authored && authored != 0 ? authored : 10.0
         };
         var converted = GltfSmd.ConvertModelSet(modelSet, options, modelSet.BaseDir, outDir, context);
         if (!converted.Ok) throw new InvalidDataException(converted.Reason.Length > 0 ? converted.Reason : $"Conversion returned {converted.Status}");
         var qc = Path.Combine(outDir, $"{modelSet.Name}.qc");
-        var (lodLines, lodFiles, partitioned) = DmxMesh.WriteLodReferences(Path.Combine(outDir, $"{modelSet.Name}.smd"), lodSources, [], context);
+        var (lodLines, lodFiles, partitioned) = DmxMesh.WriteLodReferences(Path.Combine(outDir, $"{modelSet.Name}.smd"), lodSources, [], context, rigid);
         var physics = new JsonObject
         {
             ["collision"] = converted.HasPhysics, ["surfaceprop"] = converted.Surfaceprop, ["mass"] = converted.Mass,
@@ -167,7 +177,9 @@ public static partial class PropPort
     /// <c>.lods.json</c>. Skinned models keep their native skeleton and every exported clip as a dynamic prop.
     /// Material names stay the VMAT basenames, and <c>$cdmaterials</c> lists <paramref name="cdmaterials"/> joined
     /// with each source folder, so the shipped VMTs mirror the source resource tree.</remarks>
-    public static PropPortResult Port(string glbPath, string outDir, string modelname, string cdmaterials = "models/", PortContext? context = null)
+    /// <param name="staticVariant">Writes the separate static form of a skinned model too: its bind pose as a rigid
+    /// <c>$staticprop</c>, keeping source collision and collapsing weighted LODs onto the one bone.</param>
+    public static PropPortResult Port(string glbPath, string outDir, string modelname, string cdmaterials = "models/", PortContext? context = null, bool staticVariant = false)
     {
         glbPath = Path.GetFullPath(glbPath);
         Directory.CreateDirectory(outDir);
@@ -176,12 +188,13 @@ public static partial class PropPort
         var modelSet = new ModelSetScanner(Path.GetDirectoryName(Path.GetFullPath(glbPath)) ?? "", false).FindSets().FirstOrDefault(item => NativePort.PathsEqual(item.RenderPath, glbPath))
             ?? throw new InvalidDataException($"Could not discover the model set for {glbPath}");
         var fidelity = Fidelity(glbPath);
-        var animated = document.Get("skins").Bool();
+        var skinned = document.Get("skins").Bool();
+        var animated = skinned && !staticVariant;
         var manifest = Path.ChangeExtension(glbPath, ".lods.json");
         var lodSources = File.Exists(manifest) ? NativePort.LoadLodSources(manifest) : [];
         var ported = animated
             ? PortAnimated(glbPath, modelSet, outDir, modelname, cdmaterials, context)
-            : PortStatic(modelSet, outDir, modelname, cdmaterials, lodSources, context);
+            : PortStatic(modelSet, outDir, modelname, cdmaterials, lodSources, skinned, context);
         context?.Check();
         var resources = MaterialResources(document, fidelity, lodSources);
         var used = RenderMaterials(ported.Qc, ported.Files);
@@ -209,6 +222,7 @@ public static partial class PropPort
             ["lod_count"] = lodSources.Count, ["physics"] = ported.Physics,
             ["engine_validation"] = "not_run", ["warnings"] = new JsonArray(distinct.Select(warning => (JsonNode?)warning).ToArray())
         };
+        if (staticVariant) report["static_variant"] = true;
         var reportPath = Path.Combine(outDir, "prop-report.json");
         Json.Save(reportPath, report);
         var files = ported.Files;
