@@ -13,6 +13,7 @@ Native C# porting of Source 2 models and materials into Source 1 addons. It adds
 | `Physics/` | Collision repair and decomposition, kinematic and ragdoll physics, `.phy` audits |
 | `Characters/` | Ragdoll appearance, flexes, morphs, procedural bones, runtime drivers |
 | `Materials/`, `Textures/` | VMAT to VMT conversion for models and brushes, PNG, TGA, VTF and DXT |
+| `Playermodels/` | ValveBiped rigs, retargeted player animations, twist helpers and their audits |
 | `Compile/` | studiomdl, the repairs it needs, and compiled-model audits |
 | `Workflow/` | Resumable stages, addon packaging and safe installation |
 

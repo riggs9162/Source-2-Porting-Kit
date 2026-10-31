@@ -75,8 +75,15 @@ omits `$bumpmap`, `$normalmap` and `$phong` from every skin, because any one of 
 makes the engine discard the vertex lighting VRAD baked. Cubemap reflections,
 reflection masks, metal darkening, opacity, tint and emission stay. Its materials
 live in their own `<namespace>_static` folder with their own texture size, and a
-failed static build never affects the regular model. Playermodels are not part of
-V4 yet.
+failed static build never affects the regular model.
+
+**Also build a playermodel** adds a separate `<name>_pm` model for humanoid characters
+and lists it in the player model menu. It sits on the ValveBiped skeleton, with a
+`<name>_pm_animations` library retargeted from Garry's Mod's own player animations.
+The first run downloads the published animation sources once, and later runs reuse
+them. Anything that is not humanoid is skipped, and a failed playermodel never affects
+the regular model. **Include source animations** also copies the model's own clips
+into it, which is why the same character can compile at 77 KB or 30 MB.
 
 ## Port materials
 
