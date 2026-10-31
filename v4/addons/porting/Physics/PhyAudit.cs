@@ -480,12 +480,13 @@ public static partial class PhyAudit
     /// compiler outright. studiomdl also says Completed when a locked file was left stale, so siblings are compared.</remarks>
     private static bool CompileQc(string qc, string studiomdl, string game, PortContext context)
     {
-        var resolved = File.Exists(Path.Combine(game, "gameinfo.txt")) ? game : Path.Combine(game, "csgo");
-        if (!File.Exists(Path.Combine(resolved, "gameinfo.txt")))
+        var resolved = ResolveGame(game);
+        if (resolved is null)
         {
             context.Log($"-game is invalid: {game} has no gameinfo.txt (and no csgo subfolder with one) - studiomdl would crash", LogLevel.Error);
             return false;
         }
+        if (resolved != game) context.Log($"-game resolved to {resolved} (contains gameinfo.txt)");
         var start = new ProcessStartInfo(studiomdl)
         {
             UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true,
@@ -508,23 +509,55 @@ public static partial class PhyAudit
         var output = process.StandardOutput.ReadToEnd();
         process.WaitForExit();
         context.Token.ThrowIfCancellationRequested();
-        var transcript = output + errors.GetAwaiter().GetResult();
-        if (process.ExitCode != 0 || !transcript.Contains("Completed", StringComparison.Ordinal)) return false;
-        var target = ModelPathFor(qc, resolved);
-        if (target is null || !File.Exists(target)) return true;
-        var checksum = Checksum(target, 8);
-        var siblings = new (string Path, int Offset)[]
+        var lines = (output + "\n" + errors.GetAwaiter().GetResult()).Split('\n', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+        foreach (var line in lines)
         {
-            (Path.ChangeExtension(target, ".vvd"), 8), (Path.ChangeExtension(target, ".phy"), 12), (Path.ChangeExtension(target, ".dx90.vtx"), 16),
-            (Path.ChangeExtension(target, ".dx80.vtx"), 16), (Path.ChangeExtension(target, ".sw.vtx"), 16)
-        };
-        foreach (var (sibling, offset) in siblings)
-            if (File.Exists(sibling) && Checksum(sibling, offset) != checksum)
-            {
-                context.Log($"{Path.GetFileName(sibling)} is left over from an earlier compile - close whatever has it open and compile again", LogLevel.Error);
-                return false;
-            }
+            if (line.Contains("error", StringComparison.OrdinalIgnoreCase)) context.Log(line, LogLevel.Error);
+            else if (line.Contains("warning", StringComparison.OrdinalIgnoreCase)) context.Log(line, LogLevel.Warning);
+        }
+        if (process.ExitCode != 0 || !lines.Any(line => line.Contains("Completed", StringComparison.Ordinal)))
+        {
+            context.Log("compile FAILED", LogLevel.Error);
+            return false;
+        }
+        var target = ModelPathFor(qc, resolved);
+        if (target is not null && File.Exists(target) && !SiblingsAgree(target, context))
+        {
+            context.Log("studiomdl reported success but left a file from an earlier compile - the engine will refuse this model. Close whatever has it open and compile again.", LogLevel.Error);
+            return false;
+        }
+        context.Log("compile succeeded", LogLevel.Success);
         return true;
+    }
+
+    /// <summary>The folder studiomdl's -game needs, given that folder, its gameinfo.txt, or an install root holding csgo.</summary>
+    private static string? ResolveGame(string game)
+    {
+        if (File.Exists(game)) return Path.GetFileName(game).Equals("gameinfo.txt", StringComparison.OrdinalIgnoreCase) ? Path.GetDirectoryName(game) : null;
+        if (File.Exists(Path.Combine(game, "gameinfo.txt"))) return game;
+        var nested = Path.Combine(game, "csgo");
+        return File.Exists(Path.Combine(nested, "gameinfo.txt")) ? nested : null;
+    }
+
+    /// <summary>Whether every present sibling carries the checksum of the .mdl, and the geometry files exist.</summary>
+    private static bool SiblingsAgree(string model, PortContext context)
+    {
+        var checksum = Checksum(model, 8);
+        var stem = Path.ChangeExtension(model, null);
+        var vtx = new[] { ".dx90.vtx", ".dx80.vtx", ".sw.vtx" }.Select(suffix => stem + suffix).Where(File.Exists).ToList();
+        var agree = true;
+        if (!File.Exists(stem + ".vvd") || vtx.Count == 0)
+        {
+            context.Log($"{Path.GetFileName(model)} is missing its compiled geometry", LogLevel.Error);
+            agree = false;
+        }
+        foreach (var (path, offset) in vtx.Select(path => (path, 16)).Concat([(stem + ".vvd", 8), (stem + ".phy", 12)]))
+        {
+            if (!File.Exists(path) || Checksum(path, offset) == checksum) continue;
+            context.Log($"{Path.GetFileName(path)} checksum {Checksum(path, offset)} should be {checksum} - it is left over from an earlier compile", LogLevel.Error);
+            agree = false;
+        }
+        return agree;
     }
 
     private static int? Checksum(string path, int offset)
@@ -592,8 +625,7 @@ public static partial class PhyAudit
         Fmt.WriteText(qc, string.Join('\n', new[] { $"$modelname \"{modelName}\"", "$body body \"collision.smd\"", "$surfaceprop \"default\"" }
             .Concat(SmdSkeleton.DefineBoneLines(result.Skin, new(), 90)).Concat([$"$root \"{result.RootBone}\"", "$sequence idle \"bind.smd\""]).Concat(qcLines)) + "\n");
         if (!CompileQc(qc, studiomdl, game, context)) throw new PhyAuditException("Compiler calibration probe failed");
-        var resolved = File.Exists(Path.Combine(game, "gameinfo.txt")) ? game : Path.Combine(game, "csgo");
-        var modelPath = ModelPathFor(qc, resolved) ?? throw new PhyAuditException("Could not locate compiled calibration model");
+        var modelPath = ModelPathFor(qc, ResolveGame(game) ?? game) ?? throw new PhyAuditException("Could not locate compiled calibration model");
         var phy = Path.ChangeExtension(modelPath, ".phy");
         var actual = ReadPhy(phy);
         var scale = actual.Constraints[0].Number("zfriction");
