@@ -202,8 +202,7 @@ public static partial class RagdollAppearance
             else merged.Add((joint, weight));
         }
         var selected = merged.OrderBy(item => -item.Weight).Take(3).ToList();
-        var total = 0.0;
-        foreach (var (_, weight) in selected) total += weight;
+        var total = Fmt.Sum(selected.Select(item => item.Weight));
         if (selected.Count == 0 || total <= 0) throw new InvalidDataException("A bodygroup mesh has an unweighted vertex");
         return selected.ConvertAll(item => (item.Joint, item.Weight / total));
     }
@@ -231,9 +230,7 @@ public static partial class RagdollAppearance
             sumDeviation = Math.Max(sumDeviation, Math.Abs(total - 1));
             if (merged.Count <= 3) return;
             double Merged(int joint) => merged.First(item => item.Joint == joint).Weight;
-            var kept = 0.0;
-            foreach (var (joint, _) in reduced) kept += Merged(joint);
-            var discarded = Math.Max(0.0, 1.0 - kept / total);
+            var discarded = Math.Max(0.0, 1.0 - Fmt.Sum(reduced.Select(item => Merged(item.Joint))) / total);
             var normalization = reduced.Max(item => Math.Abs(item.Weight - Merged(item.Joint) / total));
             affected++;
             source.AffectedVertices++;
@@ -301,9 +298,7 @@ public static partial class RagdollAppearance
                     if (at >= 0) merged[at] = (joint, merged[at].Weight + weight);
                     else merged.Add((joint, weight));
                 }
-                var total = 0.0;
-                foreach (var (_, weight) in merged) total += weight;
-                audit.Measure(primitive.FromDmx, merged, total, Source1SkinLinks(merged));
+                audit.Measure(primitive.FromDmx, merged, Fmt.Sum(merged.Select(item => item.Weight)), Source1SkinLinks(merged));
             }
         }
         result.Report["skin_weights"] = audit.ToJson();
