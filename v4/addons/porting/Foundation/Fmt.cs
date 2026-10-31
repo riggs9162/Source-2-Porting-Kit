@@ -12,6 +12,21 @@ public static class Fmt
     public static double Degrees(double radians) => radians * (180.0 / Math.PI);
     public static double Hypot(double a, double b) => Math.Sqrt(a * a + b * b);
 
+    /// <summary>Adds numbers the way Python's <c>sum</c> does, carrying a running compensation for lost low bits.</summary>
+    /// <remarks>From Python 3.12 this differs from plain addition in the last bit, which is enough to move a skin weight's
+    /// ninth decimal.</remarks>
+    public static double Sum(IEnumerable<double> values)
+    {
+        double total = 0.0, compensation = 0.0;
+        foreach (var value in values)
+        {
+            var next = total + value;
+            compensation += Math.Abs(total) >= Math.Abs(value) ? total - next + value : value - next + total;
+            total = next;
+        }
+        return compensation != 0.0 && double.IsFinite(compensation) ? total + compensation : total;
+    }
+
     /// <summary>Fixed notation with six decimals, as in <c>%.6f</c>.</summary>
     public static string F6(double value) => Fixed(value, 6);
 

@@ -102,13 +102,19 @@ public sealed class M4(double[] rowMajor)
     public double this[int row, int column] => cells[row * 4 + column];
     public V3 Translation => new(cells[3], cells[7], cells[11]);
 
+    /// <summary>The matrix product, summed with one fused multiply-add per term in ascending order.</summary>
+    /// <remarks>That is numpy's <c>@</c> on this size, and it decides the sign of a value that should be zero. A bone with no
+    /// real rotation lands on 0 or just under 2 pi in an SMD, and on 0 or -0 in a QC, according to that sign.</remarks>
     public static M4 operator *(M4 a, M4 b)
     {
         var result = new double[16];
         for (var row = 0; row < 4; row++)
             for (var column = 0; column < 4; column++)
-                for (var k = 0; k < 4; k++)
-                    result[row * 4 + column] += a[row, k] * b[k, column];
+            {
+                var sum = 0.0;
+                for (var k = 0; k < 4; k++) sum = Math.FusedMultiplyAdd(a[row, k], b[k, column], sum);
+                result[row * 4 + column] = sum;
+            }
         return new(result);
     }
 
@@ -187,36 +193,77 @@ public sealed class M4(double[] rowMajor)
         return q.W < 0.0 ? -q : q;
     }
 
+    /// <summary>The inverse <c>np.linalg.inv</c> returns.</summary>
     public M4 Inverse()
     {
-        var size = 4;
-        var a = new double[size, size * 2];
-        for (var row = 0; row < size; row++)
-        {
-            for (var column = 0; column < size; column++) a[row, column] = this[row, column];
-            a[row, size + row] = 1;
-        }
-        for (var column = 0; column < size; column++)
-        {
-            var pivot = column;
-            for (var row = column + 1; row < size; row++)
-                if (Math.Abs(a[row, column]) > Math.Abs(a[pivot, column])) pivot = row;
-            if (Math.Abs(a[pivot, column]) < 1e-300) throw new InvalidDataException("Matrix is singular.");
-            if (pivot != column)
-                for (var k = 0; k < size * 2; k++) (a[pivot, k], a[column, k]) = (a[column, k], a[pivot, k]);
-            var divisor = a[column, column];
-            for (var k = 0; k < size * 2; k++) a[column, k] /= divisor;
-            for (var row = 0; row < size; row++)
-            {
-                if (row == column) continue;
-                var factor = a[row, column];
-                for (var k = 0; k < size * 2; k++) a[row, k] -= factor * a[column, k];
-            }
-        }
+        var a = new double[4, 4];
+        for (var row = 0; row < 4; row++)
+            for (var column = 0; column < 4; column++)
+                a[row, column] = this[row, column];
+        var inverse = Invert(a);
         var result = new double[16];
-        for (var row = 0; row < size; row++)
-            for (var column = 0; column < size; column++)
-                result[row * 4 + column] = a[row, size + column];
+        for (var row = 0; row < 4; row++)
+            for (var column = 0; column < 4; column++)
+                result[row * 4 + column] = inverse[row, column];
         return new(result);
+    }
+
+    /// <summary>Inverts a square matrix the way numpy's bundled OpenBLAS does, or fails on an exactly zero pivot.</summary>
+    /// <remarks>A left-looking LU with partial pivoting and sum-first updates, then right-looking substitution against
+    /// reciprocal diagonals, all fused. Up to 4x4 this matches numpy to the last bit; above that numpy's blocked kernels
+    /// order the same arithmetic differently, so a larger result is accurate rather than identical.</remarks>
+    public static double[,] Invert(double[,] matrix)
+    {
+        var n = matrix.GetLength(0);
+        var a = (double[,])matrix.Clone();
+        var pivots = new int[n];
+        var column = new double[n];
+        for (var j = 0; j < n; j++)
+        {
+            for (var row = 0; row < n; row++) column[row] = a[row, j];
+            for (var i = 0; i < j; i++)
+                if (pivots[i] != i) (column[i], column[pivots[i]]) = (column[pivots[i]], column[i]);
+            for (var i = 1; i < j; i++)
+            {
+                var sum = 0.0;
+                for (var k = 0; k < i; k++) sum = Math.FusedMultiplyAdd(column[k], a[i, k], sum);
+                column[i] -= sum;
+            }
+            for (var row = j; row < n; row++)
+            {
+                var sum = 0.0;
+                for (var k = 0; k < j; k++) sum = Math.FusedMultiplyAdd(a[row, k], column[k], sum);
+                column[row] -= sum;
+            }
+            var pivot = j;
+            for (var row = j + 1; row < n; row++)
+                if (Math.Abs(column[row]) > Math.Abs(column[pivot])) pivot = row;
+            pivots[j] = pivot;
+            for (var row = 0; row < n; row++) a[row, j] = column[row];
+            if (a[pivot, j] == 0.0) throw new InvalidDataException("Matrix is singular.");
+            if (pivot != j)
+                for (var k = 0; k <= j; k++) (a[j, k], a[pivot, k]) = (a[pivot, k], a[j, k]);
+            var reciprocal = 1.0 / a[j, j];
+            for (var row = j + 1; row < n; row++) a[row, j] *= reciprocal;
+        }
+        var x = new double[n, n];
+        for (var i = 0; i < n; i++) x[i, i] = 1.0;
+        for (var i = 0; i < n; i++)
+            if (pivots[i] != i)
+                for (var k = 0; k < n; k++) (x[i, k], x[pivots[i], k]) = (x[pivots[i], k], x[i, k]);
+        for (var c = 0; c < n; c++)
+            for (var i = 0; i < n; i++)
+            {
+                var value = x[i, c];
+                for (var k = i + 1; k < n; k++) x[k, c] = Math.FusedMultiplyAdd(-value, a[k, i], x[k, c]);
+            }
+        for (var c = 0; c < n; c++)
+            for (var i = n - 1; i >= 0; i--)
+            {
+                var value = x[i, c] * (1.0 / a[i, i]);
+                x[i, c] = value;
+                for (var k = 0; k < i; k++) x[k, c] = Math.FusedMultiplyAdd(-value, a[k, i], x[k, c]);
+            }
+        return x;
     }
 }

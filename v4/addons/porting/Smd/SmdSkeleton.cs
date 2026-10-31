@@ -72,7 +72,7 @@ public static class SmdSkeleton
             .Append(Fmt.F9(texcoord.X)).Append(' ').Append(Fmt.F9(texcoord.Y));
         if (links.Count > 1)
         {
-            var total = links.Sum(link => link.Weight);
+            var total = Fmt.Sum(links.Select(link => link.Weight));
             line.Append('\t').Append(Fmt.Int(links.Count));
             foreach (var (joint, weight) in links) line.Append(' ').Append(Fmt.Int(joint)).Append(' ').Append(Fmt.F9(weight / total));
         }
