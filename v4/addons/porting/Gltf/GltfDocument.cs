@@ -70,7 +70,7 @@ public sealed class GltfDocument
             if (type == 0x004E4942) return new(root, raw.AsSpan(at + 8, size).ToArray(), path);
             at += 8 + size;
         }
-        throw new InvalidDataException($"Could not resolve the binary buffer of {path}.");
+        throw new InvalidDataException($"could not resolve the binary buffer of {path}");
     }
 
     private static byte[] ExternalBuffer(JsonObject root, string directory)

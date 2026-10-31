@@ -252,14 +252,14 @@ public sealed record GltfClip(string Name, double Duration, Dictionary<(int Join
         var fps = authored.Fps;
         var frames = authored.Frames;
         if (!double.IsFinite(fps) || fps <= 0 || frames < 1)
-            throw new InvalidDataException($"{Name}: authored animation requires positive FPS and frame count.");
+            throw new InvalidDataException($"{Name}: authored animation requires positive FPS and frame count");
         var duration = (frames - 1) / fps;
-        if (!double.IsFinite(Duration) || Duration < 0) throw new InvalidDataException($"{Name}: exported animation duration is invalid.");
+        if (!double.IsFinite(Duration) || Duration < 0) throw new InvalidDataException($"{Name}: exported animation duration is invalid");
         var tolerance = Math.Max(1e-5, duration * 4.0 * 1.1920928955078125e-7);
         if (Duration > duration + tolerance)
-            throw new InvalidDataException($"{Name}: exported keys end at {Fmt.G(Duration)}s beyond the authored {frames}-frame duration {Fmt.G(duration)}s.");
+            throw new InvalidDataException($"{Name}: exported keys end at {Fmt.G(Duration)}s beyond the authored {frames}-frame duration {Fmt.G(duration)}s");
         var (samples, count) = (this with { Duration = duration }).Sample(skin, fps);
-        if (count != frames) throw new InvalidDataException($"{Name}: authored frame sampling produced {count} frames instead of {frames}.");
+        if (count != frames) throw new InvalidDataException($"{Name}: authored frame sampling produced {count} frames instead of {frames}");
         var tail = Math.Max(0.0, duration - Duration);
         return (samples, count, new JsonObject
         {

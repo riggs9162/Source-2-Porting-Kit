@@ -90,7 +90,7 @@ public sealed class SkinnedPrimitive
             }
             if (primitives.Count > 0) sets.Add((name, primitives));
         }
-        if (sets.Count == 0) throw new InvalidDataException("No skinned meshes found in the GLB.");
+        if (sets.Count == 0) throw new InvalidDataException("no skinned meshes found in the GLB");
         if (sets.Count > 1)
         {
             var prefix = sets[0].Name;
