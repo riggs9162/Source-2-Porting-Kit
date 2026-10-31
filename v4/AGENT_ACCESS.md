@@ -98,10 +98,10 @@ For example, a `settings.set` request can contain:
 { "key": "runtime", "value": { "workers": 1, "diskCacheMegabytes": 512 } }
 ```
 
-Use `runtime` and `appearance` for host settings. The host also reserves
-`tools.vrf`, `tools.studiomdl`, and `tools.ffmpeg` for future add-ons; the current
-Hotspot editor does not use external executables. Use `addon_id` to read or write
-a loaded add-on's own settings.
+Use `runtime` and `appearance` for host settings. `tools.vrf` and `tools.studiomdl`
+hold the Source2Viewer-CLI and StudioMDL paths the porting tools fall back to;
+`tools.ffmpeg` is reserved for future add-ons. Use `addon_id` to read or write a
+loaded add-on's own settings.
 These calls use the same in-memory store as that add-on. Add-on settings may be
 read only when a page opens or at startup; the response conservatively marks them
 as requiring a restart. Runtime concurrency/cache budgets also require restart.
@@ -111,10 +111,36 @@ same defaults as the desktop; supply the full record when preserving every choic
 Other commands include `addons enable|disable ID`, `workspace create|open DIR`,
 `workspace get`, `assets providers|list|read`, and `cache stats|clear`. Run `help`
 for shortcuts, or inspect `operations` for precise fields and limits.
-Only the Hotspot editor add-on is included. Its five supporting operations remain
-available through CLI/MCP but have no separate desktop sidebar forms. The host
-retains asset-provider operations for future add-ons; `assets providers` is empty
-in the current distribution.
+The Hotspot editor's five supporting operations remain available through CLI/MCP
+but have no separate desktop sidebar forms. The host retains asset-provider
+operations for future add-ons; `assets providers` is empty in the current
+distribution.
+
+## Porting
+
+`porting/models` ports whole models and `porting/materials` ports materials alone.
+Both are long jobs, so use `submit` and poll. Put the inputs in a JSON file; `sources`
+takes one entry per line:
+
+```json
+{
+  "sources": "vpk:S:/SteamLibrary/steamapps/common/Half-Life Alyx/game/hlvr/pak01_dir.vpk:models/creatures/headcrab_classic/headcrab_classic.vmdl_c",
+  "project": "A:/ports/headcrab",
+  "namespace": "my_ports/headcrab"
+}
+```
+
+```powershell
+& .\v4\Backport.cmd submit porting/models --json-file inputs.json
+& .\v4\Backport.cmd jobs wait JOB_UUID --wait-seconds 300
+```
+
+Rerunning the same inputs against the same project resumes it; any changed setting
+is refused. `plan_only` writes the stage plan without converting. `static_variant`
+adds a separate `<name>_static` model with its own `static_resolution`. A job that
+ends failed may still have produced a package: `project/port-report.md` lists each
+stage, and `project/addon/` holds every model that passed. A failed stage for one
+model never blocks the others, so read the report as well as the job status.
 
 ## MCP connection
 

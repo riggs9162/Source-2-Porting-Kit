@@ -5,10 +5,16 @@
 Source Backport is the V4 Windows desktop application built with C# and .NET 10. It has its own
 backend and directory-based add-ons. It does not load the Python applications.
 
-V4 currently includes the Hotspot editor. The sidebar groups tools under
-**Materials**, **Models**, and **Sounds**. Hotspot editor is the only tool under
-Materials; Models and Sounds are empty until their tools are implemented.
-Particles may become a category when particle tools are added.
+V4 is a small set of tools for moving Half-Life: Alyx and other Source 2 assets
+into Source 1 games such as Garry's Mod. The sidebar groups them under
+**Materials**, **Models**, and **Sounds**:
+
+- **Models > Model port** turns Source 2 models into a compiled, verified addon.
+- **Materials > Material port** ports brush and model materials on their own.
+- **Materials > Hotspot editor** edits trim-sheet regions.
+
+Sounds is empty until its tools are implemented. Particles may become a category
+when particle tools are added.
 
 ## Run
 
@@ -26,11 +32,60 @@ remain usable. Running `Build.ps1` directly stops at the first build error.
 The desktop, CLI, backend, and included add-ons use the libraries shipped with
 the .NET SDK. The optional MCP entry point uses the pinned official C# MCP SDK.
 
+Porting also needs two external programs: Source2Viewer-CLI to read Source 2 assets
+and StudioMDL to compile models. Set their paths once under **Settings**. StudioMDL
+CE works; the game folder holding `gameinfo.txt` is found beside it automatically.
+
 ## Included add-ons
 
 | Folder | Contributions |
 | --- | --- |
 | `addons/hotspot/` | Native hotspot editor, bounded VTF/image previews, Source 2/Hammer++ rectangle conversion, detection, and VMT linking |
+| `addons/porting/` | Native model and material porting: Source 2 Viewer export, SMD/QC sources, physics, VMT/VTF materials, compiling, audits, and addon packaging |
+
+## Port models
+
+Open **Models > Model port** and paste one model per line:
+
+```text
+vpk:S:/SteamLibrary/steamapps/common/Half-Life Alyx/game/hlvr/pak01_dir.vpk:models/creatures/headcrab_classic/headcrab_classic.vmdl_c
+```
+
+Exact `.vmdl_c` files, exported `.glb` files and exported folders work too. Choose
+a project folder outside the game and a namespace such as `my_addon/props`. The
+tool sorts each model into a prop or a ragdoll, then exports it, writes editable
+sources, ports its materials, compiles it, audits the result and packages `addon/`
+in the project folder. **Install into Garry's Mod** then copies the verified files
+into your addons folder without touching files the kit does not own.
+
+Textures, skins, bodygroups, LODs, animations, attachments, hitboxes and flexes all
+come across, and physics stays exact: ragdolls keep the authored convex hulls,
+joints, limits and masses, and the compiled `.phy` is rebuilt and checked against
+them. What Source 1 cannot represent is listed in the port report. `port-report.md`
+records every stage; in-game behaviour is the one thing it cannot check.
+
+Stages are checkpointed. Running the same project again repeats only what failed,
+changed or was interrupted, so one bad model never costs the others. Changing a
+setting needs a new project folder.
+
+**Also build a static prop** adds a separate `<name>_static` model for anything with
+no physics or a single rigid body; ragdolls and other articulated models are left
+out. It compiles with `$staticprop`, bakes normal detail into its base textures and
+omits `$bumpmap`, `$normalmap` and `$phong` from every skin, because any one of them
+makes the engine discard the vertex lighting VRAD baked. Cubemap reflections,
+reflection masks, metal darkening, opacity, tint and emission stay. Its materials
+live in their own `<namespace>_static` folder with their own texture size, and a
+failed static build never affects the regular model. Playermodels are not part of
+V4 yet.
+
+## Port materials
+
+Open **Materials > Material port** for materials that belong to brushes and faces
+rather than a model, using `vpk:<vpk path>:<resource>.vmat_c`, a loose material, or
+an exported folder. **Surface** decides the shader: brush materials use
+`LightmappedGeneric` with stock surface properties, every blend layer as its own
+material, and decals and glass kept; model materials use `VertexLitGeneric`. **Auto**
+treats anything under `materials/models/` as a model material.
 
 Open **Materials > Hotspot editor** to edit trim-sheet regions. It supports drawing,
 resizing, multi-selection, exact coordinates, undo/redo, grid personalization,
@@ -77,8 +132,9 @@ factories; they must not load game libraries or decode assets at startup.
 
 Tools run on a bounded queue away from the UI thread. The default is one worker;
 Settings permits up to four. Running executables uses separate argument tokens,
-concurrent stdout/stderr drainage, bounded output lines/tails, optional timeouts,
-and process-tree cancellation. A nonzero exit code is returned to the tool so it
+concurrent stdout/stderr drainage, a bounded output tail, optional timeouts, and
+process-tree cancellation. Output lines reach a tool whole, because some of them are
+data rather than logs. A nonzero exit code is returned to the tool so it
 can apply its own tool-specific success criteria.
 
 Settings use serialized, atomic JSON writes. An exclusive state-directory lock
@@ -99,7 +155,7 @@ and lease-based eviction: active files remain pinned until their consumers
 dispose the lease. This disk budget is not a cap on total application RAM/VRAM.
 
 The host retains asset-provider and preview-session contracts for future add-ons.
-No asset browser, asset providers, VRF export, or utility tools are included.
+No asset browser, asset providers, or utility tools are included.
 
 ## Agent access: MCP and CLI
 
@@ -114,6 +170,7 @@ $cli = '.\src\Kit.Cli\bin\Release\net10.0-windows\s2kit.exe'
 & $cli addons
 & $cli describe hotspot/generate
 & $cli run hotspot/generate --width 1024 --height 512 --layout trim-124
+& $cli describe porting/models
 & $cli jobs
 & $cli operations
 ```

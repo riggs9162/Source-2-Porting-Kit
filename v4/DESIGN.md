@@ -20,10 +20,10 @@ The previous V4 layout used a full-width wordmark, a plain tree, and a startup-l
 table. This version moves identity into the tool rail, uses clearer navigation
 groups, places workspace commands in a narrow toolbar, and starts on actionable
 tasks, project access, and recent results. Logs remain available with jobs.
-Tool groups are Materials, Models, and Sounds, in that order. Hotspot editor is
-the only current tool, under Materials. Empty groups remain visible; Particles
-can be added when particle tools are implemented. Editor support operations stay
-available to agents without extra sidebar forms.
+Tool groups are Materials, Models, and Sounds, in that order. Materials holds
+Material port and Hotspot editor; Models holds Model port. Empty groups remain
+visible; Particles can be added when particle tools are implemented. Editor support
+operations stay available to agents without extra sidebar forms.
 
 ## Palette and type
 

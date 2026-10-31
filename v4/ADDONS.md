@@ -105,8 +105,9 @@ and code changes currently apply on restart. There is no live code reload.
 ## Tools
 
 Implement `ITool` and register a `ToolDefinition` with parameter schemas. The host
-generates a native form and exposes the same operation to the CLI. Inputs validate
-before entering the queue. Unknown keys are rejected. Integer ranges, booleans,
+generates a native form and exposes the same operation to the CLI. A `Lines`
+parameter gives a multi-line text box for pasted lists. Inputs validate before
+entering the queue. Unknown keys are rejected. Integer ranges, booleans,
 required values, and choices are enforced centrally. Filesystem and format-specific
 validation belongs to the tool.
 
