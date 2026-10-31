@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 
@@ -108,6 +109,11 @@ public sealed partial class ModelMetadata
             data.Get("m_bIgnoreRotation").Bool(), first < roots.Count && roots[first].Bool(), active.Count);
     }
 
+    /// <summary>A key the way the warning has always shown it: quoted, with each part of a composite key quoted alone.</summary>
+    private static string KeyText(object key) => key is ITuple parts
+        ? $"({string.Join(", ", Enumerable.Range(0, parts.Length).Select(index => PathText.Repr(parts[index]?.ToString() ?? "")))})"
+        : PathText.Repr(key.ToString() ?? "");
+
     private void AddUnique<T>(List<T> items, T value, Func<T, object> key) where T : notnull
     {
         var existing = items.FirstOrDefault(item => key(item).Equals(key(value)));
@@ -117,7 +123,7 @@ public sealed partial class ModelMetadata
             return;
         }
         if (existing.Equals(value)) return;
-        var warning = $"Conflicting metadata for '{key(value)}'; keeping the first authored definition";
+        var warning = $"Conflicting metadata for {KeyText(key(value))}; keeping the first authored definition";
         if (!Warnings.Contains(warning)) Warnings.Add(warning);
     }
 

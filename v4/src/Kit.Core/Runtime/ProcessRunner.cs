@@ -3,8 +3,13 @@ using System.Text;
 
 namespace PortingKit.Core;
 
+/// <remarks>Output reaches callers line for line, because some of it is data rather than a log: Source 2 Viewer's
+/// block dumps are stored verbatim. Empty lines survive, a line is never split however long it runs, and the
+/// three newline styles each end one line. Output decodes as UTF-8 with replacement, whatever the console uses.</remarks>
 public sealed class ProcessRunner : IProcessRunner
 {
+    private static readonly UTF8Encoding Utf8 = new(false);
+
     public async Task<ProcessResult> RunAsync(ProcessRequest request, Action<ProcessLine>? output = null,
         CancellationToken cancellationToken = default)
     {
@@ -17,6 +22,8 @@ public sealed class ProcessRunner : IProcessRunner
             UseShellExecute = false,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
+            StandardOutputEncoding = Utf8,
+            StandardErrorEncoding = Utf8,
             CreateNoWindow = true,
             WorkingDirectory = request.WorkingDirectory ?? Environment.CurrentDirectory
         };
@@ -73,20 +80,26 @@ public sealed class ProcessRunner : IProcessRunner
     {
         var buffer = new char[4096];
         var line = new StringBuilder();
+        var afterReturn = false;
         int count;
         while ((count = await reader.ReadAsync(buffer)) > 0)
         {
             for (var index = 0; index < count; index++)
             {
                 var character = buffer[index];
-                if (character is '\n' or '\r' || line.Length >= 8192)
+                var joined = afterReturn && character == '\n';
+                afterReturn = character == '\r';
+                if (joined)
+                    continue;
+                if (character is '\n' or '\r')
                 {
-                    if (line.Length > 0)
-                        emit(line.ToString());
+                    emit(line.ToString());
                     line.Clear();
                 }
-                if (character is not '\n' and not '\r')
+                else
+                {
                     line.Append(character);
+                }
             }
         }
         if (line.Length > 0)
