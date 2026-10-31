@@ -65,7 +65,7 @@ public static class Surfaceprops
     /// accessor headers. A model that is mostly metal with one pane of glass therefore resolves to metal: Source 1
     /// carries one <c>$surfaceprop</c> per model, so something has to win, and coverage beats declaration order.
     /// A group with no mesh still counts for one, because it declared itself.</remarks>
-    public static Dictionary<string, int> Declared(JsonObject gltf)
+    public static Dictionary<string, int> DeclaredSurfaceprops(JsonObject gltf)
     {
         var weights = new Dictionary<string, int>(StringComparer.Ordinal);
         var meshes = gltf.Get("meshes").Arr();
@@ -93,10 +93,10 @@ public static class Surfaceprops
     }
 
     /// <summary>The declared properties of a glTF on disk, or none when it has none or cannot be read.</summary>
-    public static Dictionary<string, int> FromFile(string? path)
+    public static Dictionary<string, int> GltfSurfaceprops(string? path)
     {
         if (path is null || !File.Exists(path)) return new(StringComparer.Ordinal);
-        return GltfMeshLoader.ReadHeader(path) is { } data ? Declared(data) : new(StringComparer.Ordinal);
+        return GltfMeshLoader.ReadHeader(path) is { } data ? DeclaredSurfaceprops(data) : new(StringComparer.Ordinal);
     }
 
     /// <summary>The first declared key with the highest weight, or null when nothing was declared.</summary>
@@ -121,7 +121,7 @@ public static class Surfaceprops
     /// a 0.1in shell material, which changes the compiled mass as well as the footsteps. Entries split on newlines
     /// or commas, the first matching pattern wins, and a bare value is the fallback rather than a competitor. A bare
     /// value with a wildcard is a rule someone forgot to finish, because no Source 1 material has one in its name.</remarks>
-    public static string? OverrideFor(string name, string? rules)
+    public static string? SurfacepropOverrideFor(string name, string? rules)
     {
         var subject = name.ToLowerInvariant();
         string? fallback = null;

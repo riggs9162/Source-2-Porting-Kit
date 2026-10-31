@@ -151,7 +151,7 @@ public static partial class PropPort
     /// <summary>Writes a dynamic prop with its native skeleton, authored clips and bone-following collision.</summary>
     private static Ported PortAnimated(string glbPath, ModelSet modelSet, string outDir, string modelname, string cdmaterials, PortContext? context)
     {
-        var surfaceprop = SurfacepropDetector.Detect(modelSet.Name, source2Prop: Surfaceprops.Strongest(Surfaceprops.FromFile(modelSet.PhysicsPath)));
+        var surfaceprop = SurfacepropDetector.Detect(modelSet.Name, source2Prop: Surfaceprops.Strongest(Surfaceprops.GltfSurfaceprops(modelSet.PhysicsPath)));
         var result = NativePort.Port(glbPath, outDir, modelname, new() { Cdmaterials = cdmaterials, Surfaceprop = surfaceprop, DynamicProp = true }, context);
         var physics = new JsonObject
         {

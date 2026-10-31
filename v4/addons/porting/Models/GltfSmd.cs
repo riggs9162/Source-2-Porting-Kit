@@ -33,7 +33,7 @@ public sealed record ConversionOptions
     /// thin panels, signs and grates. So it is opt-in, and the default reports which pieces would have gone.</remarks>
     public bool Remove2dCollision { get; init; }
 
-    /// <summary>Forces <c>$surfaceprop</c> over both the detector and the fixed value. See <see cref="Surfaceprops.OverrideFor"/>.</summary>
+    /// <summary>Forces <c>$surfaceprop</c> over both the detector and the fixed value. See <see cref="Surfaceprops.SurfacepropOverrideFor"/>.</summary>
     public string SurfacepropOverride { get; init; } = "";
 
     /// <summary>Builds collision from the render mesh for a model the source gives none.</summary>
@@ -393,7 +393,7 @@ public static class GltfSmd
     private static string ChooseSurfaceprop(ModelSet modelSet, ConversionOptions options, ConversionResult result, Action<string> log, Action<string> verbose)
     {
         var name = modelSet.Name;
-        if (Surfaceprops.OverrideFor(name, options.SurfacepropOverride) is { Length: > 0 } forced)
+        if (Surfaceprops.SurfacepropOverrideFor(name, options.SurfacepropOverride) is { Length: > 0 } forced)
         {
             verbose($"$surfaceprop forced to '{forced}'");
             if (StaticCollision.ResolveSurfaceprop(forced) == "default" && !forced.Equals("default", StringComparison.OrdinalIgnoreCase))
@@ -405,7 +405,7 @@ public static class GltfSmd
             return forced;
         }
         if (!options.AutoSurfaceprop) return options.StaticSurfaceprop;
-        var declared = Surfaceprops.FromFile(modelSet.PhysicsPath);
+        var declared = Surfaceprops.GltfSurfaceprops(modelSet.PhysicsPath);
         var source = Surfaceprops.Strongest(declared);
         var surfaceprop = SurfacepropDetector.Detect(name, source2Prop: source);
         if (!string.IsNullOrEmpty(source) && StaticCollision.ResolveSurfaceprop(source) != "default")
