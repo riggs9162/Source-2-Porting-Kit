@@ -602,8 +602,13 @@ public static partial class PlayerAnimations
     }
 
     /// <summary>Mirrors and retargets the upstream graph into a model-owned animation library.</summary>
-    /// <remarks>Bone data, the root, IK chains and hitboxes belong to the model, so those include files are rewritten; every
-    /// other include is the upstream graph unchanged. The QC is expanded last, because StudioMDL CE cannot hold the macros.</remarks>
+    /// <remarks>
+    /// <para>Bone data, the root, IK chains and hitboxes belong to the model, so those include files are rewritten; every other
+    /// include is the upstream graph unchanged. The QC is expanded last, because StudioMDL CE cannot hold the macros.</para>
+    /// <para>The sequences reach their sources through <c>player/../humans_sdk/male_animations</c>, and studiomdl cannot open a
+    /// path of 260 characters or more. It fails with "could not load file" on whichever long name crosses that line first, so
+    /// a project buried about 130 characters deep breaks the compile of a library that is otherwise sound.</para>
+    /// </remarks>
     public static PlayerAnimationResult WritePlayerAnimationLibrary(string sourceRoot, string outDir, GltfSkin skin, string modelname, IReadOnlyList<string> bindLines, IReadOnlyList<string> ikLines,
         string profile = "male", PortContext? context = null)
     {

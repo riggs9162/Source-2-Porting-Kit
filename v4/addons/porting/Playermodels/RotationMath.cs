@@ -61,8 +61,8 @@ public readonly record struct M3(double M00, double M01, double M02, double M10,
 /// <remarks>The unit reduces an angle by a 66-bit pi, rounds to a 64-bit mantissa and then, on storing, to a double. So its
 /// cosine of a double pi over two is 6.1230317e-17 where the C runtime says 6.1232340e-17, and away from such angles the two
 /// still part in the last bit about 3 per cent of the time. That bit is the sign of a bone offset that should be zero, which
-/// prints as <c>-0.000000</c> in a QC. Evaluated here in double-double arithmetic, this agrees with the library on every one
-/// of 200,000 sampled angles.</remarks>
+/// prints as <c>-0.000000</c> in a QC. Evaluated here in double-double arithmetic, this differs from the library on 5 of
+/// 440,000 sampled angles, in the last bit, where the unit's own rounding is not quite correct.</remarks>
 internal static class ExtendedSine
 {
     private const double HalfPi = 1.5707963267948966;
