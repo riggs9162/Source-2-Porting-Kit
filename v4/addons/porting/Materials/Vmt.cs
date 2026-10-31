@@ -6,9 +6,10 @@ namespace PortingKit.Addons.Porting;
 /// <summary>A generated VMT plus what the generator decided along the way.</summary>
 public sealed record VmtResult(string Text, string Shader, OrderedDictionary<string, string> Params, List<string> Notes)
 {
+    /// <summary>Writes the file with Windows line endings, as the kit has always shipped them.</summary>
     public string Write(string path)
     {
-        Fmt.WriteText(path, Text);
+        Fmt.WriteText(path, Text.Replace("\n", "\r\n"));
         return path;
     }
 }
