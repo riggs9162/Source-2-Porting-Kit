@@ -25,7 +25,8 @@ public readonly record struct StreamCount(int Triangles, int ZeroAreaTriangles);
 /// <remarks>A VTX material replacement belongs to a numeric MDL texture, not to a name. The compiler can give
 /// one resource several texture identities, so replacements stay keyed by number and only projected to names
 /// for comparison with the QC. Only source triangles with exactly zero area at Source float32 precision may be
-/// elided, and a nonempty stream can never disappear.</remarks>
+/// elided, and a nonempty stream can never disappear. v3 crashed when a slot record named a stream whose model a
+/// LOD removes. Here that is reported as a differing source path, so the port still stops, with a finding.</remarks>
 public static class CompiledRenderCoverage
 {
     private const string DegeneracyPolicy = "Only source triangles with exactly zero area at Source float32 precision may be elided; nonempty streams cannot disappear";
@@ -428,7 +429,7 @@ public static class CompiledRenderCoverage
                             foreach (var record in rows)
                             {
                                 var declared = PathText.Native(record.Key("source").Str());
-                                if (!SamePath(Path.IsPathFullyQualified(declared) ? declared : CompiledText.Join(directory, declared), source!))
+                                if (source is null || !SamePath(Path.IsPathFullyQualified(declared) ? declared : CompiledText.Join(directory, declared), source))
                                     errors.Add($"Authored material-slot source path differs: {label}");
                             }
                         }

@@ -27,7 +27,20 @@ public sealed class MorphGeometryError(string message, Exception? inner = null) 
 internal sealed class CompiledBinary(string path)
 {
     public string Name { get; } = Path.GetFileName(path);
-    public byte[] Data { get; } = File.ReadAllBytes(path);
+    public byte[] Data { get; } = Load(path);
+
+    /// <summary>Reads a file, reporting a missing folder the same way as a missing file.</summary>
+    private static byte[] Load(string path)
+    {
+        try
+        {
+            return File.ReadAllBytes(path);
+        }
+        catch (DirectoryNotFoundException exception)
+        {
+            throw new FileNotFoundException(exception.Message, path, exception);
+        }
+    }
 
     public bool HasMagic(string magic) => Data.AsSpan().StartsWith(Encoding.ASCII.GetBytes(magic));
 
@@ -166,7 +179,7 @@ internal static partial class CompiledText
     /// <remarks>This stands for v3's list of caught exception types. Cancellation is deliberately absent, so a
     /// cancelled job is never recorded as a failed audit.</remarks>
     public static bool IsAuditFault(Exception exception) => exception is IOException or UnauthorizedAccessException or CompiledDataError
-        or InvalidDataException or FormatException or OverflowException or ArgumentException or IndexOutOfRangeException or KeyNotFoundException;
+        or InvalidDataException or NotSupportedException or DmxParseException or FormatException or OverflowException or ArgumentException or IndexOutOfRangeException or KeyNotFoundException;
 
     /// <summary>The words Python would use for the same failure.</summary>
     public static string Describe(Exception exception) => exception switch
