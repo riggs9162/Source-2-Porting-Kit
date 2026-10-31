@@ -48,8 +48,9 @@ public static class AddonPackager
         Json.Load(Path.Combine(WorkflowPaths.Sources(options, asset), "build.json")).Get("kind").Str("ragdoll");
 
     /// <summary>Builds the addon completely before replacing the previous package.</summary>
-    /// <remarks>Only models whose conversion, materials and compile all succeeded go in. Every file is checked
-    /// against the hash its stage recorded, so a payload edited after validation cannot ship.</remarks>
+    /// <remarks>Only models whose conversion, materials and compile all succeeded go in, and a static form goes in
+    /// only when its own materials and compile succeeded, so a failed static build never costs the regular model.
+    /// Every file is checked against the hash its stage recorded, so a payload edited after validation cannot ship.</remarks>
     public static IReadOnlyList<string> Package(WorkflowOptions options, IReadOnlyList<PortAsset> assets, WorkflowState state, PortContext context)
     {
         var project = WorkflowPaths.Project(options);
@@ -67,7 +68,10 @@ public static class AddonPackager
                 context.Check();
                 var payload = WorkflowPaths.Payload(options, asset);
                 var owned = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-                foreach (var kind in new[] { "materials", "compile" })
+                var stages = new List<string> { "materials", "compile" };
+                if (state.Tasks.GetValueOrDefault($"static_materials:{asset.Key}")?.Status == "success" && state.Tasks.GetValueOrDefault($"static_compile:{asset.Key}")?.Status == "success")
+                    stages.AddRange(["static_materials", "static_compile"]);
+                foreach (var kind in stages)
                     foreach (var (name, digest) in state.Tasks[$"{kind}:{asset.Key}"].Outputs)
                     {
                         if (!WorkflowPaths.Within(name, payload)) continue;

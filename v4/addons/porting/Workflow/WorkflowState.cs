@@ -16,6 +16,16 @@ public sealed record WorkflowOptions
     public string Game { get; init; } = "";
     public bool IncludeSourceAnimations { get; init; } = true;
     public bool EmitNormal { get; init; } = true;
+
+    /// <summary>Caps regular model textures; zero keeps native size.</summary>
+    public int Resolution { get; init; }
+
+    /// <summary>Adds a separate <c>_static</c> model for models with no physics or one rigid body.</summary>
+    public bool StaticVariant { get; init; }
+
+    /// <summary>Caps the static model's textures independently; zero keeps native size.</summary>
+    public int StaticResolution { get; init; }
+
     public bool Install { get; init; }
     public string GmodAddons { get; init; } = "";
 }
