@@ -138,7 +138,7 @@ public static class CompiledLodVertices
         return (int)offset;
     }
 
-    /// <summary>Copies a run of little-endian floats out of a packed row and checks that each is finite.</summary>
+    /// <summary>Checks that a run of floats at one offset of every packed row is finite.</summary>
     private static bool Finite(ReadOnlySpan<byte> rows, int stride, int offset, int components)
     {
         for (var row = 0; row < rows.Length / stride; row++)

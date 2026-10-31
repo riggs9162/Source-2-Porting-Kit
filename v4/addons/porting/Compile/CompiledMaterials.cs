@@ -6,8 +6,8 @@ using System.Text.Json.Nodes;
 namespace PortingKit.Addons.Porting;
 
 /// <summary>Expands exact QC material bindings over duplicate Source compiler texture identities.</summary>
-/// <remarks>studiomdl can give one resource two texture numbers, and its LOD replacement table only lists the
-/// first, so a lower LOD silently renders the wrong material on the other number. The finalizer extends a binding
+/// <remarks>studiomdl can give one resource two texture numbers, and its LOD replacement table can bind only one of
+/// them, so a lower LOD silently renders the wrong material on the other number. The finalizer extends a binding
 /// across those duplicates, and only then: anything the QC cannot certify is a compiler defect and is refused,
 /// never quietly rewritten. The original table stays in the file unreferenced, so no geometry moves.</remarks>
 public static class CompiledMaterials

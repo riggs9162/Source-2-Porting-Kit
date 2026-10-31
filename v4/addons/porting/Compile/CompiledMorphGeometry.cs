@@ -5,9 +5,9 @@ namespace PortingKit.Addons.Porting;
 
 /// <summary>Restores authored per-LOD morphs after compiler vertex unification and audits every rendered output.</summary>
 /// <remarks>
-/// studiomdl merges vertices across LODs by tolerance and keeps only LOD0 flex data for the merged vertex, so a
-/// lower LOD ends up deforming with data that was never authored for it, and controller, rule and descriptor counts
-/// still match. The repair proves which authored vertex each rendered vertex came from, isolates the LOD vertex pools,
+/// studiomdl merges vertices across LODs by tolerance, so a lower LOD can end up deforming with data that was never
+/// authored for it, or with none, while controller, rule and descriptor counts still match. The repair proves
+/// which authored vertex each rendered vertex came from, isolates the LOD vertex pools,
 /// and rewrites each mesh's flex records from the authored deltas. The engine reads a delta as a half float converted
 /// to 1/4096-inch fixed point, and every comparison here is made in that fixed-point value. Comparing the half or the
 /// source float would report differences the game can never show.
@@ -236,8 +236,8 @@ public static class CompiledMorphGeometry
     private static (int[] Bones, double[] Weights) ReadSkin(DmxElement state, DmxElement model, Dictionary<string, int> boneNames)
     {
         var jointCount = state.Value<int>("jointCount");
-        if (jointCount <= 0) throw new CompiledDataError("Generated morph source has no joint weights to reshape");
         var rawWeights = state.Numbers("jointWeights");
+        if (jointCount <= 0 || rawWeights.Length % jointCount != 0) throw new CompiledDataError($"cannot reshape array of size {rawWeights.Length} into shape ({jointCount})");
         var rawIndices = state.Array<int>("jointIndices");
         var boneMap = model.Elements("jointList").Select(joint => boneNames.GetValueOrDefault(joint?.Name ?? "", -1)).ToArray();
         if (jointCount > 3 || rawIndices.Zip(rawWeights).Any(pair => boneMap[pair.First] < 0 && pair.Second > 0)) throw new MorphGeometryError("Generated morph source has unsupported skin links");
@@ -609,9 +609,8 @@ public static class CompiledMorphGeometry
     private static bool IsDmx(string? path) => path is not null && PathText.Suffix(path).Equals(".dmx", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Reads complete named legacy vertex deltas without controller or descriptor inference.</summary>
-    /// <remarks>Records of one descriptor add up. Inside a single record a repeated vertex does not: the last
-    /// occurrence replaces the sum, which is how the engine's own loop over the same record behaves under v3's
-    /// reading of it, so the sum is taken against the value from before the record.</remarks>
+    /// <remarks>Records of one descriptor add up. Inside a single record a repeated vertex does not: each occurrence
+    /// adds to the value from before the record and the last one wins, exactly as v3's array assignment did.</remarks>
     private static CompiledFlexes ReadFlexes(CompiledVertices compiled, CompiledMesh mesh, List<string> names)
     {
         var data = compiled.MdlBytes;
