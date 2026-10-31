@@ -21,11 +21,32 @@ public sealed record CoordinateMode(double Scale = 1.0, bool SwapAxes = false, Q
     };
 
     /// <summary>Applies scale and the axis swap to a root transform; children inherit it through the hierarchy.</summary>
+    /// <remarks>The swap runs in single precision throughout, operation by operation, because the original's
+    /// arrays are all single precision here. Rotating in double and rounding at the end misses the sixth decimal
+    /// of root bones, which shows up in the QC's <c>$definebone</c> lines.</remarks>
     public (V3 Translation, Q4 Rotation) ApplyToRoot(V3 translation, Q4 rotation)
     {
         var moved = ApplyToChild(translation);
-        if (!SwapAxes) return (moved, rotation.Single());
-        return (Rotation.Rotate(moved).Single(), (Rotation * rotation).Single());
+        return !SwapAxes ? (moved, rotation.Single()) : (RotateSingle(Rotation, moved), MultiplySingle(Rotation, rotation));
+    }
+
+    private static (float X, float Y, float Z) CrossSingle((float X, float Y, float Z) a, (float X, float Y, float Z) b) =>
+        (a.Y * b.Z - a.Z * b.Y, a.Z * b.X - a.X * b.Z, a.X * b.Y - a.Y * b.X);
+
+    private static V3 RotateSingle(Q4 rotation, V3 vector)
+    {
+        (float X, float Y, float Z) axis = ((float)rotation.X, (float)rotation.Y, (float)rotation.Z), value = ((float)vector.X, (float)vector.Y, (float)vector.Z);
+        var first = CrossSingle(axis, value);
+        var second = CrossSingle(axis, first);
+        var twice = (float)(2.0 * (float)rotation.W);
+        return new(value.X + twice * first.X + 2f * second.X, value.Y + twice * first.Y + 2f * second.Y, value.Z + twice * first.Z + 2f * second.Z);
+    }
+
+    private static Q4 MultiplySingle(Q4 left, Q4 right)
+    {
+        float ax = (float)left.X, ay = (float)left.Y, az = (float)left.Z, aw = (float)left.W;
+        float bx = (float)right.X, by = (float)right.Y, bz = (float)right.Z, bw = (float)right.W;
+        return new(aw * bx + ax * bw + ay * bz - az * by, aw * by - ax * bz + ay * bw + az * bx, aw * bz + ax * by - ay * bx + az * bw, aw * bw - ax * bx - ay * by - az * bz);
     }
 
     /// <summary>Scales in single precision, the precision the glTF stream and the compiled bones both use.</summary>
