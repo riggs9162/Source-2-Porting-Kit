@@ -52,6 +52,9 @@ public static partial class PhyAudit
     [GeneratedRegex(@"""mass""\s*""([^""\r\n]+)""")]
     private static partial Regex MassPattern();
 
+    [GeneratedRegex(@"""volume""\s*""([^""\r\n]+)""")]
+    private static partial Regex VolumePattern();
+
     private static JsonArray Row(V3 vector) => new(vector.X, vector.Y, vector.Z);
     private static JsonArray Row(Q4 rotation) => new(rotation.X, rotation.Y, rotation.Z, rotation.W);
     private static JsonArray Box(V3 low, V3 high) => new(Row(low), Row(high));
@@ -429,15 +432,17 @@ public static partial class PhyAudit
 
     private static (string, string) Sorted(string first, string second) => string.CompareOrdinal(first, second) <= 0 ? (first, second) : (second, first);
 
-    /// <summary>Restores requested per-body masses after compiler convex rebuilding redistributes them.</summary>
-    /// <remarks>Only solid mass keyvalues are rewritten. The compiler's collision binary, model checksum, constraint values
-    /// and collision whitelist remain intact, and the audit record retains the compiler's original masses.</remarks>
+    /// <summary>Restores requested per-body masses and true volumes after compiler convex rebuilding changes them.</summary>
+    /// <remarks>Only solid mass and volume keyvalues are rewritten. The compiler's collision binary, model checksum, constraint
+    /// values and collision whitelist remain intact, and the audit record retains the compiler's original values. The
+    /// compiler measures volume on its own shrunken hulls, so once the authored hulls are serialized its figure is
+    /// wrong by up to 80% on small bodies. The engine derives density from it, which decides how a body floats.</remarks>
     public static JsonObject FinalizeCompiledPhy(string path, PreparedPhysics result)
     {
         var data = File.ReadAllBytes(path);
         var parsed = ReadPhy(path, false);
-        var desired = new Dictionary<string, double>();
-        foreach (var body in result.BodyReports) desired[body.Get("helper").Str()] = body.Get("target_mass_kg").Dbl();
+        var desired = new Dictionary<string, (double Mass, double Volume)>();
+        foreach (var body in result.BodyReports) desired[body.Get("helper").Str()] = (body.Get("target_mass_kg").Dbl(), body.Get("export_volume_in3").Dbl());
         long position = BinaryPrimitives.ReadUInt32LittleEndian(data);
         for (var index = 0; index < parsed.SolidCount; index++) position += 4 + BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan((int)position));
         var text = TailText(data, position);
@@ -449,14 +454,20 @@ public static partial class PhyAudit
             if (!name.Success || !desired.TryGetValue(name.Groups[1].Value, out var target)) throw new PhyAuditException("Cannot finalize an unexpected compiled physics bone");
             var mass = MassPattern().Match(block);
             if (!mass.Success) throw new PhyAuditException("Compiled body has no mass keyvalue");
-            changes.Add(new JsonObject
+            var change = new JsonObject
             {
                 ["bone"] = name.Groups[1].Value,
                 ["compiler_mass_kg"] = double.Parse(mass.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture),
-                ["final_mass_kg"] = target
-            });
+                ["final_mass_kg"] = target.Mass
+            };
+            changes.Add(change);
             var value = mass.Groups[1];
-            return block[..value.Index] + Fmt.F9(target) + block[(value.Index + value.Length)..];
+            block = block[..value.Index] + Fmt.F9(target.Mass) + block[(value.Index + value.Length)..];
+            var volume = VolumePattern().Match(block);
+            if (!volume.Success || target.Volume <= 0) return block;
+            change["compiler_volume_in3"] = double.Parse(volume.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
+            change["final_volume_in3"] = target.Volume;
+            return block[..volume.Groups[1].Index] + Fmt.F6(target.Volume) + block[(volume.Groups[1].Index + volume.Groups[1].Length)..];
         });
         if (changes.Count != desired.Count) throw new PhyAuditException("Cannot finalize masses with missing or additional compiled bodies");
         using (var stream = new MemoryStream())
