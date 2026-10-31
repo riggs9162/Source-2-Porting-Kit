@@ -15,6 +15,7 @@ namespace PortingKit.Addons.Porting;
 public sealed class MaterialPortTool : ITool
 {
     private const string Implementation = "material-port-1";
+    private const string DumpMarker = "--- Dump written to ";
 
     public ToolDefinition Definition { get; } = new("Material port", "Materials",
         "Ports Source 2 materials from a VPK, a loose .vmat/.vmat_c or an exported folder into a game-ready materials tree, for brushes and for models.",
@@ -134,14 +135,14 @@ public sealed class MaterialPortTool : ITool
         var path = Path.GetFullPath(input.Path!);
         if (Directory.Exists(path))
         {
-            var materials = Path.Combine(path, "materials");
-            var root = Directory.Exists(materials) ? materials : path;
-            return VmatParser.FindVmats(path).Select(vmat => Loose(vmat, root, path)).ToList();
+            var nested = Path.Combine(path, "materials");
+            var root = Directory.Exists(nested) ? nested : path;
+            return VmatParser.FindVmats(path).Select(vmat => Loose(vmat, root)).ToList();
         }
         if (!File.Exists(path)) throw new FileNotFoundException($"Material not found: {path}");
         return Path.GetExtension(path).ToLowerInvariant() switch
         {
-            ".vmat" => [Loose(path, MaterialsRoot(path) ?? Path.GetDirectoryName(path)!, MaterialsRoot(path) ?? Path.GetDirectoryName(path)!)],
+            ".vmat" => [Loose(path, MaterialsRoot(path) ?? Path.GetDirectoryName(path)!)],
             ".vmat_c" => [await ExportLoose(path, run)],
             _ => throw new InvalidDataException($"Expected a .vmat, a .vmat_c, a folder or a vpk: line, got: {path}")
         };
@@ -154,17 +155,23 @@ public sealed class MaterialPortTool : ITool
         return null;
     }
 
-    private static Prepared Loose(string vmat, string root, string textureRoot)
+    /// <summary>Describes an exported vmat. Authored paths start with <c>materials/</c>, so they resolve from the folder above that one.</summary>
+    private static Prepared Loose(string vmat, string root)
     {
         var relative = Path.GetRelativePath(root, vmat).Replace('\\', '/');
-        var resource = Path.GetFileName(root).Equals("materials", StringComparison.OrdinalIgnoreCase) ? "materials/" + relative : relative;
-        return new(vmat, resource, root, textureRoot, null, null);
+        var underMaterials = Path.GetFileName(root).Equals("materials", StringComparison.OrdinalIgnoreCase);
+        var textureRoot = underMaterials ? Path.GetDirectoryName(root)! : root;
+        return new(vmat, underMaterials ? "materials/" + relative : relative, root, textureRoot, null, null);
     }
 
-    private static async Task Viewer(IReadOnlyList<string> arguments, string workingDirectory, Run run)
+    private static async Task Viewer(IReadOnlyList<string> arguments, string workingDirectory, Run run, Action<string>? observe = null)
     {
         Directory.CreateDirectory(workingDirectory);
-        var result = await run.Port.Processes.RunAsync(new ProcessRequest(run.Vrf, arguments, workingDirectory, TimeSpan.FromSeconds(240)), line => run.Port.Log(line.Text), run.Port.Token);
+        var result = await run.Port.Processes.RunAsync(new ProcessRequest(run.Vrf, arguments, workingDirectory, TimeSpan.FromSeconds(240)), line =>
+        {
+            run.Port.Log(line.Text);
+            observe?.Invoke(line.Text);
+        }, run.Port.Token);
         if (result.ExitCode != 0) throw new InvalidDataException($"VRF exited {result.ExitCode}: {string.Join(" ", arguments)}");
     }
 
@@ -183,19 +190,38 @@ public sealed class MaterialPortTool : ITool
         return new(found[0], resource, Directory.Exists(materials) ? materials : folder, folder, vpk, folder);
     }
 
+    /// <summary>Exports a compiled material from a folder laid out like a game, so the viewer can find its compiled textures.</summary>
+    /// <remarks>
+    /// The viewer joins the output folder to the input path, and an absolute input wins that join, so a loose file dumps beside itself.
+    /// A relative input does not dump at all. The dumped files are therefore gathered from what the viewer reports and moved into
+    /// the isolated folder straight away. A file that was already there before the export is copied instead of moved, so a port
+    /// never removes anything it did not create.
+    /// </remarks>
     private static async Task<Prepared> ExportLoose(string file, Run run)
     {
         var resourceRoot = MaterialsRoot(file);
-        var key = Digest.Text(file)[..16];
-        var folder = Path.Combine(run.Tool.OutputDirectory, "materialsrc", key);
-        await Viewer(["-i", file, "-o", folder, "-d", "--threads", "1", "-e", "vmat_c"], folder, run);
+        var folder = Path.Combine(run.Tool.OutputDirectory, "materialsrc", Digest.Text(file)[..16]);
+        Directory.CreateDirectory(folder);
+        var game = resourceRoot is null ? Path.GetDirectoryName(file)! : Path.GetDirectoryName(resourceRoot)!;
+        var dumped = new List<string>();
+        var started = DateTime.UtcNow;
+        await Viewer(["-i", file, "-o", folder, "-d", "--threads", "1", "-e", "vmat_c"], folder, run, line =>
+        {
+            var at = line.IndexOf(DumpMarker, StringComparison.Ordinal);
+            if (at >= 0) lock (dumped) dumped.Add(line[(at + DumpMarker.Length)..].Trim().Trim('"'));
+        });
+        foreach (var path in dumped.Distinct(StringComparer.OrdinalIgnoreCase).Where(File.Exists).ToArray())
+        {
+            if (path.StartsWith(folder, StringComparison.OrdinalIgnoreCase)) continue;
+            var target = Path.Combine(folder, Path.GetRelativePath(game, path));
+            Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+            if (File.GetCreationTimeUtc(path) < started) File.Copy(path, target, true);
+            else File.Move(path, target, true);
+        }
         var found = Directory.GetFiles(folder, "*.vmat", SearchOption.AllDirectories);
         if (found.Length != 1) throw new InvalidDataException($"VRF selected unexpected materials: [{string.Join(", ", found)}]");
-        var resource = resourceRoot is null
-            ? Path.GetFileName(file)
-            : "materials/" + Path.GetRelativePath(resourceRoot, file).Replace('\\', '/');
         var materials = Path.Combine(folder, "materials");
-        return new(found[0], resource, Directory.Exists(materials) ? materials : Path.GetDirectoryName(found[0])!, folder, null, folder);
+        return new(found[0], Path.GetRelativePath(game, file).Replace('\\', '/'), Directory.Exists(materials) ? materials : Path.GetDirectoryName(found[0])!, folder, null, folder);
     }
 
     /// <summary>Recovers only exact compiled builtin identities and their verified neutral channels.</summary>
