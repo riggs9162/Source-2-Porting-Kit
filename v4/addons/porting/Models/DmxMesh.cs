@@ -50,7 +50,7 @@ public static class DmxMesh
         else
         {
             weights = state.Numbers("blendweights$0");
-            indices = state.Array<int>("blendindices$0").ToArray();
+            indices = Array.ConvertAll(state.Numbers("blendindices$0"), value => (int)value);
             var lookup = new Dictionary<string, int>(StringComparer.Ordinal);
             for (var index = 0; index < boneNames.Count; index++) lookup[boneNames[index]] = index;
             for (var index = 0; index < joints.Count; index++)
