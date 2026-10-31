@@ -336,10 +336,10 @@ public sealed partial class ModelMetadata
         var lines = new List<string>();
         foreach (var item in Attachments)
         {
-            if (item.Influences != 1 || item.IgnoreRotation) throw new InvalidDataException($"Attachment '{item.Name}' needs manual Source 1 authoring.");
-            if (item.RootTransform && modelSpaceBone.Length == 0) throw new InvalidDataException($"Attachment '{item.Name}' needs an explicit stationary model-space bone.");
+            if (item.Influences != 1 || item.IgnoreRotation) throw new InvalidDataException($"Attachment '{item.Name}' needs manual Source 1 authoring");
+            if (item.RootTransform && modelSpaceBone.Length == 0) throw new InvalidDataException($"Attachment '{item.Name}' needs an explicit stationary model-space bone");
             var bone = item.RootTransform ? modelSpaceBone : item.Bone;
-            if (bone.Length == 0) throw new InvalidDataException($"Attachment '{item.Name}' has no bone.");
+            if (bone.Length == 0) throw new InvalidDataException($"Attachment '{item.Name}' has no bone");
             var (pitch, yaw, roll) = item.Rotation.ToQAngle();
             lines.Add($"$attachment {Quoted(item.Name)} {Quoted(bone)} {Fmt.F6(item.Position.X)} {Fmt.F6(item.Position.Y)} {Fmt.F6(item.Position.Z)} rotate {Fmt.F6(pitch)} {Fmt.F6(yaw)} {Fmt.F6(roll)}");
         }
@@ -355,7 +355,7 @@ public sealed partial class ModelMetadata
         string? active = null;
         foreach (var item in Hitboxes)
         {
-            if (item.TranslationOnly) throw new InvalidDataException($"Hitbox '{item.Name}' is translation-only.");
+            if (item.TranslationOnly) throw new InvalidDataException($"Hitbox '{item.Name}' is translation-only");
             if (item.SetName != active)
             {
                 lines.Add($"$hboxset {Quoted(item.SetName)}");

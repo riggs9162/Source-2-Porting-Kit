@@ -16,16 +16,37 @@ public sealed record CoordinateMode(double Scale = 1.0, bool SwapAxes = false, Q
     public static CoordinateMode For(GltfDocument document) => document.PositionSpace() switch
     {
         GltfDocument.SpaceMetres => new(GltfDocument.SourceUnitsPerMetre, true, GltfDocument.Source2BasisQuaternion),
-        "" => throw new InvalidDataException("Native port requires a Source 2 Viewer export with known units."),
+        "" => throw new InvalidDataException("Native port requires a Source 2 Viewer export with known units"),
         _ => new()
     };
 
     /// <summary>Applies scale and the axis swap to a root transform; children inherit it through the hierarchy.</summary>
+    /// <remarks>The swap runs in single precision throughout, operation by operation, because the original's
+    /// arrays are all single precision here. Rotating in double and rounding at the end misses the sixth decimal
+    /// of root bones, which shows up in the QC's <c>$definebone</c> lines.</remarks>
     public (V3 Translation, Q4 Rotation) ApplyToRoot(V3 translation, Q4 rotation)
     {
         var moved = ApplyToChild(translation);
-        if (!SwapAxes) return (moved, rotation.Single());
-        return (Rotation.Rotate(moved).Single(), (Rotation * rotation).Single());
+        return !SwapAxes ? (moved, rotation.Single()) : (RotateSingle(Rotation, moved), MultiplySingle(Rotation, rotation));
+    }
+
+    private static (float X, float Y, float Z) CrossSingle((float X, float Y, float Z) a, (float X, float Y, float Z) b) =>
+        (a.Y * b.Z - a.Z * b.Y, a.Z * b.X - a.X * b.Z, a.X * b.Y - a.Y * b.X);
+
+    private static V3 RotateSingle(Q4 rotation, V3 vector)
+    {
+        (float X, float Y, float Z) axis = ((float)rotation.X, (float)rotation.Y, (float)rotation.Z), value = ((float)vector.X, (float)vector.Y, (float)vector.Z);
+        var first = CrossSingle(axis, value);
+        var second = CrossSingle(axis, first);
+        var twice = (float)(2.0 * (float)rotation.W);
+        return new(value.X + twice * first.X + 2f * second.X, value.Y + twice * first.Y + 2f * second.Y, value.Z + twice * first.Z + 2f * second.Z);
+    }
+
+    private static Q4 MultiplySingle(Q4 left, Q4 right)
+    {
+        float ax = (float)left.X, ay = (float)left.Y, az = (float)left.Z, aw = (float)left.W;
+        float bx = (float)right.X, by = (float)right.Y, bz = (float)right.Z, bw = (float)right.W;
+        return new(aw * bx + ax * bw + ay * bz - az * by, aw * by - ax * bz + ay * bw + az * bx, aw * bz + ax * by - ay * bx + az * bw, aw * bw - ax * bx - ay * by - az * bz);
     }
 
     /// <summary>Scales in single precision, the precision the glTF stream and the compiled bones both use.</summary>
@@ -130,8 +151,8 @@ public static class SmdSkeleton
     /// <summary>Writes an animation-only SMD: nodes and skeleton with no triangles.</summary>
     public static void WriteAnimation(GltfSkin skin, IReadOnlyList<JointPose[]> frames, string path, CoordinateMode coordinates)
     {
-        if (skin.Joints.Count == 0) throw new InvalidDataException("Skin has no joints.");
-        if (frames.Count == 0) throw new InvalidDataException("No animation frames to write.");
+        if (skin.Joints.Count == 0) throw new InvalidDataException("Skin has no joints");
+        if (frames.Count == 0) throw new InvalidDataException("No animation frames to write");
         using var output = Fmt.OpenText(path);
         WriteSkeleton(output, skin, frames, coordinates);
     }
@@ -188,7 +209,7 @@ public static class SmdSkeleton
         var nodeLines = nodes[..endAt];
         var remainder = nodes[(endAt + "end\n".Length)..];
         if (nodeLines.Split('\n', StringSplitOptions.RemoveEmptyEntries).Any(line => line.Trim().Length > 0 && int.Parse(line.Split(' ', StringSplitOptions.RemoveEmptyEntries)[0]) == index))
-            throw new InvalidDataException($"Compatibility bone index {index} already exists in {path}.");
+            throw new InvalidDataException($"Compatibility bone index {index} already exists in {path}");
         var skeletonAt = remainder.IndexOf("skeleton\n", StringComparison.Ordinal);
         var before = remainder[..skeletonAt];
         var skeleton = remainder[(skeletonAt + "skeleton\n".Length)..];
@@ -215,23 +236,23 @@ public static class SmdSkeleton
     /// <summary>Rejects data an SMD cannot carry instead of silently changing a native skeleton.</summary>
     public static void ValidateNativeData(GltfDocument document, GltfSkin skin, IEnumerable<GltfClip> clips)
     {
-        if (skin.Joints.Count > 256) throw new InvalidDataException("Garry's Mod supports at most 256 bones.");
+        if (skin.Joints.Count > 256) throw new InvalidDataException("Garry's Mod supports at most 256 bones");
         var names = skin.Joints.Select(joint => joint.Name.ToLowerInvariant()).ToList();
-        if (names.Count != names.Distinct(StringComparer.Ordinal).Count()) throw new InvalidDataException("Source 1 requires unique case-insensitive bone names.");
+        if (names.Count != names.Distinct(StringComparer.Ordinal).Count()) throw new InvalidDataException("Source 1 requires unique case-insensitive bone names");
         foreach (var joint in skin.Joints)
             if (Math.Abs(joint.RestScale.X - 1) > 1e-5 || Math.Abs(joint.RestScale.Y - 1) > 1e-5 || Math.Abs(joint.RestScale.Z - 1) > 1e-5)
-                throw new InvalidDataException($"SMD cannot preserve bind scale on {joint.Name}.");
+                throw new InvalidDataException($"SMD cannot preserve bind scale on {joint.Name}");
         foreach (var clip in clips)
             foreach (var ((_, path), channel) in clip.Channels)
             {
                 if (path == "scale" && channel.Values.Values.Any(value => Math.Abs(value - 1) > 1e-5))
-                    throw new InvalidDataException($"SMD cannot preserve animated scale in {clip.Name}.");
+                    throw new InvalidDataException($"SMD cannot preserve animated scale in {clip.Name}");
                 if (channel.Interpolation is not ("LINEAR" or "STEP"))
-                    throw new InvalidDataException($"Unsupported interpolation {channel.Interpolation} in {clip.Name}.");
+                    throw new InvalidDataException($"Unsupported interpolation {channel.Interpolation} in {clip.Name}");
             }
         foreach (var mesh in document.Meshes)
             foreach (var primitive in mesh.Get("primitives").Arr())
                 if (primitive.Get("attributes").Has("JOINTS_1"))
-                    throw new InvalidDataException("Extra skin influence sets require explicit weight reduction.");
+                    throw new InvalidDataException("Extra skin influence sets require explicit weight reduction");
     }
 }

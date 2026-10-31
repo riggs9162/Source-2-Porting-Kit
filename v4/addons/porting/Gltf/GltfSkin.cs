@@ -120,65 +120,99 @@ public sealed record GltfClip(string Name, double Duration, Dictionary<(int Join
         return Math.Clamp(upper - 1, 0, times.Length - 2);
     }
 
-    private static double[] Row(AccessorData values, int row)
+    private static float[] Row(AccessorData values, int row)
     {
-        var result = new double[values.Width];
-        Array.Copy(values.Values, row * values.Width, result, 0, values.Width);
+        var result = new float[values.Width];
+        for (var column = 0; column < result.Length; column++) result[column] = (float)values[row, column];
         return result;
     }
 
-    private static double[] Sample(GltfChannel channel, double t)
+    /// <summary>A short single-precision dot product as the BLAS kernel computes it.</summary>
+    /// <remarks>Each product rounds to single precision but the running sum is double, and the last bit of this
+    /// decides how a rotation near gimbal lock splits between roll and yaw.</remarks>
+    private static float Dot(float[] a, float[] b)
+    {
+        var sum = 0.0;
+        for (var i = 0; i < a.Length; i++) sum += a[i] * b[i];
+        return (float)sum;
+    }
+
+    /// <summary>The parameter across one key segment, computed in single precision like the time stream itself.</summary>
+    private static float Fraction(double[] times, int k, double t)
+    {
+        var dt = (float)times[k + 1] - (float)times[k];
+        return dt <= 0f ? 0f : ((float)t - (float)times[k]) / dt;
+    }
+
+    /// <summary>Samples one channel in single precision, operation by operation.</summary>
+    /// <remarks>Keys are single precision, and the sampled result differs from a double-precision blend by enough
+    /// to matter: on long root motion the two drift 1.5e-5 apart, and a rotation that rounds to a tiny negative
+    /// wraps to 2 pi in the SMD instead of 0. End tests compare in single precision too, but the segment search
+    /// uses the exact time.</remarks>
+    private static float[] Sample(GltfChannel channel, double t)
     {
         var (times, values, interpolation) = channel;
         var count = times.Length;
         var cubic = interpolation == "CUBICSPLINE";
-        if (t <= times[0]) return Row(values, cubic ? 1 : 0);
-        if (t >= times[^1]) return Row(values, cubic ? (count - 1) * 3 + 1 : count - 1);
+        if ((float)t <= (float)times[0]) return Row(values, cubic ? 1 : 0);
+        if ((float)t >= (float)times[^1]) return Row(values, cubic ? (count - 1) * 3 + 1 : count - 1);
         var k = Segment(times, t);
-        var dt = times[k + 1] - times[k];
-        var u = dt <= 0 ? 0.0 : (t - times[k]) / dt;
         if (interpolation == "STEP") return Row(values, k);
-        var result = new double[values.Width];
+        var u = Fraction(times, k, t);
+        var result = new float[values.Width];
         if (cubic)
         {
-            double u2 = u * u, u3 = u2 * u;
+            var dt = (float)times[k + 1] - (float)times[k];
+            float u2 = u * u, u3 = u2 * u;
+            float[] p0 = Row(values, k * 3 + 1), m0 = Row(values, k * 3 + 2), p1 = Row(values, (k + 1) * 3 + 1), m1 = Row(values, (k + 1) * 3);
             for (var i = 0; i < result.Length; i++)
-                result[i] = (2 * u3 - 3 * u2 + 1) * values[k * 3 + 1, i] + (u3 - 2 * u2 + u) * values[k * 3 + 2, i] * dt
-                    + (-2 * u3 + 3 * u2) * values[(k + 1) * 3 + 1, i] + (u3 - u2) * values[(k + 1) * 3, i] * dt;
+                result[i] = (2 * u3 - 3 * u2 + 1) * p0[i] + (u3 - 2 * u2 + u) * (m0[i] * dt) + (-2 * u3 + 3 * u2) * p1[i] + (u3 - u2) * (m1[i] * dt);
             return result;
         }
-        for (var i = 0; i < result.Length; i++) result[i] = (1.0 - u) * values[k, i] + u * values[k + 1, i];
+        float[] from = Row(values, k), to = Row(values, k + 1);
+        for (var i = 0; i < result.Length; i++) result[i] = (1f - u) * from[i] + u * to[i];
         return result;
     }
 
-    private static Q4 Slerp(Q4 from, Q4 to, double t)
+    private static Q4 Normalized(float[] row)
     {
-        var dot = from.Dot(to);
+        var length = MathF.Sqrt(Dot(row, row));
+        var divisor = length > 1e-12 ? length : (float)1e-12;
+        return new(row[0] / divisor, row[1] / divisor, row[2] / divisor, row[3] / divisor);
+    }
+
+    /// <summary>Spherical interpolation that stays in single precision until the angle is involved.</summary>
+    /// <remarks>Close quaternions blend linearly on single-precision keys. The far branch really does run in
+    /// double precision, because its weights come out of an arccosine of a Python float.</remarks>
+    private static Q4 Slerp(float[] from, float[] to, double t)
+    {
+        double dot = Dot(from, to);
         if (dot < 0.0)
         {
-            to = -to;
+            to = Array.ConvertAll(to, value => -value);
             dot = -dot;
         }
         if (dot > 0.9995)
-            return new Q4((1 - t) * from.X + t * to.X, (1 - t) * from.Y + t * to.Y, (1 - t) * from.Z + t * to.Z, (1 - t) * from.W + t * to.W).Normalized();
+        {
+            float a = (float)(1.0 - t), b = (float)t;
+            return Normalized([a * from[0] + b * to[0], a * from[1] + b * to[1], a * from[2] + b * to[2], a * from[3] + b * to[3]]);
+        }
         var angle = Math.Acos(dot);
         var sine = Math.Sin(angle);
         var theta = angle * t;
-        double a = Math.Sin(angle - theta) / sine, b = Math.Sin(theta) / sine;
-        return new(a * from.X + b * to.X, a * from.Y + b * to.Y, a * from.Z + b * to.Z, a * from.W + b * to.W);
+        double p = Math.Sin(angle - theta) / sine, q = Math.Sin(theta) / sine;
+        return new(p * from[0] + q * to[0], p * from[1] + q * to[1], p * from[2] + q * to[2], p * from[3] + q * to[3]);
     }
 
     private static Q4 SampleRotation(GltfChannel channel, double t)
     {
         var (times, values, interpolation) = channel;
-        if (interpolation == "LINEAR" && t > times[0] && t < times[^1])
+        if (interpolation == "LINEAR" && (float)t > (float)times[0] && (float)t < (float)times[^1])
         {
             var k = Segment(times, t);
-            var dt = times[k + 1] - times[k];
-            return Slerp(values.Quaternion(k), values.Quaternion(k + 1), dt <= 0 ? 0.0 : (t - times[k]) / dt);
+            return Slerp(Row(values, k), Row(values, k + 1), Fraction(times, k, t));
         }
-        var row = Sample(channel, t);
-        return new Q4(row[0], row[1], row[2], row[3]).Normalized();
+        return Normalized(Sample(channel, t));
     }
 
     private static V3 SampleVector(GltfChannel channel, double t)
@@ -218,14 +252,14 @@ public sealed record GltfClip(string Name, double Duration, Dictionary<(int Join
         var fps = authored.Fps;
         var frames = authored.Frames;
         if (!double.IsFinite(fps) || fps <= 0 || frames < 1)
-            throw new InvalidDataException($"{Name}: authored animation requires positive FPS and frame count.");
+            throw new InvalidDataException($"{Name}: authored animation requires positive FPS and frame count");
         var duration = (frames - 1) / fps;
-        if (!double.IsFinite(Duration) || Duration < 0) throw new InvalidDataException($"{Name}: exported animation duration is invalid.");
+        if (!double.IsFinite(Duration) || Duration < 0) throw new InvalidDataException($"{Name}: exported animation duration is invalid");
         var tolerance = Math.Max(1e-5, duration * 4.0 * 1.1920928955078125e-7);
         if (Duration > duration + tolerance)
-            throw new InvalidDataException($"{Name}: exported keys end at {Fmt.G(Duration)}s beyond the authored {frames}-frame duration {Fmt.G(duration)}s.");
+            throw new InvalidDataException($"{Name}: exported keys end at {Fmt.G(Duration)}s beyond the authored {frames}-frame duration {Fmt.G(duration)}s");
         var (samples, count) = (this with { Duration = duration }).Sample(skin, fps);
-        if (count != frames) throw new InvalidDataException($"{Name}: authored frame sampling produced {count} frames instead of {frames}.");
+        if (count != frames) throw new InvalidDataException($"{Name}: authored frame sampling produced {count} frames instead of {frames}");
         var tail = Math.Max(0.0, duration - Duration);
         return (samples, count, new JsonObject
         {

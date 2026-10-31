@@ -44,7 +44,8 @@ public static class Fmt
     {
         var wrapped = degrees % 360.0;
         if (wrapped < 0) wrapped += 360.0;
-        return wrapped % 360.0;
+        wrapped %= 360.0;
+        return wrapped == 0.0 ? 0.0 : wrapped;
     }
 
     /// <summary>Writes UTF-8 without a byte order mark, keeping line endings exactly as given.</summary>
