@@ -99,7 +99,9 @@ Reflections on a bumped brush are masked by the normal map's alpha, because the
 engine discards `$envmapmask` whenever `$bumpmap` is set. The port bakes the
 reflection mask there, and writes a separate `_envmask` file only for materials
 without a normal map, which can read it. The mask carries the reflection's strength,
-so brush VMTs need no `$envmaptint` or the other envmap controls.
+so brush VMTs need no `$envmaptint` or the other envmap controls. Brushes carry no
+Phong either: Garry's Mod's brush shader has no exponent texture, so a brush material
+ships only its colour, normal map and whatever else it really uses.
 
 Compression moves a nearly flat normal in coarse steps, which breaks reflections on a
 smooth surface into square blocks. **Brush normal maps** therefore stay uncompressed.

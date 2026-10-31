@@ -423,6 +423,7 @@ public static class MaterialBuilder
         var emitEnvmap = source.Has("metallic");
         var phongDrop = emitPhong ? "" : "no roughness or metallic signal";
         if (emitPhong && !options.EmitNormal) (emitPhong, phongDrop) = (false, "shipped without a normal map");
+        if (emitPhong && options.Shader == "LightmappedGeneric") (emitPhong, phongDrop) = (false, "the brush shader reads no Phong exponent texture");
         var capabilities = Vmt.Capabilities(options.Branch);
         var tintMode = capabilities.Contains("phong_albedo_tint") ? options.PhongTintMode : "off";
         if (options.PhongTintMode != "off" && tintMode == "off") context.Log($"Branch '{options.Branch}' has no $phongalbedotint; Phong tint compensation off");
@@ -502,7 +503,7 @@ public static class MaterialBuilder
                 }
             }
             else result.Dropped.Add(("envmask", "no metallic signal"));
-            if (options.Shader == "LightmappedGeneric" && normal is not null && envmask is not null && !options.Transparent && result.Stats?.IsRoughDielectric != true)
+            if (options.Shader == "LightmappedGeneric" && normal is not null && envmask is not null && result.Stats?.IsRoughDielectric != true)
             {
                 context.Log("Packing envmap mask into the bumpmap alpha");
                 normal = PbrMaps.PackEnvmapMask(normal, envmask);
