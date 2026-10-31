@@ -34,7 +34,7 @@ public static partial class Vmt
     /// <summary>Parameters grouped into the comment sections a generated VMT is written in.</summary>
     private static readonly (string Title, string[] Keys)[] Sections =
     [
-        ("Textures", ["$basetexture", "%tooltexture", "$bumpmap", "$phongexponenttexture", "$texture1", "$texture2", "$texture3"]),
+        ("Textures", ["$basetexture", "%tooltexture", "$detail", "$detailscale", "$detailblendmode", "$detailblendfactor", "$bumpmap", "$phongexponenttexture", "$texture1", "$texture2", "$texture3"]),
         ("Shader", ["$emissionscale", "$blendemissionbycolor", "$parallaxscale", "$alphablend", "$cull"]),
         ("Phong", ["$phong", "$phongboost", "$phongexponentfactor", "$phongtint", "$phongalbedotint", "$phongfresnelranges"]),
         ("Environment map", ["$envmap", "$envmapmask", "$envmaptint", "$envmapcontrast", "$envmapsaturation", "$envmapfresnel", "$normalmapalphaenvmapmask", "$envmaplightscale"]),
@@ -109,6 +109,8 @@ public static partial class Vmt
     /// reads $envmaptint in gamma space, so 0.16 is really 0.018 and multiplying it in leaves about a thousandth of the cubemap.
     /// $envmaplightscale dims reflections by the lightmap, which blacks them out in a dark room, and Garry's Mod's brush shader has
     /// no $envmapfresnel. $envmapcontrast and $envmapsaturation only restated their defaults.</para>
+    /// <para><paramref name="mappingTexture"/> makes a black texture the $basetexture and adds the colour back as a detail layer at the same
+    /// UVs, so every tool sees the black texture's size. <see cref="MaterialOptions.ToolSize"/> says why.</para>
     /// <para>Brushes get no Phong block. Garry's Mod's brush shader has no $phongexponenttexture, $phongboost or $phongfresnelranges, and
     /// its own $phong only answers a cascaded-shadow key light that stock Garry's Mod does not have.</para>
     /// <para><paramref name="tintable"/> enables the colourable-prop block; the mask must already be baked into basetexture alpha, and
@@ -117,7 +119,7 @@ public static partial class Vmt
     /// </remarks>
     public static VmtResult FakePbr(string materialName, string materialPath, string shader = "VertexLitGeneric", string branch = "gmod", string envmap = "env_cubemap",
         MaterialStats? stats = null, bool emitBumpmap = true, bool emitPhong = true, bool emitEnvmap = true, bool hasEnvmapMask = true, string surfaceprop = "",
-        bool tintable = false, string tintModeUsed = "off", OrderedDictionary<string, string>? extra = null, bool toolTexture = false)
+        bool tintable = false, string tintModeUsed = "off", OrderedDictionary<string, string>? extra = null, bool toolTexture = false, string? mappingTexture = null)
     {
         var capabilities = Capabilities(branch);
         var vertexLit = shader == "VertexLitGeneric";
@@ -127,8 +129,16 @@ public static partial class Vmt
         var averageMetallic = stats?.AvgMetallic ?? 0.0;
         var roughDielectric = stats?.IsRoughDielectric ?? false;
         var smoothness = Math.Clamp(1.0 - averageRoughness, 0.0, 1.0);
-        var parameters = new OrderedDictionary<string, string> { ["$basetexture"] = $"{materialPath}/{materialName}_color" };
+        var colour = $"{materialPath}/{materialName}_color";
+        var parameters = new OrderedDictionary<string, string> { ["$basetexture"] = mappingTexture is null ? colour : $"{materialPath}/{mappingTexture}" };
         if (toolTexture) parameters["%tooltexture"] = $"{materialPath}/{materialName}_tool";
+        if (mappingTexture is not null)
+        {
+            parameters["$detail"] = colour;
+            parameters["$detailscale"] = "1";
+            parameters["$detailblendmode"] = "1";
+            parameters["$detailblendfactor"] = "1";
+        }
         if (emitBumpmap) parameters["$bumpmap"] = $"{materialPath}/{materialName}_normal";
         if (emitBumpmap && emitPhong && vertexLit)
         {

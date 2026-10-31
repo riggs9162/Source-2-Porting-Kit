@@ -122,13 +122,17 @@ public sealed class MaterialOptions
     public string PhongTintMode { get; set; } = "selective";
     public double ColoredMetalRelief { get; set; } = MaterialDefaults.ColoredMetalRelief;
 
-    /// <summary>The longest edge Hammer and vbsp should believe a brush texture has. Zero uses its real size.</summary>
-    /// <remarks>A brush face stores its scale and shifts in texture pixels, and both tools take a material's size from its preview image
-    /// rather than the texture the game draws, so a larger texture stretches everything in Hammer and in every new compile. A
-    /// compiled map stores the size it was built with, which is why old maps survive a texture upgrade until they are recompiled.
-    /// %tooltexture points the preview at a texture of the original size. It starts with % so the game never reads it, and vbsp then
-    /// records that size in the BSP while the game draws the full resolution. $basetexturetransform looks like the answer and is not:
-    /// it also multiplies the UVs of maps already compiled, shrinking every texture in them.</remarks>
+    /// <summary>The longest edge Hammer, vbsp and hotspots should see on a brush texture. Zero uses its real size.</summary>
+    /// <remarks><para>A brush face stores its scale and shifts in texture pixels, so a larger texture stretches everything in Hammer and in
+    /// every new compile. A compiled map stores the size it was built with, which is why old maps survive a texture upgrade until they
+    /// are recompiled. vbsp takes that size from %tooltexture, but Hammer++ takes it from $basetexture and ignores %tooltexture, so
+    /// $basetexture itself has to be the smaller size.</para>
+    /// <para>It therefore becomes a black texture of that size, and the colour goes on as a detail layer at the same UVs. Additive is the
+    /// only detail mode the brush shader offers that reads sRGB, and black plus the detail is exactly the detail, so the game draws
+    /// every pixel of the full-size texture. %tooltexture stays because thumbnails would otherwise be black. A material that reads base
+    /// alpha cannot be layered, so it keeps its own $basetexture and only corrects the compile.</para>
+    /// <para>$basetexturetransform looks like the answer and is not: it also multiplies the UVs of maps already compiled, shrinking every
+    /// texture in them.</para></remarks>
     public int ToolSize { get; set; }
 
     /// <summary>How the normal map is stored.</summary>
@@ -442,6 +446,7 @@ public static class MaterialBuilder
         var tintable = options.Tintable;
         var bakeDetail = false;
         var toolDimensions = ToolDimensions(source, options, maps.Width, maps.Height);
+        var mappingTexture = toolDimensions is var (mappingHeight, mappingWidth) && !options.Transparent && !options.Decal && !source.Has("selfillum") ? $"black_{mappingWidth}x{mappingHeight}" : null;
         if (options.BakeNormalDetail)
         {
             string detailNote;
@@ -526,6 +531,8 @@ public static class MaterialBuilder
             Encode(ApplyOutputCap(basetexture, "color", options, context), Path.Combine(outputDir, name + "_color.vtf"), result, options, context, flags: Textures.FlagSrgb);
             if (toolDimensions is var (toolHeight, toolWidth))
                 Encode(Textures.ToBytes(Textures.Fit(Textures.ToFloat(basetexture), toolHeight, toolWidth)!), Path.Combine(outputDir, name + "_tool.vtf"), result, options, context, flags: Textures.FlagSrgb);
+            if (toolDimensions is var (blackHeight, blackWidth) && mappingTexture is not null && !File.Exists(Path.Combine(outputDir, mappingTexture + ".vtf")))
+                Encode(new ByteImage(blackHeight, blackWidth, 3), Path.Combine(outputDir, mappingTexture + ".vtf"), result, options, context, VtfFormat.DXT1);
             if (normal is not null) EncodeNormal(ApplyOutputCap(normal, "normal", options, context), Path.Combine(outputDir, name + "_normal.vtf"), result, options, context);
             if (phong is not null) Encode(ApplyOutputCap(phong, "phong", options, context), Path.Combine(outputDir, name + "_phong.vtf"), result, options, context);
             if (selfillum is not null)
@@ -541,7 +548,7 @@ public static class MaterialBuilder
             if (tintable && extra.GetValueOrDefault("$selfillum") == "1")
                 result.Notes.Add("$selfillum breaks the $blendtintbybasealpha combo - switch the glow mode to Emissive Blend to keep the prop colourable");
             result.Vmt = Vmt.FakePbr(name, materialPath, options.Shader, options.Branch, options.Envmap, result.Stats, emitBumpmap && (normal is not null || !compute), emitPhong, emitEnvmap,
-                envmask is not null || !compute, options.Surfaceprop, tintable, tintMode, extra, toolDimensions is not null);
+                envmask is not null || !compute, options.Surfaceprop, tintable, tintMode, extra, toolDimensions is not null, mappingTexture);
             result.Notes.AddRange(result.Vmt.Notes);
             if (source.GlassMaxOpacity is not null)
                 result.Notes.Add("Source 2 glass Fresnel opacity is approximated by its maximum opacity; Source 1 VertexLitGeneric has no matching opacity curve");
