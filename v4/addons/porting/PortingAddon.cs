@@ -5,6 +5,7 @@ public sealed class PortingAddon : IAddon
 {
     public void Initialize(IAddonContext context)
     {
+        context.Register<ITool>("materials", new MaterialPortTool());
     }
 
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
