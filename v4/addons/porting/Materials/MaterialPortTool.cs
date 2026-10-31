@@ -381,7 +381,7 @@ public sealed class MaterialPortTool : ITool
             provenance["mode"] = "exported_vmat";
         }
         if (!entry.Buildable) throw new InvalidDataException($"No resolved base color for {prepared.Vmat}");
-        var target = Resources.AddonMaterial(prepared.Resource);
+        var target = Resources.UnderRoot($"models/{run.Namespace}", Resources.AddonMaterial(prepared.Resource));
         var cut = target.LastIndexOf('/');
         var parent = cut >= 0 ? target[..cut] : "";
         var name = target[(cut + 1)..];

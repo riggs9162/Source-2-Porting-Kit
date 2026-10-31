@@ -21,13 +21,13 @@ public sealed class NativeStages(ISettings settings) : IWorkflowStages
         };
     }
 
-    private static string MaterialRoot(WorkflowOptions options, ModelVariant variant) => $"models/{options.Namespace}{(variant == ModelVariant.Static ? "_static" : "")}";
+    private static string MaterialRoot(WorkflowOptions options, ModelVariant variant) => $"models/{options.Namespace}{(variant == ModelVariant.Static ? Resources.StaticSuffix : "")}";
 
     private static string Modelname(WorkflowOptions options, PortAsset asset, ModelVariant variant) => variant switch
     {
-        ModelVariant.Static => $"{options.Namespace}/{asset.Relative}_static.mdl",
-        ModelVariant.Player => $"{options.Namespace}/{asset.Relative}_pm.mdl",
-        _ => $"{options.Namespace}/{asset.Relative}.mdl"
+        ModelVariant.Static => $"{WorkflowPaths.Model(options, asset)}_static.mdl",
+        ModelVariant.Player => $"{WorkflowPaths.Model(options, asset)}_pm.mdl",
+        _ => $"{WorkflowPaths.Model(options, asset)}.mdl"
     };
 
     /// <summary>Resolves pasted links, exact compiled models, or exported model sets.</summary>
@@ -57,7 +57,7 @@ public sealed class NativeStages(ISettings settings) : IWorkflowStages
         }
         var unique = assets.GroupBy(asset => asset.Key).Select(group => group.Last()).ToList();
         if (unique.Count == 0) throw new InvalidDataException("No selected model sources were found");
-        if (unique.Select(asset => asset.Relative.ToLowerInvariant()).Distinct().Count() != unique.Count)
+        if (unique.Select(asset => WorkflowPaths.Model(options, asset).ToLowerInvariant()).Distinct().Count() != unique.Count)
             throw new InvalidDataException("Selected resources collide under the output namespace");
         return unique;
     }
@@ -221,6 +221,8 @@ public sealed class NativeStages(ISettings settings) : IWorkflowStages
         }
         var selected = SelectMaterials(root, required);
         var folder = MaterialRoot(options, variant);
+        if (required.Select(pair => Resources.UnderRoot(folder, pair.Value.Str())).Distinct(StringComparer.Ordinal).Count() != required.Count)
+            throw new InvalidDataException("Material resources collide under the output namespace");
         var written = new List<string>();
         var audits = new JsonArray();
         var compiled = asset.CompiledInput && options.MaterialSource.Length == 0;
@@ -244,7 +246,7 @@ public sealed class NativeStages(ISettings settings) : IWorkflowStages
                 provenance["mode"] = options.MaterialSource.Length > 0 ? "explicit_material_source" : "exported_vmat";
             }
             if (!entry.Buildable) throw new InvalidDataException($"No resolved base color for {path}");
-            var target = Resources.Relative(required.Get(relative).Str(relative));
+            var target = Resources.UnderRoot(folder, Resources.Relative(required.Get(relative).Str(relative)));
             var cut = target.LastIndexOf('/');
             var materialPath = cut >= 0 ? $"{folder}/{target[..cut]}" : folder;
             var material = new MaterialOptions
@@ -281,9 +283,9 @@ public sealed class NativeStages(ISettings settings) : IWorkflowStages
             var source = Resources.Token(value.Str());
             if (seen.TryGetValue(token, out var known) && known != source) throw new InvalidDataException($"Conflicting compiler material alias: {token}");
             seen[token] = source;
-            var sourceTarget = Resources.Relative(required.Get(source).Str());
+            var sourceTarget = Resources.UnderRoot(folder, Resources.Relative(required.Get(source).Str()));
             var content = File.ReadAllBytes(Vmt(sourceTarget));
-            var target = Vmt(token);
+            var target = Vmt(Resources.UnderRoot(folder, token));
             if (originals.Contains(target) && !File.ReadAllBytes(target).AsSpan().SequenceEqual(content))
                 throw new InvalidDataException($"Compiler material alias replaces another source material: {token}");
             Directory.CreateDirectory(Path.GetDirectoryName(target)!);

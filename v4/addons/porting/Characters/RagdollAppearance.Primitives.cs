@@ -80,6 +80,13 @@ public static partial class RagdollAppearance
         return token == "debug/debugempty" ? "__s2kit_reserved/" + token : Resources.AddonMaterial(token);
     }
 
+    /// <summary>The QC line naming every folder this appearance's materials are found under.</summary>
+    public static string CdmaterialsLine(string cdmaterials, JsonObject report)
+    {
+        var names = report.Get("material_map").Obj().Select(pair => pair.Value.Str()).Concat(report.Get("material_aliases").Obj().Select(pair => pair.Key));
+        return "$cdmaterials " + string.Join(' ', Resources.SearchRoots(cdmaterials, names).Select(Quoted));
+    }
+
     /// <summary>Retains the original resource identity alongside its compiler-safe material token.</summary>
     private static void MapPrimitiveMaterials(IEnumerable<AppearancePrimitive> primitives)
     {

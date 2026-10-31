@@ -54,7 +54,7 @@ public static class AddonPackager
         var stem = Path.GetFileName(asset.Relative);
         var words = stem.Split('_', StringSplitOptions.RemoveEmptyEntries).Select(word => char.ToUpperInvariant(word[0]) + word[1..].ToLowerInvariant());
         var display = JsonSerializer.Serialize($"{string.Join(' ', words)} [{options.Namespace}]", Json.Options);
-        var model = JsonSerializer.Serialize($"models/{options.Namespace}/{asset.Relative}_pm.mdl", Json.Options);
+        var model = JsonSerializer.Serialize($"models/{WorkflowPaths.Model(options, asset)}_pm.mdl", Json.Options);
         return [$"player_manager.AddValidModel({display}, {model})", $"list.Set(\"PlayerOptionsModel\", {display}, {model})"];
     }
 

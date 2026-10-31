@@ -82,7 +82,7 @@ public static partial class RagdollPort
             while (taken.Contains(origin.ToLowerInvariant())) origin += "_";
             foreach (var path in files.Where(IsSmd)) SmdSkeleton.AddModelOriginBone(path, combined.Joints.Count, origin);
         }
-        var lines = new List<string> { $"$modelname \"{modelname}\"", "$maxverts 65535", $"$cdmaterials \"{cdmaterials}\"", "$surfaceprop \"flesh\"", "$contents \"solid\"" };
+        var lines = new List<string> { $"$modelname \"{modelname}\"", "$maxverts 65535", RagdollAppearance.CdmaterialsLine(cdmaterials, appearance.Report), "$surfaceprop \"flesh\"", "$contents \"solid\"" };
         lines.AddRange(appearance.QcLines);
         lines.AddRange(SmdSkeleton.DefineBoneLines(combined, new(), 90.0));
         lines.Add($"$root \"{physics.RootBone}\"");

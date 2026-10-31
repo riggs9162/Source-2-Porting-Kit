@@ -56,7 +56,10 @@ a project folder outside the game and a namespace such as `my_addon/props`. The
 tool sorts each model into a prop or a ragdoll, then exports it, writes editable
 sources, ports its materials, compiles it, audits the result and packages `addon/`
 in the project folder. **Install into Garry's Mod** then copies the verified files
-into your addons folder without touching files the kit does not own.
+into your addons folder without touching files the kit does not own. A namespace
+ending in a model's own folder uses that folder once, for the model and its materials:
+`my_addon/props_combine` with `models/props_combine/foo` gives
+`models/my_addon/props_combine/foo.mdl`.
 
 Textures, skins, bodygroups, LODs, animations, attachments, hitboxes and flexes all
 come across, and physics stays exact: ragdolls keep the authored convex hulls,

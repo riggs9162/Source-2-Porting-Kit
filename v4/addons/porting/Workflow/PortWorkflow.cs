@@ -20,6 +20,9 @@ public static class WorkflowPaths
 {
     public static string Project(WorkflowOptions options) => Path.GetFullPath(options.Project);
     public static string Extraction(WorkflowOptions options, PortAsset asset) => Path.Combine(Project(options), "extracted", asset.Key);
+    /// <summary>A model's path beneath the addon's models folder, without its extension.</summary>
+    public static string Model(WorkflowOptions options, PortAsset asset) => $"{options.Namespace}/{Resources.UnderRoot(options.Namespace, asset.Relative)}";
+
     public static string Sources(WorkflowOptions options, PortAsset asset) => Path.Combine(Project(options), "modelsrc", asset.Relative.Replace('/', Path.DirectorySeparatorChar));
     public static string Payload(WorkflowOptions options, PortAsset asset) => Path.Combine(Project(options), "staged", asset.Key, "addon");
 

@@ -205,7 +205,7 @@ public static partial class PropPort
         foreach (var token in tokens) targets[token] = Resources.AddonMaterial(token);
         if (tokens.Select(Resources.AddonMaterial).Distinct(StringComparer.Ordinal).Count() != tokens.Count)
             throw new InvalidDataException("Material resources collide once their models/ root is dropped: " + string.Join(", ", tokens));
-        var materialPaths = tokens.Select(token => SearchPath(cdmaterials, Resources.AddonMaterial(token))).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToList();
+        var materialPaths = tokens.Select(token => SearchPath(cdmaterials, Resources.UnderRoot(cdmaterials, Resources.AddonMaterial(token)))).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToList();
         RewriteQc(ported.Qc, modelname, materialPaths, ported.LodLines, ported.Partitioned);
         var warnings = ported.Warnings;
         if (fidelity.Get("groups").Bool()) warnings.Add("Source bodygroups are combined into one body; every mesh group choice renders together.");

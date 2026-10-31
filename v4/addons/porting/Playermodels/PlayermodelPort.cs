@@ -780,7 +780,7 @@ public static partial class PlayermodelPort
         var animationModelname = (Path.ChangeExtension(modelname, null) + "_animations.mdl").Replace('\\', '/');
         var animation = PlayerAnimations.WritePlayerAnimationLibrary(sources, Path.Combine(outDir, "player_animations"), rig.Skin, animationModelname, [.. bindLines, .. attachmentLines], ikLines, profile, context);
         files.AddRange(animation.Files);
-        var lines = new List<string> { $"$modelname \"{modelname}\"", $"$cdmaterials \"{cdmaterials}\"", $"$surfaceprop \"{surfaceprop}\"", "$contents \"solid\"" };
+        var lines = new List<string> { $"$modelname \"{modelname}\"", RagdollAppearance.CdmaterialsLine(cdmaterials, appearanceReport), $"$surfaceprop \"{surfaceprop}\"", "$contents \"solid\"" };
         lines.AddRange(bodyLines);
         lines.AddRange(bindLines);
         lines.Add($"$root \"{rig.Skin.Joints[rig.Skin.RootIndex].Name}\"");
