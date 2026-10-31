@@ -22,9 +22,12 @@ public sealed class Vtf
     public const uint FlagNormal = 0x00000080;
     public const uint FlagOneBitAlpha = 0x00001000;
     public const uint FlagEightBitAlpha = 0x00002000;
+    private const uint FlagNoMip = 0x00000100;
+    private const uint FlagNoLod = 0x00000200;
     private const uint FlagEnvmap = 0x00004000;
     private const int HeaderSize = 88;
     private const int NoThumbnail = 0x21;
+    private const byte NoDataChunk = 0x02;
 
     public int Width { get; private set; }
     public int Height { get; private set; }
@@ -60,10 +63,13 @@ public sealed class Vtf
     /// <remarks>
     /// Compressed formats need whole blocks, so dimensions round up to a multiple of four and each mip is rescaled to fit, and
     /// only power-of-two textures keep a chain: the rest ship one level. That is the writer's own rule, not a choice made here.
+    /// A texture with one mip from the start says so with the no-mip and no-LOD flags, but one that loses its chain to the
+    /// power-of-two rule does not, and that inconsistency is preserved.
     /// </remarks>
     public static Vtf Create(byte[] rgba, int width, int height, VtfFormat format, uint flags, bool mipmaps)
     {
         var count = mipmaps ? MaximumMips(width, height) : 1;
+        if (count == 1) flags |= FlagNoMip | FlagNoLod;
         var chain = new List<byte[]> { rgba };
         for (var mip = 1; mip < count; mip++)
             chain.Add(MipFilter.Resize(chain[mip - 1], MipSize(width, mip - 1), MipSize(height, mip - 1), MipSize(width, mip), MipSize(height, mip)));
@@ -91,6 +97,21 @@ public sealed class Vtf
         for (var mip = 0; mip < chain.Count; mip++)
             result.Mips.Add(Encode(chain[mip], MipSize(width, mip), MipSize(height, mip), format));
         return result;
+    }
+
+    /// <summary>Returns this texture in another compressed format only if every mip decodes to exactly the given pixels.</summary>
+    /// <remarks>Mips are tried smallest first, because a mismatch anywhere rejects the whole texture.</remarks>
+    public Vtf? ConvertExact(VtfFormat format, byte[][] decoded)
+    {
+        var mips = new byte[MipCount][];
+        for (var mip = MipCount - 1; mip >= 0; mip--)
+        {
+            var data = Dxt.CompressExact(decoded[mip], MipSize(Width, mip), MipSize(Height, mip), format);
+            if (data is null) return null;
+            mips[mip] = data;
+        }
+        var flags = mips.Length == 1 ? Flags | FlagNoMip | FlagNoLod : Flags;
+        return new Vtf { Width = Width, Height = Height, Format = format, Flags = flags, Mips = mips.ToList() };
     }
 
     private static byte[] Encode(byte[] rgba, int width, int height, VtfFormat format)
@@ -289,6 +310,7 @@ public sealed class Vtf
         BinaryPrimitives.WriteUInt16LittleEndian(span[63..], 1);
         BinaryPrimitives.WriteInt32LittleEndian(span[68..], 1);
         file[80] = 0x30;
+        if (size - HeaderSize <= 4) file[83] = NoDataChunk;
         BinaryPrimitives.WriteInt32LittleEndian(span[84..], HeaderSize);
         var position = HeaderSize;
         for (var mip = MipCount - 1; mip >= 0; mip--)

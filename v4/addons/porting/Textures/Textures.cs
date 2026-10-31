@@ -292,12 +292,8 @@ public static class Textures
         }
         var target = binary ? VtfFormat.DXT1_ONE_BIT_ALPHA : VtfFormat.DXT1;
         if (target == texture.Format) return texture;
-        var candidate = texture.Convert(target);
-        for (var mip = 0; mip < texture.MipCount; mip++)
-        {
-            if (!candidate.CanDecode(mip)) continue;
-            if (!candidate.Decode(mip).Data.AsSpan().SequenceEqual(decoded[mip])) return texture;
-        }
+        var candidate = texture.ConvertExact(target, decoded);
+        if (candidate is null) return texture;
         candidate.Flags = (candidate.Flags & ~(FlagOneBitAlpha | FlagEightBitAlpha)) | (binary ? FlagOneBitAlpha : 0);
         return candidate;
     }
