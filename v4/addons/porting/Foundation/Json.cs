@@ -64,7 +64,10 @@ public static class Json
         if (node is not JsonValue value) return fallback;
         switch (value.GetValueKind())
         {
-            case JsonValueKind.Number: return value.GetValue<double>();
+            case JsonValueKind.Number:
+                if (value.TryGetValue<double>(out var real)) return real;
+                if (value.TryGetValue<long>(out var signed)) return signed;
+                return value.TryGetValue<ulong>(out var unsigned) ? unsigned : fallback;
             case JsonValueKind.True: return 1.0;
             case JsonValueKind.False: return 0.0;
             case JsonValueKind.String:
@@ -98,7 +101,7 @@ public static class Json
         {
             JsonValueKind.True => true,
             JsonValueKind.False => false,
-            JsonValueKind.Number => value.GetValue<double>() != 0,
+            JsonValueKind.Number => value.Dbl() != 0,
             JsonValueKind.String => value.GetValue<string>().Length > 0,
             _ => false
         },
