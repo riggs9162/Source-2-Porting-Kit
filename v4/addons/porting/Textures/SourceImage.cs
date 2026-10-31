@@ -23,6 +23,7 @@ public sealed class SourceImage(string mode, int width, int height, byte[] pixel
         "RGB" => ["R", "G", "B"],
         "RGBA" => ["R", "G", "B", "A"],
         "LA" => ["L", "A"],
+        "I;16" => ["I"],
         _ => [Mode]
     };
 
@@ -106,12 +107,15 @@ public sealed class SourceImage(string mode, int width, int height, byte[] pixel
                 default:
                     var grey = Pixels[i];
                     target[o] = target[o + 1] = target[o + 2] = grey;
-                    target[o + 3] = TransparentGrey is { } key && grey == (key & 0xFF) ? (byte)0 : (byte)255;
+                    target[o + 3] = TransparentGrey is { } key && grey == GreyKey(key) ? (byte)0 : (byte)255;
                     break;
             }
         }
         return output;
     }
+
+    /// <summary>The 8-bit value a stored grey colour key matches. A bilevel image's key is 0 or 1 while its pixels are 0 or 255.</summary>
+    public int GreyKey(int key) => Mode == "1" ? (key != 0 ? 255 : 0) : key & 0xFF;
 
     /// <summary>Converts a palette image to RGB, ignoring its alpha as Pillow does on this path.</summary>
     public ByteImage PaletteToRgb()

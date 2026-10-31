@@ -93,20 +93,20 @@ public static class Textures
         else
         {
             var scaled = Downscale(image, maxEdge);
-            pixels = scaled.Channels == 3 ? scaled.ToRgba() : scaled.Channels == 1 ? GreyToRgba(scaled) : scaled;
+            pixels = scaled.Channels == 3 ? scaled.ToRgba() : scaled.Channels == 1 ? GreyToRgba(scaled, image.TransparentGrey is { } key ? image.GreyKey(key) : -1) : scaled;
         }
         return ToFloat(pixels);
     }
 
     private static ByteImage OpaqueRgba(SourceImage image) => image.ToBytes().ToRgba();
 
-    private static ByteImage GreyToRgba(ByteImage grey)
+    private static ByteImage GreyToRgba(ByteImage grey, int transparent)
     {
         var output = new ByteImage(grey.Height, grey.Width, 4);
         for (var i = 0; i < grey.Data.Length; i++)
         {
             output.Data[i * 4] = output.Data[i * 4 + 1] = output.Data[i * 4 + 2] = grey.Data[i];
-            output.Data[i * 4 + 3] = 255;
+            output.Data[i * 4 + 3] = grey.Data[i] == transparent ? (byte)0 : (byte)255;
         }
         return output;
     }
