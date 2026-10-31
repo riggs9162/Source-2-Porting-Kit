@@ -10,8 +10,14 @@ namespace PortingKit.Addons.Porting;
 /// <para>A new facet that lies in the plane of the facet across its horizon edge shares that facet's plane instead
 /// of computing its own. Qhull merges such facets; sharing the plane gives the same effect, keeping a sliver in a
 /// large flat side from tilting on rounding noise. Whatever triangulates a coplanar side is arbitrary, so diagonals
-/// and facet order can differ from qhull's. Vertices, normals, volume and area are the part downstream code reads,
-/// and studiomdl rebuilds the triangles of every element for itself anyway.</para>
+/// and facet order differ from qhull's. Vertices, normals, volume and area are the part downstream code reads. studiomdl
+/// does read triangle order on a dense hull, but those are ragdoll shapes, which the exact serializer replaces.</para>
+/// <para>Tolerances alone cannot survive points scattered around a plane at about the size of the tolerance: facets
+/// disagree about which side a point is on, a coplanar facet folds over its neighbour, and the volume comes out wrong
+/// while everything still looks closed. Qhull recovers by merging facets. Here each finished hull is checked for
+/// closure, local convexity and folds, and one that fails is rebuilt on a 40-bit integer lattice, where orientation is
+/// an exact 128-bit determinant and none of that can happen. The lattice costs about 1e-12 of the model's size, and it
+/// is only a fallback because rounding to it would make rotated flat sides stop being flat.</para>
 /// <para>Flat input has no hull. Qhull refuses it and trimesh retries with joggling, which produces a zero-volume
 /// mesh that every caller then discards, so null is the same answer.</para>
 /// </remarks>
@@ -21,18 +27,46 @@ public static class ConvexHull
     private const double OutsideDistance = 4.4e-15;
     private const double FlatDistance = 3e-15;
     private const double SmallestVolume = 1e-9;
+    private const double ConcaveLimit = 1e-11;
+    private const double SliverAltitude = 1e-9;
+    private const double LatticeCells = 1L << 40;
+
+    private enum Outcome { Flat, Failed, Built }
 
     /// <summary>The convex hull of a cloud, or null when it spans no volume.</summary>
     public static TriMesh? Of(IReadOnlyList<V3> points)
     {
+        var hull = OfUnmerged(points);
+        return hull is null ? null : MeshOps.MergeVertices(hull);
+    }
+
+    /// <summary>The hull before near-coincident vertices merge. Merging can collapse a sliver, so only this form is
+    /// guaranteed closed.</summary>
+    public static TriMesh? OfUnmerged(IReadOnlyList<V3> points)
+    {
+        var outcome = Build(points, false, out var mesh);
+        if (outcome == Outcome.Failed) Build(points, true, out mesh);
+        return mesh;
+    }
+
+    private static Outcome Build(IReadOnlyList<V3> points, bool exact, out TriMesh? mesh)
+    {
+        mesh = null;
         var active = new bool[points.Count];
         Array.Fill(active, true);
         while (true)
         {
-            var solver = Solver.Create(points, active);
-            if (solver is null || !solver.Run()) return null;
+            var solver = Solver.Create(points, active, exact);
+            if (solver is null) return Outcome.Flat;
+            var outcome = solver.Run();
+            if (outcome != Outcome.Built) return outcome;
+            if (!exact && !solver.IsConsistent()) return Outcome.Failed;
             var redundant = solver.RedundantVertices();
-            if (redundant.Count == 0) return MeshOps.MergeVertices(solver.ToMesh(points));
+            if (redundant.Count == 0)
+            {
+                mesh = solver.ToMesh(points);
+                return Outcome.Built;
+            }
             foreach (var vertex in redundant) active[vertex] = false;
         }
     }
@@ -81,18 +115,20 @@ public static class ConvexHull
     private sealed class Solver
     {
         private readonly V3[] scaled;
+        private readonly long[]? lattice;
         private readonly List<Facet> facets = [];
         private readonly Queue<Facet> pending = new();
         private readonly int[] active;
         private int stamp;
 
-        private Solver(V3[] scaled, int[] active)
+        private Solver(V3[] scaled, int[] active, long[]? lattice)
         {
             this.scaled = scaled;
             this.active = active;
+            this.lattice = lattice;
         }
 
-        public static Solver? Create(IReadOnlyList<V3> points, bool[] enabled)
+        public static Solver? Create(IReadOnlyList<V3> points, bool[] enabled, bool exact)
         {
             var low = new[] { double.PositiveInfinity, double.PositiveInfinity, double.PositiveInfinity };
             var high = new[] { double.NegativeInfinity, double.NegativeInfinity, double.NegativeInfinity };
@@ -118,6 +154,7 @@ public static class ConvexHull
                 shifts[axis] = (-0.5 * high[axis] - 0.5 * low[axis]) / range;
             }
             var scaled = new V3[points.Count];
+            var lattice = exact ? new long[points.Count * 3] : null;
             foreach (var index in active)
             {
                 var point = points[index];
@@ -125,8 +162,10 @@ public static class ConvexHull
                     Math.Clamp(point.X * scales[0] + shifts[0], -0.5, 0.5),
                     Math.Clamp(point.Y * scales[1] + shifts[1], -0.5, 0.5),
                     Math.Clamp(point.Z * scales[2] + shifts[2], -0.5, 0.5));
+                if (lattice is null) continue;
+                for (var axis = 0; axis < 3; axis++) lattice[index * 3 + axis] = (long)Math.Round(scaled[index][axis] * LatticeCells);
             }
-            return new(scaled, active.ToArray());
+            return new(scaled, active.ToArray(), lattice);
         }
 
         private static double Product(double a, double b, double c, double d)
@@ -143,6 +182,29 @@ public static class ConvexHull
                 Product(first.Z, second.X, first.X, second.Z),
                 Product(first.X, second.Y, first.Y, second.X)).Normalized(), origin);
         }
+
+        /// <summary>Which side of the plane through a, b and c a point lies on, exactly. Differences of 40-bit lattice
+        /// coordinates need 41 bits, so the determinant needs at most 126 and cannot overflow.</summary>
+        private int Side(int a, int b, int c, int point)
+        {
+            var grid = lattice!;
+            Int128 ax = grid[b * 3] - grid[a * 3], ay = grid[b * 3 + 1] - grid[a * 3 + 1], az = grid[b * 3 + 2] - grid[a * 3 + 2];
+            Int128 bx = grid[c * 3] - grid[a * 3], by = grid[c * 3 + 1] - grid[a * 3 + 1], bz = grid[c * 3 + 2] - grid[a * 3 + 2];
+            Int128 px = grid[point * 3] - grid[a * 3], py = grid[point * 3 + 1] - grid[a * 3 + 1], pz = grid[point * 3 + 2] - grid[a * 3 + 2];
+            var determinant = px * (ay * bz - az * by) + py * (az * bx - ax * bz) + pz * (ax * by - ay * bx);
+            return determinant.CompareTo(Int128.Zero);
+        }
+
+        private int Side(Facet facet, int point) => Side(facet.Corners[0], facet.Corners[1], facet.Corners[2], point);
+
+        private bool IsOutside(Facet facet, int point, out double distance)
+        {
+            distance = facet.Distance(scaled[point]);
+            return lattice is null ? distance > OutsideDistance : Side(facet, point) > 0;
+        }
+
+        private bool IsVisible(Facet facet, int point) =>
+            lattice is null ? facet.Distance(scaled[point]) > VisibleDistance : Side(facet, point) > 0;
 
         private bool InitialSimplex(out int a, out int b, out int c, out int d)
         {
@@ -184,16 +246,17 @@ public static class ConvexHull
             }
             if (c < 0) return false;
             var plane = MakePlane(a, b, c);
-            var tallest = FlatDistance;
+            var tallest = lattice is null ? FlatDistance : 0.0;
             foreach (var index in active)
             {
                 var distance = Math.Abs(plane.Distance(scaled[index]));
-                if (distance <= tallest) continue;
+                if (distance <= tallest || (lattice is not null && Side(a, b, c, index) == 0)) continue;
                 tallest = distance;
                 d = index;
             }
             if (d < 0) return false;
-            if (plane.Distance(scaled[d]) > 0.0) (b, c) = (c, b);
+            var above = lattice is null ? plane.Distance(scaled[d]) > 0.0 : Side(a, b, c, d) > 0;
+            if (above) (b, c) = (c, b);
             return true;
         }
 
@@ -204,9 +267,9 @@ public static class ConvexHull
             if (facet.Outside is { Count: > 0 }) pending.Enqueue(facet);
         }
 
-        public bool Run()
+        public Outcome Run()
         {
-            if (!InitialSimplex(out var a, out var b, out var c, out var d)) return false;
+            if (!InitialSimplex(out var a, out var b, out var c, out var d)) return Outcome.Flat;
             Facet bottom = new(a, b, c, MakePlane(a, b, c)), first = new(a, d, b, MakePlane(a, d, b));
             Facet second = new(b, d, c, MakePlane(b, d, c)), third = new(c, d, a, MakePlane(c, d, a));
             Link(bottom, 0, first);
@@ -236,7 +299,7 @@ public static class ConvexHull
                 if (!facet.Alive || facet.Outside is not { Count: > 0 }) continue;
                 var eye = facet.Furthest;
                 CollectVisible(facet, eye, visible);
-                if (!FindHorizon(eye, visible, horizon)) return false;
+                if (!FindHorizon(eye, visible, horizon)) return Outcome.Failed;
                 var created = Extrude(eye, horizon);
                 foreach (var dead in visible)
                 {
@@ -248,17 +311,16 @@ public static class ConvexHull
                 }
                 foreach (var made in created) Enqueue(made);
             }
-            return true;
+            return Outcome.Built;
         }
 
         private void Assign(int point, IReadOnlyList<Facet> candidates)
         {
             Facet? best = null;
-            var bestDistance = OutsideDistance;
+            var bestDistance = double.NegativeInfinity;
             foreach (var facet in candidates)
             {
-                var distance = facet.Distance(scaled[point]);
-                if (distance <= bestDistance) continue;
+                if (!IsOutside(facet, point, out var distance) || distance <= bestDistance) continue;
                 bestDistance = distance;
                 best = facet;
             }
@@ -274,8 +336,7 @@ public static class ConvexHull
             for (var at = 0; at < visible.Count; at++)
                 foreach (var neighbour in visible[at].Neighbours)
                 {
-                    if (neighbour!.Stamp == stamp) continue;
-                    if (neighbour.Distance(scaled[eye]) <= VisibleDistance) continue;
+                    if (neighbour!.Stamp == stamp || !IsVisible(neighbour, eye)) continue;
                     neighbour.Stamp = stamp;
                     visible.Add(neighbour);
                 }
@@ -323,7 +384,7 @@ public static class ConvexHull
             var byEnd = new Dictionary<int, Facet>(horizon.Count);
             foreach (var edge in horizon)
             {
-                var inherited = Math.Abs(edge.Outside.Distance(scaled[eye])) <= VisibleDistance;
+                var inherited = lattice is null && Math.Abs(edge.Outside.Distance(scaled[eye])) <= VisibleDistance;
                 Facet facet = new(edge.From, edge.To, eye, inherited ? edge.Outside.Plane : MakePlane(edge.From, edge.To, eye));
                 facet.Neighbours[0] = edge.Outside;
                 for (var slot = 0; slot < 3; slot++)
@@ -341,6 +402,71 @@ public static class ConvexHull
                 facet.Neighbours[2] = byEnd[facet.Corners[0]];
             }
             return created;
+        }
+
+        /// <summary>Whether the finished surface is one closed sphere with no real dent and no facet folded over another.</summary>
+        /// <remarks>Local convexity on a closed sphere is global convexity, so this needs one pass over the edges rather
+        /// than every point against every facet. That matters, since a concave cut search hulls thousands of times. A
+        /// sliver proves nothing either way, so the rare hull holding one also has every point tried against every
+        /// well-shaped facet.</remarks>
+        public bool IsConsistent()
+        {
+            var alive = 0;
+            var edges = 0;
+            var slivers = false;
+            var vertices = new HashSet<int>();
+            foreach (var facet in facets)
+            {
+                if (!facet.Alive) continue;
+                alive++;
+                for (var edge = 0; edge < 3; edge++)
+                {
+                    vertices.Add(facet.Corners[edge]);
+                    edges++;
+                    var neighbour = facet.Neighbours[edge]!;
+                    int from = facet.Corners[edge], to = facet.Corners[(edge + 1) % 3];
+                    var slot = Array.FindIndex(neighbour.Corners, corner => corner == to);
+                    if (!neighbour.Alive || slot < 0 || neighbour.Corners[(slot + 1) % 3] != from) return false;
+                    var opposite = neighbour.Corners[(slot + 2) % 3];
+                    if (Altitude(facet) < SliverAltitude || Altitude(neighbour) < SliverAltitude)
+                    {
+                        slivers = true;
+                        continue;
+                    }
+                    var height = facet.Distance(scaled[opposite]);
+                    if (height > ConcaveLimit) return false;
+                    if (height >= -ConcaveLimit && Folded(facet, edge, opposite)) return false;
+                }
+            }
+            return vertices.Count - edges / 2 + alive == 2 && (!slivers || HoldsEveryPoint());
+        }
+
+        private bool HoldsEveryPoint()
+        {
+            foreach (var facet in facets)
+            {
+                if (!facet.Alive || Altitude(facet) < SliverAltitude) continue;
+                foreach (var point in active)
+                    if (facet.Distance(scaled[point]) > ConcaveLimit) return false;
+            }
+            return true;
+        }
+
+        /// <summary>Whether a facet's coplanar neighbour lies on the same side of their shared edge rather than across it.</summary>
+        private bool Folded(Facet facet, int edge, int opposite)
+        {
+            var origin = scaled[facet.Corners[edge]];
+            var along = scaled[facet.Corners[(edge + 1) % 3]] - origin;
+            var own = along.Cross(scaled[facet.Corners[(edge + 2) % 3]] - origin);
+            return own.Dot(along.Cross(scaled[opposite] - origin)) > 0;
+        }
+
+        /// <summary>A facet's smallest height. Below <see cref="SliverAltitude"/> its plane is arbitrary and proves nothing.</summary>
+        private double Altitude(Facet facet)
+        {
+            V3 a = scaled[facet.Corners[0]], b = scaled[facet.Corners[1]], c = scaled[facet.Corners[2]];
+            double first = (b - a).Dot(b - a), second = (c - b).Dot(c - b), third = (a - c).Dot(a - c);
+            return Math.Sqrt(Size(facet) / Math.Max(Math.Max(first, second), Math.Max(third, double.Epsilon)));
         }
 
         private double Size(Facet facet)
@@ -381,8 +507,11 @@ public static class ConvexHull
             return redundant;
         }
 
-        private bool Coplanar(Facet first, Facet second) => ReferenceEquals(first.Plane, second.Plane) ||
-            second.Corners.All(corner => Math.Abs(first.Distance(scaled[corner])) <= OutsideDistance);
+        private bool Coplanar(Facet first, Facet second)
+        {
+            if (lattice is not null) return second.Corners.All(corner => Side(first, corner) == 0);
+            return ReferenceEquals(first.Plane, second.Plane) || second.Corners.All(corner => Math.Abs(first.Distance(scaled[corner])) <= OutsideDistance);
+        }
 
         public TriMesh ToMesh(IReadOnlyList<V3> points)
         {
