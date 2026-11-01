@@ -283,4 +283,16 @@ internal static class DesktopActions
         start.ArgumentList.Add(directory);
         Process.Start(start)?.Dispose();
     }
+
+    /// <summary>Opens a folder, or its parent with the file selected. Returns false when the path is gone.</summary>
+    public static bool Show(string path)
+    {
+        if (Directory.Exists(path))
+            Reveal(path);
+        else if (File.Exists(path))
+            Process.Start(new ProcessStartInfo("explorer.exe", $"/select,\"{path}\"") { UseShellExecute = false })?.Dispose();
+        else
+            return false;
+        return true;
+    }
 }
