@@ -17,6 +17,7 @@ public static class KitStyle
     private static readonly Dictionary<(string Family, float Size, FontStyle Style), Font> Fonts = [];
     private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Control, FontSpec> OriginalFonts = new();
     private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<ComboBox, ComboPainter> Combos = new();
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Control, object> Surfaces = new();
     public static AppearanceOptions Appearance { get; private set; } = new();
     public static ThemePalette Palette { get; private set; } = ThemePalette.Create(new());
     public static event EventHandler? AppearanceChanged;
@@ -50,6 +51,7 @@ public static class KitStyle
     {
         control.BackColor = control switch
         {
+            _ when Surfaces.TryGetValue(control, out _) => Surface,
             System.Windows.Forms.Label or CheckBox => Color.Transparent,
             TextBoxBase or ComboBox or NumericUpDown => Surface,
             _ => Background
@@ -114,6 +116,13 @@ public static class KitStyle
         foreach (Control child in control.Controls)
             Apply(child);
         control.Invalidate();
+    }
+
+    /// <summary>Keeps a control on the surface color through later style passes.</summary>
+    public static T OnSurface<T>(T control) where T : Control
+    {
+        Surfaces.AddOrUpdate(control, new object());
+        return control;
     }
 
     public static Button Button(string text, EventHandler action)

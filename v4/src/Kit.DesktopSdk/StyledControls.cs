@@ -20,8 +20,16 @@ public class StyledButton : Button
 {
     private bool hovered;
     private bool pressed;
+    private bool selected;
     [DefaultValue(false)]
     public bool Primary { get; set; }
+    /// <summary>Marks the chosen button in a group, such as the current filter.</summary>
+    [DefaultValue(false)]
+    public bool Selected
+    {
+        get => selected;
+        set { selected = value; Invalidate(); }
+    }
 
     public StyledButton()
     {
@@ -40,7 +48,7 @@ public class StyledButton : Button
     protected override void OnPaint(PaintEventArgs e)
     {
         var palette = KitStyle.Palette;
-        var background = Primary ? palette.Accent : pressed ? palette.Selection : hovered ? palette.Raised : palette.Surface;
+        var background = Primary ? palette.Accent : pressed || selected ? palette.Selection : hovered ? palette.Raised : palette.Surface;
         if (Primary && hovered)
             background = ThemePalette.Blend(background, palette.Text, 0.12);
         if (!Enabled)
@@ -48,6 +56,11 @@ public class StyledButton : Button
         e.Graphics.Clear(background);
         using var border = new Pen(Primary && Enabled ? palette.Accent : palette.Border);
         e.Graphics.DrawRectangle(border, 0, 0, Width - 1, Height - 1);
+        if (selected)
+        {
+            using var accent = new SolidBrush(palette.Accent);
+            e.Graphics.FillRectangle(accent, 0, Height - 2, Width, 2);
+        }
         var foreground = !Enabled ? palette.Muted : Primary ? palette.OnAccent : palette.Text;
         TextRenderer.DrawText(e.Graphics, Text, KitStyle.Font(9.5F, Primary), ClientRectangle, foreground,
             TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
