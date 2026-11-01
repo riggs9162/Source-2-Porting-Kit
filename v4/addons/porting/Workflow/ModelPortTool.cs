@@ -9,7 +9,7 @@ public sealed class ModelPortTool : ITool
     private static readonly string[] Resolutions = ["512", "1024", "2048", "4096", "original"];
 
     public ToolDefinition Definition { get; } = new("Model port", "Models",
-        "Ports Source 2 models into a compiled Source 1 addon: props and ragdolls with their textures, skins, LODs, animations and physics. Stages are checkpointed, so running the same project again resumes it.",
+        "Ports Source 2 models into a compiled Source 1 addon: props and ragdolls with their textures, skins, LODs, animations and physics. Stages are checkpointed: running a project again resumes it, adds any new models to it, and rebuilds only what changed settings affect.",
         [
             new("sources", "Models", ParameterKind.Lines, Required: true, Description: "One per line: vpk:<vpk path>:<resource>.vmdl_c, a loose .vmdl_c, an exported .glb, or an exported folder."),
             new("project", "Project folder", ParameterKind.Directory, Required: true, Description: "Keeps editable sources, reports and the finished addon. It must be outside the input folders."),

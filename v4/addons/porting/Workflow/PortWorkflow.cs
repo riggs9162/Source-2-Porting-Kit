@@ -37,6 +37,8 @@ public static class WorkflowPaths
 /// <summary>Runs independent model stages serially with durable per-stage output hashes.</summary>
 public static class PortWorkflow
 {
+    private const string CheckpointName = "workflow-queue.json";
+
     /// <summary>Rejects ambiguous output names and writes that overlap an input.</summary>
     public static void Validate(WorkflowOptions options, IReadOnlyList<PortAsset> assets)
     {
@@ -61,9 +63,10 @@ public static class PortWorkflow
             throw new InvalidDataException("Keep editable project sources outside the GMod addons folder.");
     }
 
+    private static string Location(string value) => value.Length == 0 ? "" : Path.GetFullPath(value).ToLowerInvariant();
+
     private static string Identity(WorkflowOptions options)
     {
-        static string Location(string value) => value.Length == 0 ? "" : Path.GetFullPath(value).ToLowerInvariant();
         return string.Join('|', options.Sources, Location(options.Project), options.Namespace, options.ModelType, Location(options.MaterialSource),
             Location(options.VrfExecutable), Location(options.Compiler), Location(options.Game), options.IncludeSourceAnimations, options.EmitNormal, options.Resolution,
             options.StaticVariant, options.StaticResolution, options.CreatePlayermodels, options.Install, Location(options.GmodAddons));
@@ -152,17 +155,74 @@ public static class PortWorkflow
         return queue;
     }
 
-    private static WorkflowState Resume(string checkpoint, WorkflowOptions options, IReadOnlyList<PortAsset> assets, string signature)
+    /// <summary>Adds the models a project already holds to the requested ones, so a run extends a project instead of replacing it.</summary>
+    private static WorkflowOptions WithProjectSources(WorkflowOptions options)
+    {
+        if (string.IsNullOrWhiteSpace(options.Project)) return options;
+        var checkpoint = Path.Combine(WorkflowPaths.Project(options), CheckpointName);
+        if (!File.Exists(checkpoint)) return options;
+        var saved = WorkflowState.Load(checkpoint).Options.Sources;
+        var known = SourceLines(saved).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var added = SourceLines(options.Sources).Where(known.Add).ToList();
+        return known.Count == added.Count ? options : options with { Sources = string.Join('\n', [saved, .. added]) };
+    }
+
+    private static IEnumerable<string> SourceLines(string sources) => KeyValues.Lines(sources).Select(line => line.Trim()).Where(line => line.Length > 0);
+
+    /// <summary>Drops the stages a changed setting feeds. Stages after them rerun through the dependency chain.</summary>
+    private static void Invalidate(WorkflowState saved, WorkflowOptions options, IReadOnlyList<PortAsset> assets, PortContext context)
+    {
+        void Drop(string setting, Func<WorkflowOptions, object> read, Func<string, bool> affected)
+        {
+            if (Equals(read(saved.Options), read(options))) return;
+            foreach (var key in saved.Tasks.Where(pair => affected(pair.Value.Kind)).Select(pair => pair.Key).ToList()) saved.Tasks.Remove(key);
+            context.Log($"The {setting} setting changed, so the stages that use it will run again.");
+        }
+        static bool Built(string kind) => kind != "extract";
+        Drop("Source2Viewer", item => Location(item.VrfExecutable), _ => true);
+        Drop("namespace", item => item.Namespace, Built);
+        Drop("model type", item => item.ModelType, Built);
+        Drop("material folder", item => Location(item.MaterialSource), Built);
+        Drop("source animations", item => item.IncludeSourceAnimations, Built);
+        Drop("studiomdl", item => Location(item.Compiler), Built);
+        Drop("compiler game folder", item => Location(item.Game), Built);
+        Drop("texture size", item => item.Resolution, kind => kind == "materials");
+        Drop("normal map", item => item.EmitNormal, kind => kind == "materials");
+        Drop("static texture size", item => item.StaticResolution, kind => kind == "static_materials");
+        Drop("addons folder", item => Location(item.GmodAddons), kind => kind == "install");
+        var previous = saved.Assets.ToDictionary(asset => asset.Key);
+        foreach (var asset in assets.Where(asset => previous.TryGetValue(asset.Key, out var old) && old != asset))
+            foreach (var key in saved.Tasks.Keys.Where(key => key.EndsWith(":" + asset.Key, StringComparison.Ordinal)).ToList())
+                saved.Tasks.Remove(key);
+    }
+
+    private static bool InputsUnchanged(WorkflowState saved, string signature)
+    {
+        if (saved.Signature == signature) return true;
+        try
+        {
+            return saved.Signature == InputSignature(saved.Options, saved.Assets);
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>Continues a saved project with the requested settings, keeping every stage they leave valid.</summary>
+    /// <remarks>Only a changed input file or an older checkpoint format starts the project over.</remarks>
+    private static WorkflowState Resume(string checkpoint, WorkflowOptions options, IReadOnlyList<PortAsset> assets, string signature, PortContext context)
     {
         var fresh = new WorkflowState { Options = options, Signature = signature, Assets = assets.ToList() };
         if (!File.Exists(checkpoint)) return fresh;
         var saved = WorkflowState.Load(checkpoint);
-        if (saved.Version != WorkflowState.CurrentVersion || Identity(saved.Options) != Identity(options))
-            throw new InvalidDataException("This project uses different settings; choose a separate project folder.");
-        var same = saved.Signature == signature || (saved.Options != options && saved.Signature == InputSignature(saved.Options, assets));
-        if (!same) return fresh;
+        if (saved.Version != WorkflowState.CurrentVersion || !InputsUnchanged(saved, signature)) return fresh;
+        var added = assets.Count(asset => saved.Assets.All(item => item.Key != asset.Key));
+        if (added > 0) context.Log($"Adding {added} new {(added == 1 ? "model" : "models")} to this project.");
+        Invalidate(saved, options, assets, context);
         saved.Options = options;
         saved.Signature = signature;
+        saved.Assets = assets.ToList();
         return saved;
     }
 
@@ -171,6 +231,7 @@ public static class PortWorkflow
     /// prerequisites are unchanged, so a resume after a failure or cancellation repeats only what it must.</remarks>
     public static async Task<WorkflowState> RunAsync(WorkflowOptions options, IWorkflowStages stages, bool planOnly, PortContext context, Action<int, int>? progress = null)
     {
+        options = WithProjectSources(options);
         var assets = stages.Discover(options);
         Validate(options, assets);
         var project = WorkflowPaths.Project(options);
@@ -186,10 +247,11 @@ public static class PortWorkflow
         }
         using (gate)
         {
-            var checkpoint = Path.Combine(project, "workflow-queue.json");
+            var checkpoint = Path.Combine(project, CheckpointName);
             var signature = InputSignature(options, assets);
-            var state = planOnly ? new WorkflowState { Options = options, Signature = signature, Assets = assets.ToList() } : Resume(checkpoint, options, assets, signature);
+            var state = planOnly ? new WorkflowState { Options = options, Signature = signature, Assets = assets.ToList() } : Resume(checkpoint, options, assets, signature, context);
             var queue = Queue(options, assets);
+            foreach (var key in state.Tasks.Keys.Except(queue.Select(stage => stage.Key)).ToList()) state.Tasks.Remove(key);
             state.Findings = assets.Select(asset => new Finding("info", asset.Relative, asset.CompiledInput
                 ? "Source metadata and physics are validated after extraction"
                 : "Native sources selected; compiled and engine behavior will be checked separately")).ToList();
