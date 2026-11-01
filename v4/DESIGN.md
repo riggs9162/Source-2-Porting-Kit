@@ -43,6 +43,12 @@ the hotspot rectangle list dense and readable. Preserve native keyboard focus
 and accessible control names. Primary buttons indicate the next meaningful action. Appearance
 changes update controls in place and persist locally.
 
+Jobs and outputs is a master-detail workbench: flat status-striped job rows beside
+one surface holding the selected job's progress, facts, actions, files, and log.
+Status always appears as a word as well as a color. Work with no known fraction
+shows a still hatch, not an animation. Rows update in place, so polling never moves
+the selection or the reader's scroll position.
+
 Avoid decorative gradients, glass, large background imagery, oversized headings,
 floating cards, and animation. The interface remains a native .NET desktop app.
 Page factories, stream-based asset reads, and disposal rules still govern resource
