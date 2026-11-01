@@ -16,6 +16,16 @@ internal static class NativeChrome
         DwmSetWindowAttribute(form.Handle, 36, ref text, sizeof(int));
     }
 
+    /// <summary>Matches a control's native scrollbars to the active theme.</summary>
+    public static void ThemeScrollbars(Control control)
+    {
+        if (control.IsHandleCreated)
+            SetWindowTheme(control.Handle, KitStyle.Palette.IsDark ? "DarkMode_Explorer" : "Explorer", null);
+    }
+
+    [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)]
+    private static extern int SetWindowTheme(nint window, string application, string? identifiers);
+
     [DllImport("dwmapi.dll")]
     private static extern int DwmSetWindowAttribute(nint window, int attribute, ref int value, int size);
 }
