@@ -140,7 +140,8 @@ a changed setting reruns only the stages that use it. `plan_only` writes the sta
 plan without converting. `static_variant` adds a separate `<name>_static` model with
 its own `static_resolution`. `loop_animations` takes sequence names to loop, one per
 line or `*`, and `extra_skins` takes `model: skin, skin` lines that add skins copied
-from a prop's default materials. A job that
+from a prop's default materials. `texture_sizes` takes `model: size` or
+`model: size, static size` lines that override the two texture caps for one model. A job that
 ends failed may still have produced a package: `project/port-report.md` lists each
 stage, and `project/addon/` holds every model that passed. A failed stage for one
 model never blocks the others, so read the report as well as the job status.

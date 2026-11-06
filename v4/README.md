@@ -101,6 +101,12 @@ same textures, so it looks unchanged until you retexture it. The static form get
 same skins in its own folder. Installing again stops rather than overwrite a copy you
 have edited in the addons folder.
 
+**Texture sizes** gives named models their own maximum texture size in place of the
+project's, one `model: size` line per model, for example `citadel_static: original`.
+One size covers both the model and its static prop; `model: original, 1024` sets them
+apart. Models that share a material need the same size, or packaging stops on the
+conflicting files.
+
 ## Port materials
 
 Open **Materials > Material port** for materials that belong to brushes and faces
