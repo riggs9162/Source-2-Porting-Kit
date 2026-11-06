@@ -68,8 +68,9 @@ them. What Source 1 cannot represent is listed in the port report. `port-report.
 records every stage; in-game behaviour is the one thing it cannot check.
 
 Stages are checkpointed. Running the same project again repeats only what failed,
-changed or was interrupted, so one bad model never costs the others. Changing a
-setting needs a new project folder.
+changed or was interrupted, so one bad model never costs the others. Models you add
+join the project's existing ones, and a changed setting reruns only the stages that
+use it. Removing a model needs a new project folder.
 
 **Also build a static prop** adds a separate `<name>_static` model for anything with
 no physics or a single rigid body; ragdolls and other articulated models are left
@@ -87,6 +88,18 @@ The first run downloads the published animation sources once, and later runs reu
 them. Anything that is not humanoid is skipped, and a failed playermodel never affects
 the regular model. **Include source animations** also copies the model's own clips
 into it, which is why the same character can compile at 77 KB or 30 MB.
+
+**Loop animations** lists sequences that should play on a loop, one name per line,
+whatever their source says; `*` loops every sequence. It applies to every model in
+the project that has a sequence of that name.
+
+**Extra skins** adds skins to props, one `model: skin, skin` line per model, for
+example `citadel_static: damaged`. A model is named by its file name, or by its path
+under `models/` when two share a name. Each new skin starts as copies of the default
+skin's materials, named `<material>_<skin>.vmt` beside the originals and drawing the
+same textures, so it looks unchanged until you retexture it. The static form gets the
+same skins in its own folder. Installing again stops rather than overwrite a copy you
+have edited in the addons folder.
 
 ## Port materials
 

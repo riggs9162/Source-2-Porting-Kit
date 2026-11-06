@@ -135,9 +135,12 @@ takes one entry per line:
 & .\v4\Backport.cmd jobs wait JOB_UUID --wait-seconds 300
 ```
 
-Rerunning the same inputs against the same project resumes it; any changed setting
-is refused. `plan_only` writes the stage plan without converting. `static_variant`
-adds a separate `<name>_static` model with its own `static_resolution`. A job that
+Rerunning a project resumes it: new `sources` join the models it already holds, and
+a changed setting reruns only the stages that use it. `plan_only` writes the stage
+plan without converting. `static_variant` adds a separate `<name>_static` model with
+its own `static_resolution`. `loop_animations` takes sequence names to loop, one per
+line or `*`, and `extra_skins` takes `model: skin, skin` lines that add skins copied
+from a prop's default materials. A job that
 ends failed may still have produced a package: `project/port-report.md` lists each
 stage, and `project/addon/` holds every model that passed. A failed stage for one
 model never blocks the others, so read the report as well as the job status.
