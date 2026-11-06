@@ -5,6 +5,9 @@ namespace PortingKit.Addons.Porting;
 /// <summary>Reads Source 2 Viewer DMX meshes without dropping authored LOD skinning.</summary>
 public static class DmxMesh
 {
+    /// <summary>The vertex count at which studiomdl cuts one model into several bodyparts.</summary>
+    private const int CompilerVertexLimit = 65536;
+
     /// <summary>The bone count a reference SMD's nodes block declares.</summary>
     private static int ReferenceBoneCount(string header)
     {
@@ -193,7 +196,50 @@ public static class DmxMesh
         return (qc, outputs);
     }
 
-    /// <summary>Writes authored LOD meshes beside a reference SMD and returns their QC.</summary>
+    /// <summary>Splits a reference with no LODs into bodyparts before studiomdl cuts it up itself.</summary>
+    /// <remarks>StudioMDL CE cuts any model of 65536 or more vertices into extra <c>clamped</c> bodyparts whatever
+    /// <c>$maxverts</c> says, and the QC then no longer describes what compiled. Counting distinct vertex lines
+    /// over-counts studiomdl's welded vertices slightly, so a model it would not cut is never split. With no LODs to
+    /// keep aligned, whole triangles are dealt into parts in material order, so one material bigger than a part
+    /// still fits.</remarks>
+    /// <returns>QC lines and files, both empty when the reference stays below the compiler's limit.</returns>
+    public static (List<string> Qc, List<string> Outputs) PartitionReference(string reference, int maxVertices = 30000)
+    {
+        var groups = ReadGroups(reference);
+        var triangles = groups.Keys.SelectMany(key => groups.Groups[key]).ToList();
+        if (triangles.SelectMany(triangle => triangle.Skip(1)).Distinct(StringComparer.Ordinal).Count() < CompilerVertexLimit) return ([], []);
+        var parts = new List<List<string[]>>();
+        var active = new List<string[]>();
+        var vertices = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var triangle in triangles)
+        {
+            var added = triangle.Skip(1).Distinct(StringComparer.Ordinal).Count(vertex => !vertices.Contains(vertex));
+            if (active.Count > 0 && vertices.Count + added > maxVertices)
+            {
+                parts.Add(active);
+                active = [];
+                vertices = new(StringComparer.Ordinal);
+            }
+            active.Add(triangle);
+            vertices.UnionWith(triangle.Skip(1));
+        }
+        parts.Add(active);
+        var qc = new List<string>();
+        var outputs = new List<string>();
+        var stem = Path.GetFileNameWithoutExtension(reference);
+        for (var index = 0; index < parts.Count; index++)
+        {
+            var destination = Path.Combine(Path.GetDirectoryName(reference) ?? "", $"{stem}_part{index}.smd");
+            var text = new StringBuilder(groups.Header).Append("triangles\n");
+            text.Append(string.Join('\n', parts[index].SelectMany(triangle => triangle))).Append("\nend\n");
+            PythonText.Write(destination, text.ToString());
+            outputs.Add(destination);
+            qc.Add($"$body \"body{index}\" \"{Path.GetFileName(destination)}\"");
+        }
+        return (qc, outputs);
+    }
+
+    /// <summary>Writes authored LOD meshes beside a reference SMD and returns their QC, splitting a model too big for one bodypart.</summary>
     /// <returns>QC lines, every file written, and whether large meshes were partitioned. Partitioned lines declare
     /// their own bodyparts and replace every <c>$body</c> line of the model.</returns>
     public static (List<string> Lines, List<string> Files, bool Partitioned) WriteLodReferences(string reference, IReadOnlyList<(double Distance, string Source)> lodSources,
@@ -211,7 +257,11 @@ public static class DmxMesh
             files.Add(destination);
             context?.Log($"LOD {index + 1}: {triangles} triangles from {Path.GetFileName(source)}");
         }
-        if (lodSmds.Count == 0) return ([], files, false);
+        if (lodSmds.Count == 0)
+        {
+            var (bodies, parts) = PartitionReference(reference);
+            return (bodies, [.. files, .. parts], bodies.Count > 0);
+        }
         var (partitionLines, partitionFiles) = PartitionLodMeshes(reference, lodSmds);
         if (partitionLines.Count > 0) return (partitionLines, [.. files, .. partitionFiles], true);
         var lines = new List<string>();
