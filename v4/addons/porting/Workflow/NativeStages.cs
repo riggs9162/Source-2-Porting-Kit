@@ -156,6 +156,8 @@ public sealed class NativeStages(ISettings settings) : IWorkflowStages
         var calibration = Path.Combine(WorkflowPaths.Project(options), "calibration", "compiler_calibration.json");
         var friction = File.Exists(calibration) ? Json.Load(calibration).Get("friction_compile_scale").Dbl(1.0) : 1.0;
         var overrides = ModelOverrides.For(options, asset);
+        if (overrides.ExtraSkins.Count > 0 && kind != "prop" && variant != ModelVariant.Player)
+            throw new InvalidDataException($"Extra skins can be added to props only; {asset.Relative} ports as a {kind}.");
         string qc;
         string? animationQc = null;
         List<string> files, warnings;

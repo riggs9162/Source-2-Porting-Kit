@@ -40,7 +40,7 @@ public static partial class RagdollPort
     /// every SMD written before physics is remapped onto the combined skeleton. A model-space attachment gets a stationary
     /// origin bone, because no authored root can promise to stay put. Additive clips are written only when the export
     /// composed them over the bind pose, since a Source 1 sequence here cannot carry their delta encoding.</remarks>
-    /// <param name="overrides">The project's loop choices.</param>
+    /// <param name="overrides">The project's loop choices; extra skins are not supported on ragdolls.</param>
     public static RagdollPortResult Port(string glb, string outDir, string modelname, string cdmaterials = "models/", bool includeSourceAnimations = false,
         double frictionScale = 1.0, PortContext? context = null, ModelOverrides? overrides = null)
     {

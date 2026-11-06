@@ -38,6 +38,9 @@ public sealed record WorkflowOptions
     /// <summary>Sequence names to loop whatever their source says, one per line; <c>*</c> loops all of them.</summary>
     public string LoopAnimations { get; init; } = "";
 
+    /// <summary>Skins to add to named props, one <c>model: skin, skin</c> line per model.</summary>
+    public string ExtraSkins { get; init; } = "";
+
     public bool Install { get; init; }
     public string GmodAddons { get; init; } = "";
 }

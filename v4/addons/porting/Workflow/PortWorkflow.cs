@@ -70,7 +70,7 @@ public static class PortWorkflow
     {
         return string.Join('|', options.Sources, Location(options.Project), options.Namespace, options.ModelType, Location(options.MaterialSource),
             Location(options.VrfExecutable), Location(options.Compiler), Location(options.Game), options.IncludeSourceAnimations, options.EmitNormal, options.Resolution,
-            options.StaticVariant, options.StaticResolution, options.CreatePlayermodels, options.Install, Location(options.GmodAddons), options.LoopAnimations);
+            options.StaticVariant, options.StaticResolution, options.CreatePlayermodels, options.Install, Location(options.GmodAddons), options.LoopAnimations, options.ExtraSkins);
     }
 
     /// <summary>Stamps selected archives and companions by size and time, without walking an entire game.</summary>
@@ -191,6 +191,7 @@ public static class PortWorkflow
         Drop("normal map", item => item.EmitNormal, kind => kind == "materials");
         Drop("static texture size", item => item.StaticResolution, kind => kind == "static_materials");
         Drop("loop animations", item => item.LoopAnimations, kind => kind == "native");
+        Drop("extra skins", item => item.ExtraSkins, kind => kind is "native" or "static");
         Drop("addons folder", item => Location(item.GmodAddons), kind => kind == "install");
         var previous = saved.Assets.ToDictionary(asset => asset.Key);
         foreach (var asset in assets.Where(asset => previous.TryGetValue(asset.Key, out var old) && old != asset))

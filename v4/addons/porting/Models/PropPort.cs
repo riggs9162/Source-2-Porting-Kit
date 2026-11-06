@@ -137,6 +137,57 @@ public static partial class PropPort
         PythonText.Write(qc, string.Join('\n', lines.Concat(extraLines)) + "\n");
     }
 
+    /// <summary>Adds skins that start as renamed copies of the default skin's materials, so they can be retextured later.</summary>
+    /// <remarks>Each copy sits beside its original, so the QC's existing <c>$cdmaterials</c> folders find it and the
+    /// materials stage only duplicates the converted VMT through <c>material_aliases</c>. Authored skin rows are kept
+    /// as written; a model without a <c>$texturegroup</c> gets one whose first row is every rendered material.</remarks>
+    /// <returns>Every skin family the QC now declares, and each copy's material mapped to the resource it copies.</returns>
+    private static (JsonArray Families, JsonObject Aliases) AddExtraSkins(string qc, IReadOnlyList<SkinDef> authored, IEnumerable<string> used, Dictionary<string, string> resources,
+        IReadOnlyList<string> skins)
+    {
+        var text = PythonText.Read(qc);
+        var group = TextureGroup().Match(text);
+        var rows = group.Success
+            ? PythonText.SplitLines(group.Groups[1].Value).Select(line => QuotedName().Matches(line.Split("//")[0]).Select(match => match.Groups[1].Value).ToList()).Where(row => row.Count > 0).ToList()
+            : [used.Order(StringComparer.Ordinal).ToList()];
+        var names = rows.Select((_, index) => index < authored.Count ? authored[index].Name : index == 0 ? "default" : $"skin{index}").ToList();
+        var taken = rows.SelectMany(row => row).Select(material => material.ToLowerInvariant()).ToHashSet(StringComparer.Ordinal);
+        var aliases = new JsonObject();
+        var added = new List<string>();
+        foreach (var skin in skins)
+        {
+            var row = new List<string>();
+            foreach (var material in rows[0])
+            {
+                var copy = $"{material}_{skin}".ToLowerInvariant();
+                if (!taken.Add(copy)) throw new InvalidDataException($"Extra skin {skin} would reuse the material name {copy}");
+                var token = resources.GetValueOrDefault(material.ToLowerInvariant()) ?? throw new InvalidDataException($"Extra skin {skin} has no exported VMAT to copy for {material}");
+                var parent = PythonText.PosixParent(Resources.AddonMaterial(token));
+                aliases[parent == "." ? copy : $"{parent}/{copy}"] = token;
+                row.Add(copy);
+            }
+            rows.Add(row);
+            names.Add(skin);
+            added.Add($"    {{ {string.Join(' ', row.Select(material => $"\"{material}\""))} }} // {skin}");
+        }
+        if (group.Success)
+        {
+            var end = group.Groups[1].Index + group.Groups[1].Length;
+            text = text[..end] + string.Join('\n', added) + "\n" + text[end..];
+        }
+        else
+        {
+            var first = $"    {{ {string.Join(' ', rows[0].Select(material => $"\"{material}\""))} }} // default";
+            text = text.TrimEnd('\n') + "\n\n" + string.Join('\n', ["$texturegroup \"skinfamilies\"", "{", first, .. added, "}"]) + "\n";
+        }
+        PythonText.Write(qc, text);
+        var families = new JsonArray(rows.Select((row, index) => (JsonNode?)new JsonObject
+        {
+            ["name"] = names[index], ["materials"] = new JsonArray(row.Select(material => (JsonNode?)material).ToArray())
+        }).ToArray());
+        return (families, aliases);
+    }
+
     /// <summary>Writes a <c>$staticprop</c> with source collision, authored mass and authored LOD meshes.</summary>
     private static Ported PortStatic(ModelSet modelSet, string outDir, string modelname, string cdmaterials, List<(double Distance, string Source)> lodSources, bool rigid, PortContext? context)
     {
@@ -179,7 +230,7 @@ public static partial class PropPort
     /// with each source folder, so the shipped VMTs mirror the source resource tree.</remarks>
     /// <param name="staticVariant">Writes the separate static form of a skinned model too: its bind pose as a rigid
     /// <c>$staticprop</c>, keeping source collision and collapsing weighted LODs onto the one bone.</param>
-    /// <param name="overrides">The project's loop choices.</param>
+    /// <param name="overrides">The project's loop choices and the extra skins it adds to this model.</param>
     public static PropPortResult Port(string glbPath, string outDir, string modelname, string cdmaterials = "models/", PortContext? context = null, bool staticVariant = false,
         ModelOverrides? overrides = null)
     {
@@ -210,6 +261,12 @@ public static partial class PropPort
             throw new InvalidDataException("Material resources collide once their models/ root is dropped: " + string.Join(", ", tokens));
         var materialPaths = tokens.Select(token => SearchPath(cdmaterials, Resources.UnderRoot(cdmaterials, Resources.AddonMaterial(token)))).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToList();
         RewriteQc(ported.Qc, modelname, materialPaths, ported.LodLines, ported.Partitioned);
+        var families = new JsonArray(modelSet.Skins.Select(skin => (JsonNode?)new JsonObject
+        {
+            ["name"] = skin.Name, ["materials"] = new JsonArray(skin.Materials.Select(material => (JsonNode?)material).ToArray())
+        }).ToArray());
+        var aliases = new JsonObject();
+        if (overrides.ExtraSkins.Count > 0) (families, aliases) = AddExtraSkins(ported.Qc, modelSet.Skins, used, resources, overrides.ExtraSkins);
         var warnings = ported.Warnings;
         if (fidelity.Get("groups").Bool()) warnings.Add("Source bodygroups are combined into one body; every mesh group choice renders together.");
         var distinct = warnings.Distinct(StringComparer.Ordinal).ToList();
@@ -218,14 +275,16 @@ public static partial class PropPort
             ["version"] = 1, ["kind"] = "prop", ["variant"] = animated ? "animated" : "static", ["source"] = glbPath, ["modelname"] = modelname,
             ["material_map"] = targets,
             ["material_search_paths"] = new JsonArray(materialPaths.Select(path => (JsonNode?)path).ToArray()),
-            ["skins"] = new JsonArray(modelSet.Skins.Select(skin => (JsonNode?)new JsonObject
-            {
-                ["name"] = skin.Name, ["materials"] = new JsonArray(skin.Materials.Select(material => (JsonNode?)material).ToArray())
-            }).ToArray()),
+            ["skins"] = families,
             ["lod_count"] = lodSources.Count, ["physics"] = ported.Physics,
             ["engine_validation"] = "not_run", ["warnings"] = new JsonArray(distinct.Select(warning => (JsonNode?)warning).ToArray())
         };
         if (staticVariant) report["static_variant"] = true;
+        if (overrides.ExtraSkins.Count > 0)
+        {
+            report["material_aliases"] = aliases;
+            report["extra_skins"] = new JsonArray(overrides.ExtraSkins.Select(skin => (JsonNode?)skin).ToArray());
+        }
         var reportPath = Path.Combine(outDir, "prop-report.json");
         Json.Save(reportPath, report);
         var files = ported.Files;
