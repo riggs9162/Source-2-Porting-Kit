@@ -229,6 +229,8 @@ public sealed class NativeStages(ISettings settings) : IWorkflowStages
         var written = new List<string>();
         var audits = new JsonArray();
         var compiled = asset.CompiledInput && options.MaterialSource.Length == 0;
+        var overrides = ModelOverrides.For(options, asset);
+        var clamp = staticVariant ? overrides.StaticResolution ?? options.StaticResolution : overrides.Resolution ?? options.Resolution;
         var signature = compiled ? PortWorkflow.InputSignature(options, [asset]) : "";
         foreach (var (relative, path) in selected)
         {
@@ -254,7 +256,7 @@ public sealed class NativeStages(ISettings settings) : IWorkflowStages
             var materialPath = cut >= 0 ? $"{folder}/{target[..cut]}" : folder;
             var material = new MaterialOptions
             {
-                ClampSize = staticVariant ? options.StaticResolution : options.Resolution, EmitNormal = !staticVariant && options.EmitNormal && entry.Has("normal"), BakeNormalDetail = staticVariant,
+                ClampSize = clamp, EmitNormal = !staticVariant && options.EmitNormal && entry.Has("normal"), BakeNormalDetail = staticVariant,
                 Translucent = entry.Translucent, Alphatest = entry.Alphatest, Tintable = entry.Tintable
             };
             var result = MaterialBuilder.Build(entry.ToSource(), Path.Combine(payload, "materials", materialPath.Replace('/', Path.DirectorySeparatorChar)), target[(cut + 1)..], materialPath, material, context);

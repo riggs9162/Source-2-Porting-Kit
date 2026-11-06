@@ -41,6 +41,9 @@ public sealed record WorkflowOptions
     /// <summary>Skins to add to named props, one <c>model: skin, skin</c> line per model.</summary>
     public string ExtraSkins { get; init; } = "";
 
+    /// <summary>Texture caps for named models, one <c>model: size</c> or <c>model: size, static size</c> line per model.</summary>
+    public string TextureSizes { get; init; } = "";
+
     public bool Install { get; init; }
     public string GmodAddons { get; init; } = "";
 }

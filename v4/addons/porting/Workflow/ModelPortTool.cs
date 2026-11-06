@@ -23,6 +23,7 @@ public sealed class ModelPortTool : ITool
             new("create_playermodels", "Also build a playermodel", ParameterKind.Boolean, "false", Description: "Adds a separate <name>_pm model for humanoid characters, on the ValveBiped skeleton with Garry's Mod's player animations, and lists it in the player model menu. The animation sources download once, the first time this runs."),
             new("loop_animations", "Loop animations", ParameterKind.Lines, Description: "Optional. Sequence names to play on a loop whatever the source says, one per line. * loops every sequence."),
             new("extra_skins", "Extra skins", ParameterKind.Lines, Description: "Optional. One per line: a prop's name, a colon and the skins to add, for example citadel_static: damaged. Each new skin starts as copies of the default skin's materials, ready to retexture."),
+            new("texture_sizes", "Texture sizes", ParameterKind.Lines, Description: "Optional. One per line: a model's name, a colon and the maximum texture size for it in place of the ones above, for example citadel_static: original. A second size after a comma sets its static prop on its own."),
             new("material_source", "Material folder", ParameterKind.Directory, Description: "Optional. VMATs and textures for models that were exported separately."),
             new("compiler", "studiomdl", ParameterKind.File, Description: "Leave empty to use the tools.studiomdl setting."),
             new("game", "Compiler game folder", ParameterKind.Directory, Description: "The folder holding gameinfo.txt. Leave empty to look beside studiomdl."),
@@ -61,7 +62,8 @@ public sealed class ModelPortTool : ITool
             Resolution = Resolution(arguments.Text("resolution")), StaticVariant = arguments.Boolean("static_variant"), StaticResolution = Resolution(arguments.Text("static_resolution")),
             CreatePlayermodels = arguments.Boolean("create_playermodels"), AnimationCache = Path.Combine(context.Host.StateDirectory, "addons", "porting", "player_animations"),
             Install = arguments.Boolean("install"), GmodAddons = arguments.Text("gmod_addons"),
-            LoopAnimations = arguments.Text("loop_animations"), ExtraSkins = arguments.Text("extra_skins")
+            LoopAnimations = arguments.Text("loop_animations"), ExtraSkins = arguments.Text("extra_skins"),
+            TextureSizes = arguments.Text("texture_sizes")
         };
         var port = new PortContext(context.Host.Processes, (message, level) => context.Log(message, level), cancellationToken);
         var state = await PortWorkflow.RunAsync(options, new NativeStages(context.Host.Settings), arguments.Boolean("plan_only"), port,
