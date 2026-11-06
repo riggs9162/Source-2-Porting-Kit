@@ -159,10 +159,10 @@ public static partial class PropPort
     }
 
     /// <summary>Writes a dynamic prop with its native skeleton, authored clips and bone-following collision.</summary>
-    private static Ported PortAnimated(string glbPath, ModelSet modelSet, string outDir, string modelname, string cdmaterials, PortContext? context)
+    private static Ported PortAnimated(string glbPath, ModelSet modelSet, string outDir, string modelname, string cdmaterials, ModelOverrides overrides, PortContext? context)
     {
         var surfaceprop = SurfacepropDetector.Detect(modelSet.Name, source2Prop: Surfaceprops.Strongest(Surfaceprops.GltfSurfaceprops(modelSet.PhysicsPath)));
-        var result = NativePort.Port(glbPath, outDir, modelname, new() { Cdmaterials = cdmaterials, Surfaceprop = surfaceprop, DynamicProp = true }, context);
+        var result = NativePort.Port(glbPath, outDir, modelname, new() { Cdmaterials = cdmaterials, Surfaceprop = surfaceprop, DynamicProp = true, Overrides = overrides }, context);
         var physics = new JsonObject
         {
             ["collision"] = result.Physics.Count > 0 || PythonText.Read(result.Qc).Contains("$collisionmodel", StringComparison.Ordinal),
@@ -179,8 +179,11 @@ public static partial class PropPort
     /// with each source folder, so the shipped VMTs mirror the source resource tree.</remarks>
     /// <param name="staticVariant">Writes the separate static form of a skinned model too: its bind pose as a rigid
     /// <c>$staticprop</c>, keeping source collision and collapsing weighted LODs onto the one bone.</param>
-    public static PropPortResult Port(string glbPath, string outDir, string modelname, string cdmaterials = "models/", PortContext? context = null, bool staticVariant = false)
+    /// <param name="overrides">The project's loop choices.</param>
+    public static PropPortResult Port(string glbPath, string outDir, string modelname, string cdmaterials = "models/", PortContext? context = null, bool staticVariant = false,
+        ModelOverrides? overrides = null)
     {
+        overrides ??= ModelOverrides.None;
         glbPath = Path.GetFullPath(glbPath);
         Directory.CreateDirectory(outDir);
         context?.Check();
@@ -193,7 +196,7 @@ public static partial class PropPort
         var manifest = Path.ChangeExtension(glbPath, ".lods.json");
         var lodSources = File.Exists(manifest) ? NativePort.LoadLodSources(manifest) : [];
         var ported = animated
-            ? PortAnimated(glbPath, modelSet, outDir, modelname, cdmaterials, context)
+            ? PortAnimated(glbPath, modelSet, outDir, modelname, cdmaterials, overrides, context)
             : PortStatic(modelSet, outDir, modelname, cdmaterials, lodSources, skinned, context);
         context?.Check();
         var resources = MaterialResources(document, fidelity, lodSources);

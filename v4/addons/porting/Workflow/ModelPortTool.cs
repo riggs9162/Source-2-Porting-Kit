@@ -21,6 +21,7 @@ public sealed class ModelPortTool : ITool
             new("static_variant", "Also build a static prop", ParameterKind.Boolean, "false", Description: "Adds a separate <name>_static model for models with no physics or one rigid body. It compiles as $staticprop, bakes normal detail into its textures, and uses its own material folder so it keeps VRAD's baked lighting."),
             new("static_resolution", "Static prop maximum texture size", ParameterKind.Choice, "original", Choices: Resolutions),
             new("create_playermodels", "Also build a playermodel", ParameterKind.Boolean, "false", Description: "Adds a separate <name>_pm model for humanoid characters, on the ValveBiped skeleton with Garry's Mod's player animations, and lists it in the player model menu. The animation sources download once, the first time this runs."),
+            new("loop_animations", "Loop animations", ParameterKind.Lines, Description: "Optional. Sequence names to play on a loop whatever the source says, one per line. * loops every sequence."),
             new("material_source", "Material folder", ParameterKind.Directory, Description: "Optional. VMATs and textures for models that were exported separately."),
             new("compiler", "studiomdl", ParameterKind.File, Description: "Leave empty to use the tools.studiomdl setting."),
             new("game", "Compiler game folder", ParameterKind.Directory, Description: "The folder holding gameinfo.txt. Leave empty to look beside studiomdl."),
@@ -58,7 +59,8 @@ public sealed class ModelPortTool : ITool
             Game = Game(compiler, arguments), IncludeSourceAnimations = arguments.Boolean("include_animations"), EmitNormal = arguments.Boolean("emit_normal"),
             Resolution = Resolution(arguments.Text("resolution")), StaticVariant = arguments.Boolean("static_variant"), StaticResolution = Resolution(arguments.Text("static_resolution")),
             CreatePlayermodels = arguments.Boolean("create_playermodels"), AnimationCache = Path.Combine(context.Host.StateDirectory, "addons", "porting", "player_animations"),
-            Install = arguments.Boolean("install"), GmodAddons = arguments.Text("gmod_addons")
+            Install = arguments.Boolean("install"), GmodAddons = arguments.Text("gmod_addons"),
+            LoopAnimations = arguments.Text("loop_animations")
         };
         var port = new PortContext(context.Host.Processes, (message, level) => context.Log(message, level), cancellationToken);
         var state = await PortWorkflow.RunAsync(options, new NativeStages(context.Host.Settings), arguments.Boolean("plan_only"), port,

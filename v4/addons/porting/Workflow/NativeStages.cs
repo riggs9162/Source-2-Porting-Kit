@@ -155,14 +155,15 @@ public sealed class NativeStages(ISettings settings) : IWorkflowStages
         var kind = variant switch { ModelVariant.Static => "prop", ModelVariant.Player => "ragdoll", _ => ModelKind(options, asset) };
         var calibration = Path.Combine(WorkflowPaths.Project(options), "calibration", "compiler_calibration.json");
         var friction = File.Exists(calibration) ? Json.Load(calibration).Get("friction_compile_scale").Dbl(1.0) : 1.0;
+        var overrides = ModelOverrides.For(options, asset);
         string qc;
         string? animationQc = null;
         List<string> files, warnings;
         JsonObject report;
         if (variant == ModelVariant.Player)
             (qc, animationQc, files, report, warnings) = PlayermodelPort.Port(source, destination, modelname, cdmaterials, options.AnimationCache.Length > 0 ? options.AnimationCache : null, friction, options.IncludeSourceAnimations, context);
-        else if (kind == "prop") (qc, files, report, warnings) = PropPort.Port(source, destination, modelname, cdmaterials, context, variant == ModelVariant.Static);
-        else (qc, files, report, warnings) = RagdollPort.Port(source, destination, modelname, cdmaterials, options.IncludeSourceAnimations, friction, context);
+        else if (kind == "prop") (qc, files, report, warnings) = PropPort.Port(source, destination, modelname, cdmaterials, context, variant == ModelVariant.Static, overrides);
+        else (qc, files, report, warnings) = RagdollPort.Port(source, destination, modelname, cdmaterials, options.IncludeSourceAnimations, friction, context, overrides);
         var descriptor = Path.Combine(destination, "build.json");
         Json.Save(descriptor, new JsonObject
         {

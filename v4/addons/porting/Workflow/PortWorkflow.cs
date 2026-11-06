@@ -46,6 +46,7 @@ public static class PortWorkflow
         if (problem.Length > 0) throw new InvalidDataException($"Output namespace: {problem}");
         if (string.IsNullOrWhiteSpace(options.Project)) throw new InvalidDataException("Choose a workflow project folder.");
         if (options.ModelType is not ("auto" or "ragdoll" or "prop")) throw new InvalidDataException("Model type must be automatic, ragdoll or prop.");
+        ModelOverrides.Validate(options, assets);
         var project = WorkflowPaths.Project(options);
         foreach (var root in assets.Select(asset => Path.GetDirectoryName(asset.Source) ?? asset.Source).Distinct(StringComparer.OrdinalIgnoreCase))
             if (WorkflowPaths.Within(project, root) || WorkflowPaths.Within(root, project))
@@ -69,7 +70,7 @@ public static class PortWorkflow
     {
         return string.Join('|', options.Sources, Location(options.Project), options.Namespace, options.ModelType, Location(options.MaterialSource),
             Location(options.VrfExecutable), Location(options.Compiler), Location(options.Game), options.IncludeSourceAnimations, options.EmitNormal, options.Resolution,
-            options.StaticVariant, options.StaticResolution, options.CreatePlayermodels, options.Install, Location(options.GmodAddons));
+            options.StaticVariant, options.StaticResolution, options.CreatePlayermodels, options.Install, Location(options.GmodAddons), options.LoopAnimations);
     }
 
     /// <summary>Stamps selected archives and companions by size and time, without walking an entire game.</summary>
@@ -189,6 +190,7 @@ public static class PortWorkflow
         Drop("texture size", item => item.Resolution, kind => kind == "materials");
         Drop("normal map", item => item.EmitNormal, kind => kind == "materials");
         Drop("static texture size", item => item.StaticResolution, kind => kind == "static_materials");
+        Drop("loop animations", item => item.LoopAnimations, kind => kind == "native");
         Drop("addons folder", item => Location(item.GmodAddons), kind => kind == "install");
         var previous = saved.Assets.ToDictionary(asset => asset.Key);
         foreach (var asset in assets.Where(asset => previous.TryGetValue(asset.Key, out var old) && old != asset))

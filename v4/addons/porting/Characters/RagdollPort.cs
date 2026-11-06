@@ -40,9 +40,11 @@ public static partial class RagdollPort
     /// every SMD written before physics is remapped onto the combined skeleton. A model-space attachment gets a stationary
     /// origin bone, because no authored root can promise to stay put. Additive clips are written only when the export
     /// composed them over the bind pose, since a Source 1 sequence here cannot carry their delta encoding.</remarks>
+    /// <param name="overrides">The project's loop choices.</param>
     public static RagdollPortResult Port(string glb, string outDir, string modelname, string cdmaterials = "models/", bool includeSourceAnimations = false,
-        double frictionScale = 1.0, PortContext? context = null)
+        double frictionScale = 1.0, PortContext? context = null, ModelOverrides? overrides = null)
     {
+        overrides ??= ModelOverrides.None;
         glb = Path.GetFullPath(glb);
         outDir = Path.GetFullPath(outDir);
         Directory.CreateDirectory(outDir);
@@ -104,7 +106,7 @@ public static partial class RagdollPort
         {
             context?.Check();
             var clip = clips[index];
-            var authored = metadata.AnimationForClip(clip.Name) ?? throw new InvalidDataException($"Missing authored metadata for animation {clip.Name}");
+            var authored = overrides.Apply(metadata.AnimationForClip(clip.Name) ?? throw new InvalidDataException($"Missing authored metadata for animation {clip.Name}"), clip.Name);
             if (authored.Delta && !composed)
             {
                 warnings.Add($"{clip.Name}: source additive channels require explicit composition; clip omitted");

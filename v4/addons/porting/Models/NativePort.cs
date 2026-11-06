@@ -35,6 +35,10 @@ public sealed record NativePortOptions
     public bool DynamicProp { get; init; }
 
     public IReadOnlyList<(double Distance, string Source)>? LodSources { get; init; }
+
+    /// <summary>The project's loop choices, applied over each clip's authored flag.</summary>
+    public ModelOverrides Overrides { get; init; } = ModelOverrides.None;
+
     public double RagdollMass { get; init; } = 25.0;
     public double RagdollLimit { get; init; } = 25.0;
 
@@ -331,7 +335,8 @@ public static partial class NativePort
         {
             context?.Check();
             var clip = clips[index];
-            if (!metadata.Animations.TryGetValue(clip.Name, out var authored)) throw new InvalidDataException($"Missing authored metadata for sequence {clip.Name}");
+            if (!metadata.Animations.TryGetValue(clip.Name, out var source)) throw new InvalidDataException($"Missing authored metadata for sequence {clip.Name}");
+            var authored = options.Overrides.Apply(source, clip.Name);
             var (frames, count, sampling) = clip.SampleAuthored(skin, authored);
             var path = Path.Combine(outDir, Filename(clip.Name, index));
             try

@@ -35,6 +35,9 @@ public sealed record WorkflowOptions
     /// <summary>Where the published player animation sources are cached.</summary>
     public string AnimationCache { get; init; } = "";
 
+    /// <summary>Sequence names to loop whatever their source says, one per line; <c>*</c> loops all of them.</summary>
+    public string LoopAnimations { get; init; } = "";
+
     public bool Install { get; init; }
     public string GmodAddons { get; init; } = "";
 }
