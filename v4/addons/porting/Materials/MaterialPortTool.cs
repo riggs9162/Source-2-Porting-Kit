@@ -3,32 +3,29 @@ using System.Text.Json.Nodes;
 
 namespace PortingKit.Addons.Porting;
 
-/// <summary>Ports Source 2 materials, for models and for brush faces, into a game-ready Source 1 material tree.</summary>
+/// <summary>Ports Source 2 brush materials into a game-ready Source 1 material tree.</summary>
 /// <remarks>
-/// <para>Brush materials follow the recipe the Half-Life: Alyx brush pack was built with: LightmappedGeneric, surface properties translated
+/// <para>Materials follow the recipe the Half-Life: Alyx brush pack was built with: LightmappedGeneric, surface properties translated
 /// to stock names, every authored blend layer exported as its own material, projected decals keeping decal intent, and a separate
 /// emission texture carried by the unlit additive detail pass so it never takes the opacity alpha. Every resource exports into its own
 /// folder, because decoded maps from different materials otherwise collide under shared filenames.</para>
 /// <para>A material painted between two layers also gets a <c>_blend</c> material that shows both on a displacement. See <see cref="BlendMaterial"/>.</para>
-/// <para>Model materials follow the model workflow: VertexLitGeneric with Phong, one material per resource, and files under
-/// <c>materials/models/&lt;namespace&gt;</c>, because that is the folder the compiled model's <c>$cdmaterials</c> points at.</para>
+/// <para>Model materials are not ported here. The Model port builds them with its models, because their shader, Phong and folder
+/// depend on how the model is compiled.</para>
 /// </remarks>
 public sealed class MaterialPortTool : ITool
 {
-    private const string Implementation = "material-port-1";
     private const string DumpMarker = "--- Dump written to ";
 
     public ToolDefinition Definition { get; } = new("Material port", "Materials",
-        "Ports Source 2 materials from a VPK, a loose .vmat/.vmat_c or an exported folder into a game-ready materials tree, for brushes and for models.",
+        "Ports Source 2 brush materials from a VPK, a loose .vmat/.vmat_c or an exported folder into a game-ready materials tree.",
         [
             new("sources", "Materials", ParameterKind.Lines, Required: true, Description: "One per line: vpk:<vpk path>:<resource>.vmat_c, a loose .vmat or .vmat_c, or an exported folder."),
             new("output", "Output folder", ParameterKind.Directory, Required: true, Description: "Receives the materials tree."),
             new("namespace", "Namespace", ParameterKind.Text, "ports", Description: "Folder inside materials, for example my_addon/props."),
-            new("surface", "Surface", ParameterKind.Choice, "auto", Description: "Auto treats anything under materials/models as a model material and the rest as brush.", Choices: ["auto", "model", "brush"]),
             new("resolution", "Maximum resolution", ParameterKind.Choice, "original", Choices: ["512", "1024", "2048", "4096", "original"]),
             new("tool_size", "Hammer and compile size", ParameterKind.Choice, "off", Description: "Set this to the resolution your maps were built with. Hammer, compiles and hotspots then see that size while the game draws the full texture, so every brush face keeps its scale and shifts.", Choices: ["off", "512", "1024", "2048", "4096"]),
             new("brush_normals", "Brush normal maps", ParameterKind.Choice, "half", Description: "Compression breaks reflections on smooth surfaces into square blocks. Half stays uncompressed at half size, which takes the same space as compressed at full size. Full is four times that. Compressed brings the blocks back.", Choices: ["half", "full", "compressed"]),
-            new("emit_normal", "Ship a normal map", ParameterKind.Boolean, "true", Description: "Off drops $bumpmap and $phong, which is what a prop_static needs to keep its baked lighting."),
             new("vrf", "Source2Viewer-CLI", ParameterKind.File, Description: "Leave empty to use the tools.vrf setting, then PATH.")
         ]);
 
@@ -36,17 +33,15 @@ public sealed class MaterialPortTool : ITool
 
     private sealed record Prepared(string Vmat, string Resource, string Root, string TextureRoot, string? Archive, string? RawRoot);
 
-    private sealed class Run(ToolContext tool, PortContext port, string output, string space, string surface, int clamp, int toolSize, NormalStorage normalStorage, bool emitNormal, string? explicitVrf)
+    private sealed class Run(ToolContext tool, PortContext port, string output, string space, int clamp, int toolSize, NormalStorage normalStorage, string? explicitVrf)
     {
         public ToolContext Tool { get; } = tool;
         public PortContext Port { get; } = port;
         public string Output { get; } = output;
         public string Namespace { get; } = space;
-        public string Surface { get; } = surface;
         public int Clamp { get; } = clamp;
         public int ToolSize { get; } = toolSize;
         public NormalStorage NormalStorage { get; } = normalStorage;
-        public bool EmitNormal { get; } = emitNormal;
         private string? executable;
 
         public string Vrf => executable ??= Locate(explicitVrf, Tool.Host.Settings.Get("tools.vrf", ""));
@@ -64,8 +59,7 @@ public sealed class MaterialPortTool : ITool
         var clamp = resolution == "original" ? 0 : int.Parse(resolution, System.Globalization.CultureInfo.InvariantCulture);
         var toolSize = arguments.Text("tool_size") is var size && size == "off" ? 0 : int.Parse(size, System.Globalization.CultureInfo.InvariantCulture);
         var port = new PortContext(context.Host.Processes, (message, level) => context.Log(message, level == LogLevel.Info ? LogLevel.Debug : level), cancellationToken);
-        var run = new Run(context, port, output, space, arguments.Text("surface"), clamp, toolSize, Enum.Parse<NormalStorage>(arguments.Text("brush_normals"), ignoreCase: true), arguments.Boolean("emit_normal"), arguments.Text("vrf"));
-        var audits = new JsonArray();
+        var run = new Run(context, port, output, space, clamp, toolSize, Enum.Parse<NormalStorage>(arguments.Text("brush_normals"), ignoreCase: true), arguments.Text("vrf"));
         var brushes = new JsonArray();
         var artifacts = new List<Artifact>();
         var failures = 0;
@@ -80,8 +74,7 @@ public sealed class MaterialPortTool : ITool
                 foreach (var prepared in await Prepare(input, run))
                 {
                     cancellationToken.ThrowIfCancellationRequested();
-                    if (IsModel(prepared.Resource, run.Surface)) files += await PortModel(prepared, run, audits);
-                    else files += PortBrush(prepared, run, brushes, ref failures);
+                    files += PortBrush(prepared, run, brushes, ref failures);
                 }
             }
             catch (Exception exception) when (exception is not OperationCanceledException)
@@ -92,20 +85,13 @@ public sealed class MaterialPortTool : ITool
             }
         }
         var report = Path.Combine(context.OutputDirectory, "material-report.json");
-        Json.Save(report, new JsonObject { ["materials"] = audits, ["aliases"] = new JsonArray(), ["brushes"] = brushes });
+        Json.Save(report, new JsonObject { ["brushes"] = brushes });
         artifacts.Add(new(report, "Material report"));
         artifacts.Add(new(Path.Combine(output, "materials"), "Materials folder", "directory"));
         context.Report(1.0, "Done");
-        var summary = $"{audits.Count + brushes.Count - failures} of {audits.Count + brushes.Count} materials ported, {files} files written";
+        var summary = $"{brushes.Count - failures} of {brushes.Count} materials ported, {files} files written";
         if (failures > 0 && failures == inputs.Length) throw new InvalidDataException("No material could be ported. " + summary);
-        return new(summary, artifacts, JsonSerializer.SerializeToElement(new { materials = audits.Count, brushes = brushes.Count, failures, files }));
-    }
-
-    private static bool IsModel(string resource, string surface)
-    {
-        if (surface != "auto") return surface == "model";
-        var path = resource.Replace('\\', '/').ToLowerInvariant();
-        return path.StartsWith("materials/models/", StringComparison.Ordinal) || path.StartsWith("models/", StringComparison.Ordinal);
+        return new(summary, artifacts, JsonSerializer.SerializeToElement(new { brushes = brushes.Count, failures, files }));
     }
 
     private static Input Classify(string line)
@@ -187,8 +173,7 @@ public sealed class MaterialPortTool : ITool
         if (!File.Exists(vpk)) throw new FileNotFoundException($"VPK not found: {vpk}");
         var key = Digest.Text(resource)[..16];
         var folder = Path.Combine(run.Tool.OutputDirectory, "materialsrc", key);
-        var filters = resource.StartsWith("models/", StringComparison.Ordinal) ? $"{resource},materials/{resource}" : resource;
-        await Viewer(["-i", vpk, "-o", folder, "-d", "--threads", "1", "-e", "vmat_c,vtex_c", "-f", filters], folder, run);
+        await Viewer(["-i", vpk, "-o", folder, "-d", "--threads", "1", "-e", "vmat_c,vtex_c", "-f", resource], folder, run);
         var found = Directory.GetFiles(folder, "*.vmat", SearchOption.AllDirectories);
         if (found.Length != 1) throw new InvalidDataException($"VRF selected unexpected materials: [{string.Join(", ", found)}]");
         await ResolveDefaults(vpk, folder, found[0], run);
@@ -367,7 +352,7 @@ public sealed class MaterialPortTool : ITool
 
     private static MaterialOptions BrushOptions(VmatEntry entry, string surfaceprop, Run run) => new()
     {
-        ClampSize = run.Clamp, ToolSize = run.ToolSize, NormalStorage = run.NormalStorage, Branch = "gmod", Shader = "LightmappedGeneric", Surfaceprop = surfaceprop, Decal = entry.Decal, EmitNormal = run.EmitNormal && entry.Has("normal"),
+        ClampSize = run.Clamp, ToolSize = run.ToolSize, NormalStorage = run.NormalStorage, Branch = "gmod", Shader = "LightmappedGeneric", Surfaceprop = surfaceprop, Decal = entry.Decal, EmitNormal = entry.Has("normal"),
         Translucent = entry.Translucent, Alphatest = entry.Alphatest, Tintable = false, NormalGreen = "flip", GlowMode = "selfillum", PhongTintMode = "off"
     };
 
@@ -399,38 +384,6 @@ public sealed class MaterialPortTool : ITool
             ["layer_b_repeat"] = new JsonArray(blend.Repeat.Across, blend.Repeat.Down), ["adaptations"] = Strings(result.Notes), ["files"] = files
         };
         return written.Count;
-    }
-
-    /// <summary>Converts one model material the way the model workflow does, recording its source provenance.</summary>
-    private static async Task<int> PortModel(Prepared prepared, Run run, JsonArray audits)
-    {
-        VmatEntry entry;
-        JsonObject provenance;
-        if (prepared.Archive is not null)
-        {
-            var signature = Digest.Text($"{prepared.Archive}|{new FileInfo(prepared.Archive).Length}|{File.GetLastWriteTimeUtc(prepared.Archive):O}");
-            (entry, provenance, _) = await SemanticMaterials.Resolve(prepared.Resource, prepared.Vmat, prepared.RawRoot!, prepared.Archive, run.Tool.OutputDirectory, run.Vrf, signature, Implementation, run.Port);
-        }
-        else
-        {
-            entry = VmatParser.Parse(prepared.Vmat, prepared.Root, prepared.TextureRoot);
-            provenance = SemanticMaterials.MaterialProvenance(entry);
-            provenance["mode"] = "exported_vmat";
-        }
-        if (!entry.Buildable) throw new InvalidDataException($"No resolved base color for {prepared.Vmat}");
-        var target = Resources.UnderRoot($"models/{run.Namespace}", Resources.AddonMaterial(prepared.Resource));
-        var cut = target.LastIndexOf('/');
-        var parent = cut >= 0 ? target[..cut] : "";
-        var name = target[(cut + 1)..];
-        var materialPath = parent.Length > 0 ? $"models/{run.Namespace}/{parent}" : $"models/{run.Namespace}";
-        var options = new MaterialOptions { ClampSize = run.Clamp, EmitNormal = run.EmitNormal, Translucent = entry.Translucent, Alphatest = entry.Alphatest, Tintable = entry.Tintable };
-        var result = MaterialBuilder.Build(entry.ToSource(), Path.Combine(run.Output, "materials", materialPath), name, materialPath, options, run.Port.For(name));
-        audits.Add(new JsonObject
-        {
-            ["source"] = Resources.Token(prepared.Resource), ["target"] = target, ["status"] = "adapted", ["notes"] = Strings(entry.Warnings.Concat(result.Notes)), ["shader"] = entry.Shader,
-            ["target_shader"] = options.Shader, ["source_provenance"] = provenance
-        });
-        return result.Written.Count;
     }
 
     private static JsonArray Strings(IEnumerable<string> values) => new(values.Select(value => (JsonNode?)JsonValue.Create(value)).ToArray());
