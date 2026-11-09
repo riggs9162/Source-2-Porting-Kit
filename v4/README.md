@@ -10,7 +10,7 @@ into Source 1 games such as Garry's Mod. The sidebar groups them under
 **Materials**, **Models**, and **Sounds**:
 
 - **Models > Model port** turns Source 2 models into a compiled, verified addon.
-- **Materials > Material port** ports brush and model materials on their own.
+- **Materials > Material port** ports brush materials on their own.
 - **Materials > Hotspot editor** edits trim-sheet regions.
 
 Sounds is empty until its tools are implemented. Particles may become a category
@@ -109,12 +109,13 @@ conflicting files.
 
 ## Port materials
 
-Open **Materials > Material port** for materials that belong to brushes and faces
-rather than a model, using `vpk:<vpk path>:<resource>.vmat_c`, a loose material, or
-an exported folder. **Surface** decides the shader: brush materials use
-`LightmappedGeneric` with stock surface properties, every blend layer as its own
-material, and decals and glass kept; model materials use `VertexLitGeneric`. **Auto**
-treats anything under `materials/models/` as a model material. A namespace ending in
+Open **Materials > Material port** for materials that belong to brushes and faces,
+using `vpk:<vpk path>:<resource>.vmat_c`, a loose material, or an exported folder.
+Every material becomes `LightmappedGeneric` with stock surface properties, every
+blend layer as its own material, and decals and glass kept. A material with an
+authored normal map always ships its `$bumpmap`. Brushes get no Phong, because the
+brush shader cannot read a Phong exponent texture. Model materials are not ported
+here: the Model port builds them with their models. A namespace ending in
 the resource's own folder uses that folder once: `my_addon/tiles` with
 `materials/tiles/foo` gives `materials/my_addon/tiles/foo`.
 

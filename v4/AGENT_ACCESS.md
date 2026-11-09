@@ -118,7 +118,8 @@ distribution.
 
 ## Porting
 
-`porting/models` ports whole models and `porting/materials` ports materials alone.
+`porting/models` ports whole models with their materials, and `porting/materials`
+ports brush materials alone.
 Both are long jobs, so use `submit` and poll. Put the inputs in a JSON file; `sources`
 takes one entry per line:
 
