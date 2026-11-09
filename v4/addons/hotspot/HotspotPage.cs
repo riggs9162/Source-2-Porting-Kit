@@ -318,7 +318,9 @@ internal sealed class HotspotEditor : UserControl
             var loaded = await Task.Run(() =>
             {
                 var vmt = material ? dialog.FileName : MaterialFiles.MaterialFor(dialog.FileName) ?? "";
-                var texture = material ? MaterialFiles.TextureFor(vmt) ?? throw new InvalidDataException("Could not find this material's base texture.") : dialog.FileName;
+                // A material loads as itself, so a layered brush VMT previews its colour at the size of its black $basetexture.
+                if (material && MaterialFiles.TextureFor(vmt) is null) throw new InvalidDataException("Could not find this material's base texture.");
+                var texture = material ? vmt : dialog.FileName;
                 var preview = TexturePreview.Load(texture, token);
                 try
                 {

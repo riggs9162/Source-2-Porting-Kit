@@ -14,11 +14,7 @@ public sealed record TexturePreview(Bitmap Bitmap, int Width, int Height) : IDis
     {
         token.ThrowIfCancellationRequested();
         var extension = Path.GetExtension(path).ToLowerInvariant();
-        if (extension == ".vmt")
-        {
-            path = MaterialFiles.TextureFor(path) ?? throw new InvalidDataException("Could not resolve this VMT's base texture. Check its $basetexture reference and materials folder.");
-            extension = Path.GetExtension(path).ToLowerInvariant();
-        }
+        if (extension == ".vmt") return LoadMaterial(path, token);
         if (extension == ".vtf") return LoadVtf(path, token);
         if (extension == ".tga") return LoadTga(path, token);
         if (extension is not (".png" or ".jpg" or ".jpeg" or ".bmp" or ".gif" or ".tif" or ".tiff"))
@@ -36,6 +32,22 @@ public sealed record TexturePreview(Bitmap Bitmap, int Width, int Height) : IDis
             return new(bitmap, source.Width, source.Height);
         }
         catch { bitmap.Dispose(); throw; }
+    }
+
+    /// <summary>Shows the material's colour while keeping the $basetexture size, because rectangles are pixels of the base.</summary>
+    private static TexturePreview LoadMaterial(string material, CancellationToken token)
+    {
+        var basePath = MaterialFiles.TextureFor(material) ?? throw new InvalidDataException("Could not resolve this VMT's base texture. Check its $basetexture reference and materials folder.");
+        var colourPath = MaterialFiles.ColorTextureFor(material) ?? basePath;
+        if (string.Equals(Path.GetFullPath(colourPath), Path.GetFullPath(basePath), StringComparison.OrdinalIgnoreCase)) return Load(basePath, token);
+        var colour = Load(colourPath, token);
+        try
+        {
+            int width, height;
+            using (var size = Load(basePath, token)) (width, height) = (size.Width, size.Height);
+            return colour with { Width = width, Height = height };
+        }
+        catch { colour.Dispose(); throw; }
     }
 
     private static void CheckSize(int width, int height)

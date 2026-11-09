@@ -104,6 +104,9 @@ in the job output directory. Generation/detection also write a Hammer++ `.rect`.
 Agents edit `sheet.json` and call `hotspot/convert` to validate and export. Conversion
 defaults to the job folder; an explicit `--output` path is backed up before replacing.
 Detection also accepts a VMT as `--texture` and resolves its base texture automatically.
+A brush VMT that the Material port layered for its compile size has a black `$basetexture`
+and its colour in `$detail`, so the editor and detection read the detail (or `%tooltexture`)
+while keeping the base texture's size for the rectangle coordinates.
 The input cannot be overwritten. Material linking is a separate explicit operation
 and validates the rectangle map against the resolved base texture first.
 Inspection reports a `suggestedScaleDivisor` for oversized pixel sheets; conversion

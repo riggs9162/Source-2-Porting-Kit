@@ -54,9 +54,28 @@ public static class MaterialFiles
         return Path.GetFullPath(Path.Combine(MaterialsRoot(material) ?? Path.GetDirectoryName(Path.GetFullPath(material))!, reference));
     }
 
-    public static string? TextureFor(string material)
+    /// <summary>Resolves the $basetexture, whose size is the one Hammer++ and vbsp map hotspot rectangles against.</summary>
+    public static string? TextureFor(string material) => Find(material, Reference(material, "$basetexture"));
+
+    /// <summary>Resolves the image that shows the material's colour, which is not always its $basetexture.</summary>
+    /// <remarks>A brush material layered for its compile size has a black $basetexture and carries its colour as an additive detail
+    /// layer at the same UVs ($detailblendmode 1, $detailscale 1). Previewing the base would show a black sheet, so the detail is
+    /// shown instead, and %tooltexture is the fallback when the detail cannot be found.</remarks>
+    public static string? ColorTextureFor(string material)
     {
-        var reference = Reference(material, "$basetexture");
+        var entries = Read(ReadBounded(material)).Entries;
+        string? Value(string key) => entries.FirstOrDefault(e => e.Key.Value.Equals(key, StringComparison.OrdinalIgnoreCase))?.Value.Value;
+        static bool IsOne(string? value) => double.TryParse(value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var n) && n == 1;
+        if (IsOne(Value("$detailblendmode")) && IsOne(Value("$detailscale")))
+        {
+            var colour = Find(material, Value("$detail")) ?? Find(material, Value("%tooltexture"));
+            if (colour is not null) return colour;
+        }
+        return Find(material, Value("$basetexture"));
+    }
+
+    private static string? Find(string material, string? reference)
+    {
         if (string.IsNullOrWhiteSpace(reference)) return null;
         var withoutExtension = reference.EndsWith(".vtf", StringComparison.OrdinalIgnoreCase) ? reference[..^4] : reference;
         var root = MaterialsRoot(material);
