@@ -9,6 +9,7 @@ internal sealed class SettingsPage : UserControl
     private readonly NumericUpDown cache = new() { Minimum = 16, Maximum = 65536, Width = 180, Increment = 128 };
     private readonly TextBox vrf = new() { Width = 560 };
     private readonly TextBox studiomdl = new() { Width = 560 };
+    private readonly TextBox ffmpeg = new() { Width = 560 };
 
     public SettingsPage(KitHost host)
     {
@@ -27,10 +28,13 @@ internal sealed class SettingsPage : UserControl
         layout.Controls.Add(KitStyle.Label("Worker and cache budget changes apply after restarting V4."));
         vrf.Text = host.Settings.Get("tools.vrf", "");
         studiomdl.Text = host.Settings.Get("tools.studiomdl", "");
+        ffmpeg.Text = host.Settings.Get("tools.ffmpeg", "");
         layout.Controls.Add(KitStyle.Label("Source2Viewer-CLI", 10, true));
         layout.Controls.Add(ProgramRow(vrf));
         layout.Controls.Add(KitStyle.Label("studiomdl", 10, true));
         layout.Controls.Add(ProgramRow(studiomdl));
+        layout.Controls.Add(KitStyle.Label("ffmpeg", 10, true));
+        layout.Controls.Add(ProgramRow(ffmpeg));
         layout.Controls.Add(KitStyle.Label("Porting tools use these programs unless a tool names its own."));
         var actions = new FlowLayoutPanel { Width = 740, Height = 48, Padding = new(0, 8, 0, 0) };
         actions.Controls.Add(KitStyle.Button("Save settings", Save));
@@ -70,6 +74,7 @@ internal sealed class SettingsPage : UserControl
             await host.Settings.SetAsync("runtime", new HostOptions((int)workers.Value, (int)cache.Value).Validate());
             await host.Settings.SetAsync("tools.vrf", vrf.Text.Trim());
             await host.Settings.SetAsync("tools.studiomdl", studiomdl.Text.Trim());
+            await host.Settings.SetAsync("tools.ffmpeg", ffmpeg.Text.Trim());
             MessageBox.Show(this, "Settings saved.", AppIdentity.Name);
         }
         catch (Exception exception)
