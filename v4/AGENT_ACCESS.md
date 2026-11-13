@@ -100,7 +100,7 @@ For example, a `settings.set` request can contain:
 
 Use `runtime` and `appearance` for host settings. `tools.vrf` and `tools.studiomdl`
 hold the Source2Viewer-CLI and StudioMDL paths the porting tools fall back to;
-`tools.ffmpeg` is reserved for future add-ons. Use `addon_id` to read or write a
+`tools.ffmpeg` is the ffmpeg the soundscape port decodes sounds with. Use `addon_id` to read or write a
 loaded add-on's own settings.
 These calls use the same in-memory store as that add-on. Add-on settings may be
 read only when a page opens or at startup; the response conservatively marks them
@@ -146,6 +146,30 @@ from a prop's default materials. `texture_sizes` takes `model: size` or
 ends failed may still have produced a package: `project/port-report.md` lists each
 stage, and `project/addon/` holds every model that passed. A failed stage for one
 model never blocks the others, so read the report as well as the job status.
+
+## Soundscapes
+
+`soundscapes/list` lists the soundscapes in a pack or folder, and `soundscapes/port`
+ports them with their sound events and sounds. Neither has a sidebar form; the
+desktop uses **Sounds > Soundscape port**.
+
+```json
+{
+  "source": "vpk:S:/SteamLibrary/steamapps/common/Half-Life Alyx/game/hlvr/pak01_dir.vpk:scripts/",
+  "soundscapes": "a2_hideout_*",
+  "output": "A:/ports/hideout",
+  "sound_prefix": "my_ports/hlvr",
+  "script_name": "soundscapes_my_map"
+}
+```
+
+`soundscapes` takes one name per line, with `*` as a wildcard, and soundscapes those
+play are ported too. `events` adds sound events no picked soundscape uses.
+`port_sounds` set to false writes only the script and the Lua definitions, which
+takes seconds and needs no ffmpeg. The job's `soundscape-report.json` lists every
+soundscape, sound event, sound and note; read it as well as the job status, because
+a sound that could not be decoded is a note, not a failure. See the
+[soundscape guide](addons/soundscapes/README.md) for what is translated and how.
 
 ## MCP connection
 

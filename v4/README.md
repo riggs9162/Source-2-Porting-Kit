@@ -12,9 +12,9 @@ into Source 1 games such as Garry's Mod. The sidebar groups them under
 - **Models > Model port** turns Source 2 models into a compiled, verified addon.
 - **Materials > Material port** ports brush materials on their own.
 - **Materials > Hotspot editor** edits trim-sheet regions.
+- **Sounds > Soundscape port** ports soundscapes with their sound events and sounds.
 
-Sounds is empty until its tools are implemented. Particles may become a category
-when particle tools are added.
+Particles may become a category when particle tools are added.
 
 ## Run
 
@@ -32,9 +32,10 @@ remain usable. Running `Build.ps1` directly stops at the first build error.
 The desktop, CLI, backend, and included add-ons use the libraries shipped with
 the .NET SDK. The optional MCP entry point uses the pinned official C# MCP SDK.
 
-Porting also needs two external programs: Source2Viewer-CLI to read Source 2 assets
-and StudioMDL to compile models. Set their paths once under **Settings**. StudioMDL
-CE works; the game folder holding `gameinfo.txt` is found beside it automatically.
+Porting also needs external programs: Source2Viewer-CLI to read Source 2 assets,
+StudioMDL to compile models, and ffmpeg to decode sounds. Set their paths once under
+**Settings**. StudioMDL CE works; the game folder holding `gameinfo.txt` is found
+beside it automatically.
 
 ## Included add-ons
 
@@ -42,6 +43,7 @@ CE works; the game folder holding `gameinfo.txt` is found beside it automaticall
 | --- | --- |
 | `addons/hotspot/` | Native hotspot editor, bounded VTF/image previews, Source 2/Hammer++ rectangle conversion, detection, and VMT linking |
 | `addons/porting/` | Native model and material porting: Source 2 Viewer export, SMD/QC sources, physics, VMT/VTF materials, compiling, audits, and addon packaging |
+| `addons/soundscapes/` | Soundscape browser and player, Source 2 to Source 1 soundscape conversion, Lua sound event definitions, and looped WAV sounds |
 
 ## Port models
 
@@ -162,6 +164,30 @@ layout presets, region detection, fit previews, and recovery drafts. Its process
 operations are available through the CLI and MCP without separate sidebar forms.
 See the [hotspot guide](addons/hotspot/README.md) for formats, shortcuts, and agent examples.
 
+## Port soundscapes
+
+Open **Sounds > Soundscape port** and paste a game's pack into **Source**:
+
+```text
+vpk:S:/SteamLibrary/steamapps/common/Half-Life Alyx/game/hlvr/pak01_dir.vpk:scripts/
+```
+
+Every soundscape in the pack is listed at once. Select one to see the sounds it
+plays and the script it becomes, and press **Play soundscape** to hear it. Tick the
+ones you want, choose an output folder and a sound folder such as `my_name/hlvr`,
+and press **Port**.
+
+The output is laid out as a Garry's Mod addon. `scripts/` holds the soundscapes as
+Source 1 rules, `lua/autorun/` registers every sound event they use under its
+original name, and `sound/<sound folder>/` holds the sounds at the paths the game
+keeps them under, as WAV files with their loop points. Name the script
+`soundscapes_<map name>` and that map loads it by itself.
+
+Source 1 soundscapes that the game ships are ported too, and rules that are already
+Source 1 are kept as written. See the [soundscape guide](addons/soundscapes/README.md)
+for how events, volumes, placement and loops are translated, and what Source 1
+cannot play.
+
 ## Personalize your workshop
 
 Open **Appearance** in the sidebar or toolbar. Choose Graphite, Blueprint, or
@@ -185,6 +211,8 @@ documents the shared styling API.
 v4/
   addons/                   # Independently built, automatically discovered folders
     hotspot/                # Editor, formats, texture previews, and agent operations
+    porting/                # Model and material porting
+    soundscapes/            # Soundscape browser, conversion, sound events, and sounds
   src/
     Kit.Contracts/          # UI-independent add-on, tool, asset, and service APIs
     Kit.Core/               # Loader, jobs, hooks, settings, workspaces, cache, processes
