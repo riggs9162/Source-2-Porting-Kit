@@ -58,7 +58,8 @@ Pitch and random ranges carry over: Source 2's `pitch = 1.0` with
 
 A wave in a Source 1 rule is pointed at its ported copy when the game ships that
 sound. A wave the game does not ship is a stock Half-Life 2 sound, so it keeps its
-stock path.
+stock path. Sound events do the same: a few still name Half-Life 2 files the game no
+longer ships, such as `ambient/wind/wind_snippet1`, and those play from the stock path.
 
 A rule with an `origin` or a `position` always gets a `soundlevel`. Garry's Mod
 plays a placed random sound everywhere when it has none.

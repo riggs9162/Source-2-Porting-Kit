@@ -287,10 +287,17 @@ public sealed class SoundscapePorter(SoundscapeLibrary library, EventTable table
     }
 
     /// <summary>Records that a sound is needed and returns the path it will play from.</summary>
+    /// <remarks>Half-Life: Alyx events still name some Half-Life 2 sounds that the game no longer ships. Those keep
+    /// the path Source 1 already has them under, because there is nothing to port and Garry's Mod mounts the originals.</remarks>
     /// <param name="copy">Above 1, names a separate copy of the file instead of the file itself.</param>
     private string Use(string source, HashSet<string>? usage, int copy = 1)
     {
         var path = source.Replace('\\', '/').TrimStart('/');
+        if (!hasSound(path))
+        {
+            result.Warnings.Add($"The game does not ship {path}, so the stock sound of that name is played");
+            return WavePath(path, "");
+        }
         if (sounds.Add(path)) result.Sounds.Add(path);
         usage?.Add(path);
         var wave = WavePath(path, options.SoundPrefix);
